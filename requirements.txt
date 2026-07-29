@@ -4,9 +4,9 @@ pydantic==2.12.5
 PyYAML==6.0.3
 requests==2.33.1  # Added for fetching models
 sentence-transformers==5.6.0
-scikit-learn==1.9.0
+scikit-learn==1.7.2
 torch==2.12.1  # Required by sentence-transformers; CI installs the CPU-only wheel
-numpy==2.5.0
+numpy==2.2.6
 arxiv==4.0.0  # arXiv API integration
 feedparser==6.0.12  # For arXiv RSS feeds
 python-dateutil==2.9.0.post0  # Date handling for literature search
