@@ -1,0 +1,12 @@
+.venv
+venv
+logs
+__pycache__
+*.pyc
+results/app_log_*.txt
+results
+.worktree/
+.env
+.audit/
+.loop/
+.cache/
