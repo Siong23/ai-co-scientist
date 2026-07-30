@@ -25,7 +25,7 @@ class Hypothesis:
         self.feasibility_review: Optional[str] = None
         self.elo_score: float = 1200.0  # initial Elo score
         self.review_comments: List[str] = []
-        self.references: List[str] = []
+        self.references: List[Dict] = []
         self.is_active: bool = True
         self.parent_ids: List[str] = []  # Store IDs of parent hypotheses
 
@@ -48,6 +48,13 @@ class ResearchGoal:
     def __init__(
         self,
         description: str,
+        preferences: str = (
+            "Novelty, feasibility, scientific validity, practical applicability, "
+            "clarity, and potential impact."
+        ),
+        idea_attributes: str = (
+            "novelty, feasibility, correctness, utility, specificity, and originality"
+        ),
         constraints: Optional[Dict] = None,
         llm_model: Optional[str] = None,
         num_hypotheses: Optional[int] = None,
@@ -57,6 +64,8 @@ class ResearchGoal:
         top_k_hypotheses: Optional[int] = None,
     ):
         self.description = description
+        self.preferences = preferences
+        self.idea_attributes = idea_attributes
         self.constraints = constraints if constraints else {}
         # Store runtime settings, falling back to config defaults if not provided
         self.llm_model = (
@@ -104,6 +113,13 @@ class ContextMemory:
 
 class ResearchGoalRequest(BaseModel):
     description: str
+    preferences: str = (
+        "Novelty, feasibility, scientific validity, practical applicability, "
+        "clarity, and potential impact."
+    )
+    idea_attributes: str = (
+        "novelty, feasibility, correctness, utility, specificity, and originality"
+    )
     constraints: Optional[Dict] = {}
     # Add optional fields for advanced settings
     llm_model: Optional[str] = None
@@ -122,7 +138,7 @@ class HypothesisResponse(BaseModel):
     feasibility_review: Optional[str]
     elo_score: float
     review_comments: List[str]
-    references: List[str]
+    references: List[Dict]
     is_active: bool
     # parent_ids: List[str] # Add if needed in API response
 

@@ -1,6 +1,7 @@
 import json
 import math
 import random
+import re
 from typing import Dict, List, Tuple
 
 # Import necessary components from other modules
@@ -119,8 +120,14 @@ def call_llm_for_reflection(hypothesis_text: str, temperature: float = 0.5, mode
             logger.warning("Invalid feasibility review value received: %s", feasibility)
 
         review_data["comment"] = parsed_data.get("comment", "No comment provided.")
-        review_data["references"] = parsed_data.get("references", [])
-        if not isinstance(review_data["references"], list):
+        # review_data["references"] = parsed_data.get("references", [])
+        # if not isinstance(review_data["references"], list):
+        #     logger.warning("Invalid references format received: %s", review_data["references"])
+        #     review_data["references"] = []
+        references = parsed_data.get("references", [])
+        if isinstance(references, list):
+            review_data["references"] = references
+        else:
             logger.warning("Invalid references format received: %s", review_data["references"])
             review_data["references"] = []
 
@@ -134,35 +141,182 @@ def call_llm_for_reflection(hypothesis_text: str, temperature: float = 0.5, mode
 
 # --- Ranking Helpers (Moved from main.py) ---
 
+def format_references(references):
+    if not references:
+        return "No references provided."
 
-def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
+    formatted = []
+
+    for ref in references:
+        if isinstance(ref, dict):
+            title = ref.get("title", "Unknown title")
+            authors = ref.get("authors", "")
+            year = ref.get("year", "")
+
+            formatted.append(
+                f"{title} ({authors}, {year})"
+            )
+        else:
+            formatted.append(str(ref))
+
+    return "\n".join(formatted)
+
+def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: ResearchGoal) -> tuple[Hypothesis, str]:
     """Compares two hypotheses based on novelty and feasibility scores."""
 
-    def score(h: Hypothesis) -> int:
-        mapping = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, None: 0, "ERROR": 0}  # Handle ERROR case
-        score_novelty = mapping.get(h.novelty_review, 0) if isinstance(h.novelty_review, str) else 0
-        score_feasibility = mapping.get(h.feasibility_review, 0) if isinstance(h.feasibility_review, str) else 0
-        return score_novelty + score_feasibility
+    # def score(h: Hypothesis) -> int:
+    #     mapping = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, None: 0, "ERROR": 0}  # Handle ERROR case
+    #     score_novelty = mapping.get(h.novelty_review, 0) if isinstance(h.novelty_review, str) else 0
+    #     score_feasibility = mapping.get(h.feasibility_review, 0) if isinstance(h.feasibility_review, str) else 0
+    #     return score_novelty + score_feasibility
 
-    scoreA = score(hypoA)
-    scoreB = score(hypoB)
+    # scoreA = score(hypoA)
+    # scoreB = score(hypoB)
 
-    if scoreA > scoreB:
-        winner = hypoA
-    elif scoreB > scoreA:
-        winner = hypoB
-    else:
-        winner = random.choice([hypoA, hypoB])  # Tie-breaker
+    # if scoreA > scoreB:
+    #     winner = hypoA
+    # elif scoreB > scoreA:
+    #     winner = hypoB
+    # else:
+    #     winner = random.choice([hypoA, hypoB])  # Tie-breaker
 
-    logger.info(
-        "Debate: %s (score %d) vs %s (score %d) => Winner: %s",
-        hypoA.hypothesis_id,
-        scoreA,
-        hypoB.hypothesis_id,
-        scoreB,
-        winner.hypothesis_id,
+    # logger.info(
+    #     "Debate: %s (score %d) vs %s (score %d) => Winner: %s",
+    #     hypoA.hypothesis_id,
+    #     scoreA,
+    #     hypoB.hypothesis_id,
+    #     scoreB,
+    #     winner.hypothesis_id,
+    # )
+    # return winner
+
+    reviewA = f"""
+    Novelty Review:
+    {hypoA.novelty_review}
+
+    Feasibility Review:
+    {hypoA.feasibility_review}
+
+    Reviewer Comments:
+    {chr(10).join(map(str, hypoA.review_comments))}
+
+    References:
+    {format_references(hypoA.references)}
+    """
+
+    reviewB = f"""
+    Novelty Review:
+    {hypoB.novelty_review}
+
+    Feasibility Review:
+    {hypoB.feasibility_review}
+
+    Reviewer Comments:
+    {chr(10).join(map(str, hypoB.review_comments))}
+
+    References:
+    {format_references(hypoB.references)}
+    """
+
+    # Format constraints into readable bullet points
+    considerations = (
+        "\n".join(f"- {k}: {v}" for k, v in research_goal.constraints.items())
+        if research_goal.constraints
+        else "None"
     )
-    return winner
+
+    prompt = f"""
+    You are an expert evaluator tasked with comparing two hypotheses.
+
+    Evaluate the two provided hypotheses (Hypothesis 1 and Hypothesis 2)
+    and determine which one is superior based on the specified {research_goal.idea_attributes}.
+    Provide a concise rationale for your selection, concluding with the phrase "better hypothesis: <1 or 2>".
+
+    Goal:
+    {research_goal.description}
+
+    Evaluation Criteria:
+    {research_goal.preferences}
+
+    Considerations:
+    {considerations}
+
+    Each hypothesis includes an independent review.
+    These reviews may contain numerical scores.
+    Disregard these scores in your comparative analysis,
+    as they may not be directly comparable across reviews.
+
+    Hypothesis 1:
+    {hypoA.text}
+
+    Hypothesis 2:
+    {hypoB.text}
+
+    Review of Hypothesis 1:
+    {reviewA}
+
+    Review of Hypothesis 2:
+    {reviewB}
+
+    Reasoning and conclusion (end with "better hypothesis: <1 or 2>"): 
+    """
+
+    response = call_llm(
+        prompt,
+        temperature=0.2,
+        model=research_goal.llm_model,
+    )
+
+    logger.info("Pairwise ranking response:\n%s", response)
+
+    try:
+        winner_index = parse_pairwise_result(response)
+
+        winner = hypoA if winner_index == 1 else hypoB
+
+    except ValueError:
+
+        logger.warning(
+            "Could not parse LLM ranking response.\n%s",
+            response,
+        )
+
+        winner = random.choice([hypoA, hypoB])
+
+    return winner, response
+
+    # match = re.search(
+    #     r"better\s+(?:idea|hypothesis)\s*:\s*([12])",
+    #     response,
+    #     re.IGNORECASE,
+    # )
+
+    # if match:
+    #     winner = hypoA if match.group(1) == "1" else hypoB
+    # else:
+    #     logger.warning("Could not parse LLM ranking. Using random winner.")
+    #     winner = random.choice([hypoA, hypoB])
+
+    # return winner, response
+
+def parse_pairwise_result(response: str) -> int:
+    """
+    Parse the LLM response and return the winning hypothesis index (1 or 2).
+    Raises:
+        ValueError: if no winner can be identified.
+    """
+    patterns = [
+        r"better\s+(?:idea|hypothesis)\s*:\s*([12])",
+        r"winner\s*:\s*([12])",
+        r"better\s+(?:idea|hypothesis)\s+is\s+([12])",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, response, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+
+    raise ValueError("Could not determine winner.")
 
 
 def update_elo(winner: Hypothesis, loser: Hypothesis, k_factor: int):
@@ -306,7 +460,12 @@ class RankingAgent:
 
         logger.info(f"Running tournament with {len(pairs)} pairs.")
         for hA, hB in pairs:
-            winner = run_pairwise_debate(hA, hB)
+            # winner = run_pairwise_debate(hA, hB)
+            winner, reasoning = run_pairwise_debate(
+                hA,
+                hB,
+                research_goal,
+            )
             loser = hB if winner == hA else hA
             # Pass the specific k_factor
             update_elo(winner, loser, k_factor=k_factor)
@@ -318,6 +477,7 @@ class RankingAgent:
                     "loser": loser.hypothesis_id,
                     "winner_score_after": winner.elo_score,
                     "loser_score_after": loser.elo_score,
+                    "reasoning": reasoning,
                 }
             )
 
