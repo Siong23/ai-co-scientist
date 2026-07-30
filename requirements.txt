@@ -1,6 +1,5 @@
 openai==2.44.0
 gradio==6.19.0
-gradio-client>=1.3.0
 pydantic==2.12.5
 PyYAML==6.0.3
 requests==2.33.1  # LM Studio model discovery
@@ -11,4 +10,3 @@ numpy==2.2.6
 arxiv==4.0.0  # arXiv API integration
 feedparser==6.0.12  # For arXiv RSS feeds
 python-dateutil==2.9.0.post0  # Date handling for literature search
-langchain-core==1.4.9
