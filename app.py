@@ -201,7 +201,7 @@ def execute_cycle(
     os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = os.path.join(log_dir, f"app_log_{timestamp}.txt")
-    with open(log_file, "w") as f:
+    with open(log_file, "w", encoding="utf-8") as f:
         f.write(f"LOGGING FOR THIS GOAL: {research_goal.description}\n")
         f.write("--- Endpoint /run_cycle START ---\n")
 
@@ -214,7 +214,7 @@ def execute_cycle(
 
         # Log all steps and hypotheses
         steps = cycle_details.get("steps", {})
-        with open(log_file, "a") as f:
+        with open(log_file, "a", encoding="utf-8") as f:
             for step_name, step_data in steps.items():
                 hypos = step_data.get("hypotheses", [])
                 f.write(f"Step: {step_name} | {len(hypos)} hypotheses\n")
@@ -618,7 +618,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
 
         # Log final rankings if log_file is provided
         if log_file:
-            with open(log_file, "a") as f:
+            with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"--- Final Rankings Section (step: {final_step}) ---\n")
                 for i, hypo in enumerate(final_hypotheses[:10]):
                     f.write(
@@ -656,7 +656,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         """
         # Log missing final rankings if log_file is provided
         if log_file:
-            with open(log_file, "a") as f:
+            with open(log_file, "a", encoding="utf-8") as f:
                 f.write("--- Final Rankings Section: No hypotheses available for final ranking. ---\n")
 
     return html
