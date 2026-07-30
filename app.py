@@ -719,6 +719,27 @@ def create_gradio_interface():
         }
         .orange { background-color: #fff3cd; border: 1px solid #ffeaa7; }
         .blue { background-color: #d1ecf1; border: 1px solid #bee5eb; }
+
+        /* Universal Fix for Dark Mode: Targets absolutely everything inside the custom HTML block */
+        .dark div[id^="html-"],
+        .dark div[id^="html-"] * {
+            /* 1. Force all text to stay perfectly white */
+            color: #ffffff !important;
+        }
+
+        /* Universal Background Fix: Automatically converts any forced light/white panels to dark */
+        .dark div[id^="html-"] div,
+        .dark div[id^="html-"] details,
+        .dark div[id^="html-"] section {
+            background-color: var(--block-background-fill) !important;
+            border-color: var(--border-color-primary) !important;
+        }
+
+        /* Accent Fix: Keeps specific highlight containers readable (like things with heavy green borders) */
+        .dark div[id^="html-"] div[style*="#28a745"] {
+            background-color: #064e3b !important; /* Soft deep emerald instead of blinding light green */
+            border-color: #28a745 !important;
+        }
         """,
     ) as demo:
         # Header
