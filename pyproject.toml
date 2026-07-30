@@ -2,7 +2,7 @@
 testpaths = ["tests"]
 addopts = "-m 'not integration and not network'"
 markers = [
-    "integration: live LLM calls that cost money (needs OPENROUTER_API_KEY)",
+    "integration: live calls to the configured local LM Studio server",
     "network: free external network access (arXiv API, HF model downloads)",
 ]
 

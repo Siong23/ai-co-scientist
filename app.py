@@ -6,7 +6,6 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
-import requests
 
 from app.agents import SupervisorAgent
 
@@ -17,11 +16,10 @@ from app.run_store import delete_run, get_reports_dir, history_html, list_runs, 
 from app.tools.arxiv_search import ArxivSearchTool
 from app.utils import (
     classify_llm_error,
-    fetch_free_models,
-    get_deployment_environment,
-    is_huggingface_space,
+    fetch_lmstudio_models,
+    get_lmstudio_base_url,
+    get_lmstudio_model,
     logger,
-    order_free_models_for_demo,
 )
 
 # Global state for the Gradio app
@@ -29,9 +27,9 @@ global_context = ContextMemory()
 supervisor = SupervisorAgent()
 current_research_goal: Optional[ResearchGoal] = None
 available_models: List[str] = []
-CONFIGURED_LLM_MODEL = config.get("llm_model", "")
+CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
-CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "300"))
+CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "900"))
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 
 # Configure logging for Gradio
@@ -39,82 +37,39 @@ logging.basicConfig(level=logging.INFO)
 
 
 def fetch_available_models():
-    """Fetch available models from OpenRouter with environment-based filtering."""
+    """Fetch selectable models from the local LM Studio server."""
     global available_models
 
-    # Detect deployment environment
-    deployment_env = get_deployment_environment()
-    is_hf_spaces = is_huggingface_space()
-
-    logger.info(f"Detected deployment environment: {deployment_env}")
-    logger.info(f"Is Hugging Face Spaces: {is_hf_spaces}")
-
-    try:
-        # Apply filtering based on environment
-        if is_hf_spaces:
-            # Use only dynamically checked free models for Hugging Face Spaces.
-            available_models = fetch_free_models() or ([CONFIGURED_LLM_MODEL] if CONFIGURED_LLM_MODEL else [])
-            logger.info(f"Hugging Face Spaces: Filtered to {len(available_models)} free models")
-        else:
-            response = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
-            response.raise_for_status()
-            models_data = response.json().get("data", [])
-
-            # Extract all model IDs
-            all_models = sorted([model.get("id") for model in models_data if model.get("id")])
-
-            # Use all models in local/development environment
-            available_models = all_models
-            logger.info(f"Local/Development: Using all {len(available_models)} models")
-
-    except Exception as e:
-        logger.error(f"Failed to fetch models from OpenRouter: {e}")
-        cached_free_models = fetch_free_models()
-        available_models = cached_free_models or ([SAFE_FALLBACK_LLM_MODEL] if SAFE_FALLBACK_LLM_MODEL else [])
-
+    discovered_models = fetch_lmstudio_models()
+    available_models = discovered_models or ([CONFIGURED_LLM_MODEL] if CONFIGURED_LLM_MODEL else [])
+    logger.info("LM Studio exposed %d selectable models.", len(discovered_models))
     return available_models
 
 
 def get_default_model_choice(models: Optional[List[str]] = None) -> str:
-    """Prefer the configured free model when live, then a fast free model."""
+    """Prefer the configured local model when available."""
     model_choices = models or available_models
-    if (
-        CONFIGURED_LLM_MODEL
-        and ":free" in CONFIGURED_LLM_MODEL
-        and (not model_choices or CONFIGURED_LLM_MODEL in model_choices)
-    ):
+    if CONFIGURED_LLM_MODEL and (not model_choices or CONFIGURED_LLM_MODEL in model_choices):
         return CONFIGURED_LLM_MODEL
-    free_models = order_free_models_for_demo(model_choices)
-    if free_models:
-        return free_models[0]
+    if model_choices:
+        return model_choices[0]
     return CONFIGURED_LLM_MODEL or SAFE_FALLBACK_LLM_MODEL
 
 
 def get_model_dropdown_choices(models: Optional[List[str]] = None) -> List[str]:
-    """Return model choices with a cost-safe default first and de-duplicated."""
+    """Return local model choices with the default first and de-duplicated."""
     model_choices = models or available_models
     choices = [get_default_model_choice(model_choices)]
-    for model in [*order_free_models_for_demo(model_choices), *model_choices]:
+    for model in model_choices:
         if model and model not in choices:
             choices.append(model)
     return choices
 
 
 def get_deployment_status():
-    """Get deployment status information."""
-    deployment_env = get_deployment_environment()
-    is_hf_spaces = is_huggingface_space()
-
-    if is_hf_spaces:
-        status = (
-            f"🚀 Running in {deployment_env} | Models filtered for cost control ({len(available_models)} available)"
-        )
-        color = "orange"
-    else:
-        status = f"💻 Running in {deployment_env} | All models available ({len(available_models)} total)"
-        color = "blue"
-
-    return status, color
+    """Get local LM Studio connection status information."""
+    status = f"💻 Local LM Studio | {len(available_models)} model(s) available"
+    return status, "blue"
 
 
 def history_run_choices() -> List[Tuple[str, str]]:
@@ -766,7 +721,8 @@ def create_gradio_interface():
                         choices=get_model_dropdown_choices(),
                         value=default_model,
                         label=f"LLM Model (default: {default_model})",
-                        info="Compact free models are recommended first so demo runs finish faster.",
+                        info="Select a model currently loaded or available in LM Studio.",
+                        interactive=True,
                     )
 
                     with gr.Row():
@@ -813,13 +769,13 @@ def create_gradio_interface():
                 3. **Click "Run Cycle"**: The system will set your goal and immediately generate, review, rank, and evolve hypotheses in one step.
 
                 ### 💡 Tips
-                - Start with 4 hypotheses per cycle on the public free-model demo
-                - Compact free models are listed first; try another recommended free model if one provider is slow
+                - Start LM Studio's local server before running a cycle
+                - Load a model in LM Studio, then select it in Advanced Settings
                 - Higher generation temperature = more creative ideas
                 - Lower reflection temperature = more analytical reviews
                 - Each cycle builds on previous results
-                
-                **Note:** Free models can be rate-limited or slow. The app will try a few free fallbacks automatically, and you can select a different recommended free model in Advanced Settings.
+
+                **Note:** Runtime depends on your local model size and hardware.
                 """)
 
         with gr.Tabs():
@@ -951,15 +907,10 @@ def create_gradio_interface():
 
 
 if __name__ == "__main__":
-    # Check for API key
-    if not os.getenv("OPENROUTER_API_KEY"):
-        print("⚠️  Warning: OPENROUTER_API_KEY environment variable not set.")
-        print("The app will start but may not function properly without an API key.")
-
     # Create and launch the Gradio app
+    logger.info("Using LM Studio API at %s", get_lmstudio_base_url())
     demo = create_gradio_interface()
 
-    # Launch with appropriate settings for HF Spaces
     reports_dir = get_reports_dir()
     reports_dir.mkdir(parents=True, exist_ok=True)
     demo.launch(

@@ -3,7 +3,7 @@ import json
 from app.models import ResearchGoal
 from app.run_store import delete_run, history_html, list_runs, render_report, report_file_url, save_run, write_report
 
-FAKE_KEY = "sk-or-v1-THIS-FAKE-KEY-MUST-NOT-PERSIST"
+FAKE_KEY = "LMSTUDIO-THIS-FAKE-KEY-MUST-NOT-PERSIST"
 
 
 def _cycle_details():
@@ -33,7 +33,7 @@ def _cycle_details():
 
 def test_save_run_persists_json_and_redacts_secrets(tmp_path, monkeypatch):
     monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
-    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("LMSTUDIO_API_KEY", FAKE_KEY)
     goal = ResearchGoal(description=f"Study catalyst with api_key={FAKE_KEY}")
 
     run = save_run(

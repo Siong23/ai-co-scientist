@@ -13,8 +13,10 @@ git clone --branch main --single-branch https://github.com/chunhualiao/co-scient
 cd ~/workspace/open-ai-co-scientist-local-deploy
 ```
 
-Provide `OPENROUTER_API_KEY` through the environment. For local-only testing, a
-symlink to an existing gitignored `.env` is fine:
+Start LM Studio's local server and load a model before launching the app. The
+defaults use `http://127.0.0.1:1234/v1`; copy `.env.example` to `.env` when the
+server address or model ID differs. A symlink to an existing gitignored `.env`
+is also fine:
 
 ```bash
 ln -s ~/workspace/open-ai-co-scientist/.env .env

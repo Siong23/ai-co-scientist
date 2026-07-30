@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import app.utils as utils
 from app.agents import call_llm_for_generation
 
-FAKE_KEY = "sk-or-v1-THIS-FAKE-KEY-MUST-NEVER-BE-LOGGED"
+FAKE_KEY = "LMSTUDIO-THIS-FAKE-KEY-MUST-NEVER-BE-LOGGED"
 
 
 def _completion(content: str):
@@ -22,7 +22,7 @@ def _completion(content: str):
 
 
 def test_key_absent_from_logs_on_success(monkeypatch, caplog):
-    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("LMSTUDIO_API_KEY", FAKE_KEY)
     payload = json.dumps([{"title": "T", "text": "X"}])
     with caplog.at_level(logging.DEBUG):
         with patch.object(utils, "OpenAI") as mock_openai:
@@ -33,7 +33,7 @@ def test_key_absent_from_logs_on_success(monkeypatch, caplog):
 
 
 def test_key_absent_from_logs_on_error(monkeypatch, caplog):
-    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("LMSTUDIO_API_KEY", FAKE_KEY)
     with caplog.at_level(logging.DEBUG):
         with patch.object(utils, "OpenAI") as mock_openai:
             mock_openai.return_value.chat.completions.create.side_effect = Exception(
@@ -45,7 +45,7 @@ def test_key_absent_from_logs_on_error(monkeypatch, caplog):
 
 
 def test_key_absent_from_error_message_shown_to_user(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("LMSTUDIO_API_KEY", FAKE_KEY)
     with patch.object(utils, "OpenAI") as mock_openai:
         mock_openai.return_value.chat.completions.create.side_effect = Exception(f"boom {FAKE_KEY} leaked")
         response = utils.call_llm("prompt")

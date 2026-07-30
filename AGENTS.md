@@ -1,8 +1,8 @@
 # AGENTS.md — standing instructions for AI coding agents
 
 This is the **private loop repo** for Open AI Co-Scientist (a Gradio app that
-generates, reviews, ranks, and evolves research hypotheses via OpenRouter
-LLMs). The autonomous-development process is specified in
+generates, reviews, ranks, and evolves research hypotheses through a local
+LM Studio server). The autonomous-development process is specified in
 `docs/loop-engineering-design.md`; current priorities live in
 `docs/loop/GOALS.md`. Only human-vetted sync branches ever reach the public
 `llnl/open-ai-co-scientist` repo.
@@ -14,19 +14,20 @@ LLMs). The autonomous-development process is specified in
   testing (see `tests/test_gradio.py`).
 - `app/agents.py` — multi-agent pipeline (Generation, Reflection, Ranking,
   Evolution, Proximity, Meta-review) and LLM-call wrappers.
-- `app/utils.py` — `call_llm` (OpenRouter via OpenAI SDK), similarity scoring,
+- `app/utils.py` — `call_llm` (LM Studio via its OpenAI-compatible API),
+  similarity scoring,
   vis.js graph data, logging, `redact_secrets`.
 - `app/models.py` — pydantic models. `app/config.py` + `config.yaml` — config.
 - `app/tools/arxiv_search.py` — arXiv literature integration.
-- `tests/` — offline by default; `integration` (paid LLM) and `network`
+- `tests/` — offline by default; `integration` (local LM Studio) and `network`
   (free network) markers are excluded unless you run `make test-all`.
 
 ## Canonical commands
 
 - `make test` — offline suite; **must always pass with no API key and no
   network**. Run it before finishing any change.
-- `make test-all` — includes `integration` + `network` tests (needs
-  `OPENROUTER_API_KEY`, spends money — do not run unless asked).
+- `make test-all` — includes `integration` + `network` tests (needs a running,
+  configured LM Studio server — do not run unless asked).
 - `make lint` / `make fmt` — ruff check / auto-format.
 
 ## Rules

@@ -16,16 +16,13 @@ short_description: Open-source implementation of Google's AI Co-Scientist
 
 Open AI Co-Scientist is an AI-powered system for generating, reviewing, ranking, and evolving research hypotheses using a multi-agent architecture and Large Language Models (LLMs). The user interface is built with Gradio for rapid prototyping and interactive research. The system helps researchers explore research spaces and identify promising hypotheses through iterative refinement.
 
-A live demonstration can be accessed at: https://huggingface.co/spaces/liaoch/open-ai-co-scientist
-* Please note that this demo exclusively utilizes free models from OpenRouter.
-
 ## 🚀 Features
 
 - **Multi-Agent System:** Iteratively generates, reviews, ranks, and evolves research hypotheses using specialized agents (Generation, Reflection, Ranking, Evolution, Proximity, Meta-Review).
-- **LLM Integration:** Uses OpenRouter API to access a variety of LLMs (model selection in UI).
+- **Local LLM Integration:** Uses LM Studio's OpenAI-compatible local API, with runtime model selection in the UI.
 - **Interactive Gradio UI:** Easy-to-use interface for research goal input, advanced settings, and results visualization.
 - **References & Literature:** Integrated arXiv search for related papers.
-- **Cost Control:** Automatically filters to cost-effective models in production deployment.
+- **Private Inference:** Prompts and model responses stay on the configured local LM Studio server.
 - **Logging:** Each run is logged to a timestamped file in the `results/` directory.
 
 ## AI Transparency Statement
@@ -53,13 +50,11 @@ In accordance with LLNL policy on Generative Artificial Intelligence, this proje
     pip install -r requirements.txt
     ```
 
-3. **Set up your OpenRouter API key:**
-    - Sign up at [https://openrouter.ai/](https://openrouter.ai/) and obtain an API key.
-    - Add at least $5 to your OpenRouter account balance (or use a free model if available).
-    - Set the environment variable:
-      ```bash
-      export OPENROUTER_API_KEY=your_api_key
-      ```
+3. **Start LM Studio:**
+    - Install LM Studio and download or load a chat model.
+    - Start its local OpenAI-compatible server.
+    - The app defaults to `http://127.0.0.1:1234/v1`. Copy `.env.example` to
+      `.env` and set `LMSTUDIO_BASE_URL` or `LMSTUDIO_MODEL` when needed.
 
 4. **Run the Gradio app:**
     ```bash
@@ -84,6 +79,9 @@ In accordance with LLNL policy on Generative Artificial Intelligence, this proje
 ## ⚙️ Configuration
 
 - Default settings can be adjusted in `config.yaml`.
+- `LMSTUDIO_BASE_URL` overrides the local API address.
+- `LMSTUDIO_MODEL` overrides the configured default model.
+- `LMSTUDIO_API_KEY` is optional and only needed when LM Studio authentication is enabled.
 - Many settings can be overridden in the Gradio UI under "Advanced Settings".
 
 ## 🧠 How It Works
@@ -105,30 +103,10 @@ The system uses a multi-agent approach:
 
 ## ⚙️ Technical Details
 
-- **Models:** Uses OpenRouter API with cost-effective models in production.
-- **Environment Detection:** Automatically detects Hugging Face Spaces deployment.
-- **Cost Control:** Filters to budget-friendly models (Gemini Flash, GPT-3.5-turbo, Claude Haiku, etc.).
+- **Models:** Uses any chat model exposed by the configured LM Studio server.
+- **Model discovery:** Reads LM Studio's local `/models` endpoint when the UI starts.
+- **Offline tests:** Mock the LM Studio boundary and never require a running server.
 - **Iterative Process:** Each cycle builds on previous results for continuous improvement.
-
-## 🔧 Deployment (Hugging Face Spaces)
-
-The system automatically configures itself based on the deployment environment:
-
-- **Production (HF Spaces):** Limited to cost-effective models for budget control.
-- **Development:** Full access to all available models.
-
-For the maintained release path from approved loop-repo PRs into the public
-upstream repo and then to Hugging Face, see
-[`docs/upstream-release-process.md`](docs/upstream-release-process.md).
-The process is backed by manual/tag-gated GitHub Actions workflows and offline
-tests.
-
-### Hugging Face Spaces Setup
-
-1. **Create a new Space** at [Hugging Face Spaces](https://huggingface.co/spaces).
-2. **Upload files:** README.md, app.py, requirements.txt, and the app/ directory.
-3. **Set environment variables:** Add your `OPENROUTER_API_KEY` as a secret in Space settings.
-4. **Deploy:** The Space will automatically build and deploy the app.
 
 ## 📖 Research Paper
 
@@ -142,14 +120,15 @@ See CONTRIBUTING.md for details.
 
 ## ⚠️ Note
 
-This system requires an OpenRouter API key to function. The public demo uses a limited budget, so please use it responsibly. For extensive research, consider running your own instance with your API key.
+LM Studio must be running and have a compatible chat model loaded before a
+research cycle can complete.
 
 
 ## Acknowledgements
 
 - Based on the idea of Google's AI Co-Scientist system.
 - Uses [Gradio](https://gradio.app/) for the user interface.
-- LLM access via [OpenRouter](https://openrouter.ai/).
+- Local LLM access via [LM Studio](https://lmstudio.ai/).
 
 ---
 
