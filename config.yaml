@@ -1,25 +1,18 @@
-# Configuration file for proposal-gen-v1.py
+# Local LM Studio OpenAI-compatible API. Environment variables override these
+# defaults; see .env.example. API keys must only be provided through the
+# environment and must never be added to this file.
+lmstudio_base_url: "http://100.117.90.5:1234/v1"
 
-# OpenAI API Key (REQUIRED)
-# Obtain an API key from OpenRouter (https://openrouter.ai) and set it as an environment variable:
-#   export OPENROUTER_API_KEY=your_api_key
-# Or, you can paste your key directly below (not recommended for production):
-#openai_api_key: ""
-
-# OpenRouter API Base URL
-openrouter_base_url: "https://openrouter.ai/api/v1"
-
-# LLM Model. Use a compact free default so the public Hugging Face demo can
-# finish a full multi-call cycle within its UI timeout. If this one is delisted,
-# rate-limited, or too slow, call_llm auto-falls back to other live free models.
-llm_model: "meta-llama/llama-3.2-3b-instruct:free"
+# Default local model. The UI discovers all model IDs currently exposed by
+# LM Studio and allows selecting another model at runtime.
+llm_model: "qwen/qwen3.6-35b-a3b"
 
 # Number of hypotheses to generate
 num_hypotheses: 4
 
-# Per-provider request timeout. Keeps slow free endpoints from consuming the
-# whole Gradio cycle budget before fallback can try another model.
-llm_request_timeout_seconds: 30
+# LM Studio request timeouts.
+llm_request_timeout_seconds: 180
+lmstudio_model_list_timeout_seconds: 10
 
 # Elo K-factor
 elo_k_factor: 32

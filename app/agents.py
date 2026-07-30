@@ -37,7 +37,7 @@ def call_llm_for_generation(
     response = call_llm(full_prompt, temperature=temperature, model=model)
     logger.info("LLM generation response: %s", response)
 
-    if response.startswith("Error:") or response.startswith("Authentication with OpenRouter failed"):
+    if response.startswith("Error:"):
         logger.error(f"LLM generation call failed: {response}")
         return [{"title": "Error", "text": response}]
 
@@ -141,6 +141,7 @@ def call_llm_for_reflection(hypothesis_text: str, temperature: float = 0.5, mode
 
 # --- Ranking Helpers (Moved from main.py) ---
 
+
 def format_references(references):
     if not references:
         return "No references provided."
@@ -153,13 +154,12 @@ def format_references(references):
             authors = ref.get("authors", "")
             year = ref.get("year", "")
 
-            formatted.append(
-                f"{title} ({authors}, {year})"
-            )
+            formatted.append(f"{title} ({authors}, {year})")
         else:
             formatted.append(str(ref))
 
     return "\n".join(formatted)
+
 
 def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: ResearchGoal) -> tuple[Hypothesis, str]:
     """Compares two hypotheses based on novelty and feasibility scores."""
@@ -220,9 +220,7 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
 
     # Format constraints into readable bullet points
     considerations = (
-        "\n".join(f"- {k}: {v}" for k, v in research_goal.constraints.items())
-        if research_goal.constraints
-        else "None"
+        "\n".join(f"- {k}: {v}" for k, v in research_goal.constraints.items()) if research_goal.constraints else "None"
     )
 
     prompt = f"""
@@ -275,7 +273,6 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
         winner = hypoA if winner_index == 1 else hypoB
 
     except ValueError:
-
         logger.warning(
             "Could not parse LLM ranking response.\n%s",
             response,
@@ -298,6 +295,7 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
     #     winner = random.choice([hypoA, hypoB])
 
     # return winner, response
+
 
 def parse_pairwise_result(response: str) -> int:
     """

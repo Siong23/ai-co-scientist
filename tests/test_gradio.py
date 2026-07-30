@@ -1,7 +1,7 @@
-"""Offline tests: imports, environment detection, and Gradio UI construction.
+"""Offline tests for imports and Gradio UI construction.
 
-The OpenRouter model-list fetch inside create_gradio_interface() is mocked so
-these tests are deterministic and make no network calls.
+LM Studio model discovery is mocked so these tests are deterministic and make
+no network calls.
 """
 
 import importlib.util
@@ -18,17 +18,7 @@ def test_core_imports():
     from app.agents import SupervisorAgent  # noqa: F401
     from app.models import ContextMemory, ResearchGoal  # noqa: F401
     from app.tools.arxiv_search import ArxivSearchTool  # noqa: F401
-    from app.utils import get_deployment_environment, is_huggingface_space, logger  # noqa: F401
-
-
-def test_environment_detection_outside_hf_spaces(monkeypatch):
-    from app.utils import get_deployment_environment, is_huggingface_space
-
-    for var in ("SPACE_ID", "SPACE_AUTHOR_NAME", "SPACES_BUILDKIT_VERSION", "HF_HOME"):
-        monkeypatch.delenv(var, raising=False)
-
-    assert is_huggingface_space() is False
-    assert isinstance(get_deployment_environment(), str)
+    from app.utils import fetch_lmstudio_models, get_lmstudio_base_url, logger  # noqa: F401
 
 
 @pytest.fixture(scope="module")
@@ -42,10 +32,7 @@ def gradio_app_module():
 
 
 def test_gradio_interface_constructs_without_network(gradio_app_module):
-    with (
-        patch.object(gradio_app_module.requests, "get", side_effect=RuntimeError("offline test")),
-        patch.object(gradio_app_module, "fetch_free_models", return_value=[]),
-    ):
+    with patch.object(gradio_app_module, "fetch_lmstudio_models", return_value=[]):
         demo = gradio_app_module.create_gradio_interface()
     assert demo is not None
     # The fetch failed, so the module must have fallen back to a non-empty default model list.
@@ -66,7 +53,7 @@ def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, 
         run_id="run-existing",
     )
 
-    with patch.object(gradio_app_module.requests, "get", side_effect=RuntimeError("offline test")):
+    with patch.object(gradio_app_module, "fetch_lmstudio_models", return_value=[]):
         demo = gradio_app_module.create_gradio_interface()
 
     saved_runs = [
@@ -102,34 +89,43 @@ def test_default_model_is_selected_and_first_choice(gradio_app_module):
     assert choices.count(gradio_app_module.CONFIGURED_LLM_MODEL) == 1
 
 
-def test_free_model_is_default_when_configured_model_is_not_free(gradio_app_module, monkeypatch):
-    monkeypatch.setattr(gradio_app_module, "CONFIGURED_LLM_MODEL", "paid/model")
+def test_first_available_model_is_default_when_configured_model_is_unavailable(gradio_app_module, monkeypatch):
+    monkeypatch.setattr(gradio_app_module, "CONFIGURED_LLM_MODEL", "unavailable-model")
 
-    choices = gradio_app_module.get_model_dropdown_choices(["paid/model", "free/model:free"])
+    choices = gradio_app_module.get_model_dropdown_choices(["local/model-a", "local/model-b"])
 
-    assert choices[0] == "free/model:free"
-
-
-def test_stale_configured_free_model_is_not_forced_as_default(gradio_app_module, monkeypatch):
-    monkeypatch.setattr(gradio_app_module, "CONFIGURED_LLM_MODEL", "delisted/model:free")
-
-    choices = gradio_app_module.get_model_dropdown_choices(["vendor/model-70b:free", "vendor/model-3b:free"])
-
-    assert choices[0] == "vendor/model-3b:free"
-    assert "delisted/model:free" not in choices
+    assert choices[0] == "local/model-a"
+    assert "unavailable-model" not in choices
 
 
-def test_hf_spaces_model_list_uses_dynamic_free_model_cache(gradio_app_module, monkeypatch):
-    monkeypatch.setenv("SPACE_ID", "owner/space")
-    with (
-        patch.object(gradio_app_module, "fetch_free_models", return_value=["vendor/model-3b:free"]) as mock_fetch,
-        patch.object(gradio_app_module.requests, "get") as mock_get,
-    ):
+def test_local_model_list_comes_from_lmstudio(gradio_app_module):
+    with patch.object(
+        gradio_app_module,
+        "fetch_lmstudio_models",
+        return_value=["local/model-a", "local/model-b"],
+    ) as mock_fetch:
         models = gradio_app_module.fetch_available_models()
 
-    assert models == ["vendor/model-3b:free"]
+    assert models == ["local/model-a", "local/model-b"]
     mock_fetch.assert_called_once()
-    mock_get.assert_not_called()
+
+
+def test_advanced_settings_exposes_available_model_choices(gradio_app_module):
+    models = [gradio_app_module.CONFIGURED_LLM_MODEL, "local/alternative-model"]
+
+    with patch.object(gradio_app_module, "fetch_available_models", return_value=models):
+        gradio_app_module.available_models = models
+        demo = gradio_app_module.create_gradio_interface()
+
+    model_dropdowns = [
+        component
+        for component in demo.config["components"]
+        if component["type"] == "dropdown" and str(component["props"].get("label", "")).startswith("LLM Model")
+    ]
+
+    assert len(model_dropdowns) == 1
+    assert "local/alternative-model" in str(model_dropdowns[0]["props"]["choices"])
+    assert model_dropdowns[0]["props"]["interactive"] is True
 
 
 def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkeypatch, tmp_path):
