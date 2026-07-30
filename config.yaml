@@ -1,7 +1,7 @@
 # Local LM Studio OpenAI-compatible API. Environment variables override these
 # defaults; see .env.example. API keys must only be provided through the
 # environment and must never be added to this file.
-lmstudio_base_url: "http://127.0.0.1:1234/v1"
+lmstudio_base_url: "http://100.117.90.5:1234/v1"
 
 # Default local model. The UI discovers all model IDs currently exposed by
 # LM Studio and allows selecting another model at runtime.
