@@ -105,6 +105,12 @@ def classify_llm_error(error_text: str) -> str:
         return "Model returned unparsable output"
     if "model not configured" in text:
         return "LLM model not configured"
+    if (
+        "retrieved evidence is insufficient" in text
+        or "rag retrieval found no usable" in text
+        or "missing explicit requirements" in text
+    ):
+        return "Insufficient retrieved evidence"
     return "LLM/API error"
 
 
