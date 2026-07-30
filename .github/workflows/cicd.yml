@@ -61,7 +61,7 @@ jobs:
       - name: Install/update dependencies
         run: |
           cd /home/server2/ai-co-scientist
-          pip install -r requirements.txt
+          ./venv/bin/pip install -r requirements.txt || pip install -r requirements.txt
 
       - name: Restart AI Co-Scientist
         run: |
@@ -69,4 +69,5 @@ jobs:
 
       - name: Verify service
         run: |
+          sleep 3
           systemctl status ai-co-scientist.service --no-pager
