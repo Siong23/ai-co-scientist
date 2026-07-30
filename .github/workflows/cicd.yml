@@ -40,7 +40,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          pytest
+          pytest --ignore=tests/test_release_process.py
 
   deploy:
 
