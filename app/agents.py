@@ -1115,8 +1115,8 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
     combined_title = f"Combined: {hypoA.title} & {hypoB.title}"
     # Consider a more sophisticated combination prompt/logic if needed
     combined_text = (
-        "Combination of:\n\n"
-        f"1. {hypoA.text}\n\n"
+        "Combination of:<br>"
+        f"1. {hypoA.text}<br>"
         f"2. {hypoB.text}"
         )
     logger.info("Combining hypotheses %s and %s into %s", hypoA.hypothesis_id, hypoB.hypothesis_id, new_id)
