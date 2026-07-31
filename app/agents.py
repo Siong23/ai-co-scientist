@@ -1114,7 +1114,7 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
     new_id = generate_unique_id("E")  # Use utility function
     combined_title = f"Combined: {hypoA.title} & {hypoB.title}"
     # Consider a more sophisticated combination prompt/logic if needed
-    combined_text = f"Combination of:  \n1. {hypoA.text}  \n2. {hypoB.text}"
+    combined_text = f"Combination of:\n\n1. {hypoA.text}\n\n2. {hypoB.text}"
     logger.info("Combining hypotheses %s and %s into %s", hypoA.hypothesis_id, hypoB.hypothesis_id, new_id)
     new_hypothesis = Hypothesis(new_id, combined_title, combined_text)
     new_hypothesis.parent_ids = [hypoA.hypothesis_id, hypoB.hypothesis_id]
