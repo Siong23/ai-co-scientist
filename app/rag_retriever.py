@@ -116,9 +116,7 @@ class ArxivRAGRetriever:
         self.query_count = query_count or int(rag_config.get("query_count", 5))
         self.results_per_query = results_per_query or int(rag_config.get("results_per_query", 6))
         self.top_k = top_k or int(rag_config.get("top_k", 4))
-        self.minimum_relevant_sources = minimum_relevant_sources or int(
-            rag_config.get("minimum_relevant_sources", 3)
-        )
+        self.minimum_relevant_sources = minimum_relevant_sources or int(rag_config.get("minimum_relevant_sources", 3))
         self.corrective_retrieval_rounds = (
             corrective_retrieval_rounds
             if corrective_retrieval_rounds is not None

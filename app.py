@@ -296,10 +296,7 @@ def format_evidence_sources_html(
         )
 
     rendered_sources = ", ".join(links) if links else "None recorded"
-    return (
-        "<p><strong>Evidence Sources:</strong> "
-        f"{rendered_sources}</p>"
-    )
+    return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>"
 
 
 def run_cycle_with_progress(
