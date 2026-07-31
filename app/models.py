@@ -29,7 +29,7 @@ class Hypothesis:
         self.is_active: bool = True
         self.parent_ids: List[str] = []  # Store IDs of parent hypotheses
 
-        #Sources actually retrieved and supplied to GenerationAgent.
+        # Sources actually retrieved and supplied to GenerationAgent.
         self.evidence_source_ids: List[str] = []
 
     def to_dict(self) -> dict:
@@ -53,12 +53,9 @@ class ResearchGoal:
         self,
         description: str,
         preferences: str = (
-            "Novelty, feasibility, scientific validity, practical applicability, "
-            "clarity, and potential impact."
+            "Novelty, feasibility, scientific validity, practical applicability, clarity, and potential impact."
         ),
-        idea_attributes: str = (
-            "novelty, feasibility, correctness, utility, specificity, and originality"
-        ),
+        idea_attributes: str = ("novelty, feasibility, correctness, utility, specificity, and originality"),
         constraints: Optional[Dict] = None,
         llm_model: Optional[str] = None,
         num_hypotheses: Optional[int] = None,
@@ -120,12 +117,9 @@ class ContextMemory:
 class ResearchGoalRequest(BaseModel):
     description: str
     preferences: str = (
-        "Novelty, feasibility, scientific validity, practical applicability, "
-        "clarity, and potential impact."
+        "Novelty, feasibility, scientific validity, practical applicability, clarity, and potential impact."
     )
-    idea_attributes: str = (
-        "novelty, feasibility, correctness, utility, specificity, and originality"
-    )
+    idea_attributes: str = "novelty, feasibility, correctness, utility, specificity, and originality"
     constraints: Optional[Dict] = {}
     # Add optional fields for advanced settings
     llm_model: Optional[str] = None
@@ -148,7 +142,6 @@ class HypothesisResponse(BaseModel):
     is_active: bool
     evidence_source_ids: List[str] = []
     # parent_ids: List[str] # Add if needed in API response
-
 
 
 class OverviewResponse(BaseModel):

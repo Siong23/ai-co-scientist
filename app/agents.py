@@ -40,16 +40,10 @@ def _parse_generation_response(response: str) -> List[Dict]:
         # Some local models add a short explanation before or after the JSON.
         # raw_decode accepts the first complete JSON value without weakening
         # validation of the hypothesis objects themselves.
-        starts = [
-            index
-            for index in (cleaned.find("["), cleaned.find("{"))
-            if index >= 0
-        ]
+        starts = [index for index in (cleaned.find("["), cleaned.find("{")) if index >= 0]
         if not starts:
             raise ValueError("No JSON object or array was found.")
-        hypotheses_data, _ = json.JSONDecoder().raw_decode(
-            cleaned[min(starts) :]
-        )
+        hypotheses_data, _ = json.JSONDecoder().raw_decode(cleaned[min(starts) :])
 
         if isinstance(hypotheses_data, dict):
             error_text = hypotheses_data.get("error")
@@ -77,12 +71,7 @@ def _parse_generation_response(response: str) -> List[Dict]:
                 "evidence_sources": "source_ids",
             }
             hypotheses_data = [
-                {
-                    aliases.get(key, key): value
-                    for key, value in item.items()
-                }
-                if isinstance(item, dict)
-                else item
+                {aliases.get(key, key): value for key, value in item.items()} if isinstance(item, dict) else item
                 for item in hypotheses_data
             ]
 
@@ -147,8 +136,7 @@ def call_llm_for_generation(
         return _parse_generation_response(response)
     except ValueError as first_error:
         logger.warning(
-            "Initial generation output was not valid structured JSON; "
-            "requesting one format-only repair: %s",
+            "Initial generation output was not valid structured JSON; requesting one format-only repair: %s",
             first_error,
         )
 
@@ -192,9 +180,7 @@ def call_llm_for_search_queries(
 ) -> tuple[SearchQueryPlan | None, str | None]:
     """Create a goal-faithful plan with hard and optional search dimensions."""
 
-    query_example = ", ".join(
-        f'"query {index}"' for index in range(1, query_count + 1)
-    )
+    query_example = ", ".join(f'"query {index}"' for index in range(1, query_count + 1))
     base_prompt = f"""
 You are a goal-faithful scientific search planner. Decompose the user's
 research goal before rewriting it into precise arXiv queries.
@@ -260,9 +246,7 @@ Research goal:
             or not isinstance(raw_directions, list)
         ):
             raise ValueError(
-                "Expected 'queries', 'required_terms', "
-                "'explicit_requirements', and "
-                "'exploration_directions' arrays."
+                "Expected 'queries', 'required_terms', 'explicit_requirements', and 'exploration_directions' arrays."
             )
 
         normalized_queries = tuple(
@@ -283,9 +267,7 @@ Research goal:
                 continue
             aspect_id = str(raw_aspect.get("id", "")).strip()
             goal_quote = str(raw_aspect.get("goal_quote", "")).strip()
-            normalized_goal = " ".join(
-                research_goal.casefold().split()
-            )
+            normalized_goal = " ".join(research_goal.casefold().split())
             normalized_quote = " ".join(goal_quote.casefold().split())
             if (
                 not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", aspect_id)
@@ -303,21 +285,14 @@ Research goal:
                 )
             )
         if not 1 <= len(explicit_requirements) <= 5:
-            raise ValueError(
-                "Expected 1 to 5 unique explicit requirements with "
-                "verbatim goal quotes."
-            )
+            raise ValueError("Expected 1 to 5 unique explicit requirements with verbatim goal quotes.")
         exploration_directions = tuple(
             dict.fromkeys(
-                direction.strip()
-                for direction in raw_directions
-                if isinstance(direction, str) and direction.strip()
+                direction.strip() for direction in raw_directions if isinstance(direction, str) and direction.strip()
             )
         )
         if len(exploration_directions) > 5:
-            raise ValueError(
-                "Expected no more than 5 exploration directions."
-            )
+            raise ValueError("Expected no more than 5 exploration directions.")
 
         return SearchQueryPlan(
             queries=normalized_queries,
@@ -433,10 +408,7 @@ def call_llm_for_relevance_filter(
 ) -> tuple[list[str] | None, str | None]:
     """Suggest sources that directly support the goal without gating coverage."""
 
-    aspect_text = "\n".join(
-        f"- {aspect.aspect_id}: {aspect.description}"
-        for aspect in explicit_requirements
-    )
+    aspect_text = "\n".join(f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements)
     prompt = f"""
 You are a strict relevance grader for scientific literature retrieval.
 
@@ -532,10 +504,7 @@ def call_llm_for_evidence_coverage(
 ) -> tuple[EvidenceCoverage | None, str | None]:
     """Check collective evidence coverage and propose corrective searches."""
 
-    aspect_text = "\n".join(
-        f"- {aspect.aspect_id}: {aspect.description}"
-        for aspect in explicit_requirements
-    )
+    aspect_text = "\n".join(f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements)
     prompt = f"""
 You are an evidence-coverage auditor for scientific hypothesis generation.
 
@@ -599,47 +568,28 @@ Retrieved sources:
             raw_gap_queries,
             list,
         ):
-            raise ValueError(
-                "Expected 'aspect_coverage' and 'gap_queries' arrays."
-            )
+            raise ValueError("Expected 'aspect_coverage' and 'gap_queries' arrays.")
 
-        known_aspect_ids = {
-            aspect.aspect_id for aspect in explicit_requirements
-        }
-        aspect_source_ids: dict[str, tuple[str, ...]] = {
-            aspect_id: () for aspect_id in known_aspect_ids
-        }
+        known_aspect_ids = {aspect.aspect_id for aspect in explicit_requirements}
+        aspect_source_ids: dict[str, tuple[str, ...]] = {aspect_id: () for aspect_id in known_aspect_ids}
         for item in raw_coverage:
             if not isinstance(item, dict):
                 continue
             aspect_id = str(item.get("aspect_id", "")).strip()
             raw_source_ids = item.get("source_ids")
-            if (
-                aspect_id not in known_aspect_ids
-                or not isinstance(raw_source_ids, list)
-            ):
+            if aspect_id not in known_aspect_ids or not isinstance(raw_source_ids, list):
                 continue
             valid_ids = _resolve_retrieved_source_ids(
                 raw_source_ids,
                 available_source_ids,
             )
-            aspect_source_ids[aspect_id] = tuple(
-                dict.fromkeys(
-                    (*aspect_source_ids[aspect_id], *valid_ids)
-                )
-            )
+            aspect_source_ids[aspect_id] = tuple(dict.fromkeys((*aspect_source_ids[aspect_id], *valid_ids)))
 
         missing_aspect_ids = tuple(
-            aspect.aspect_id
-            for aspect in explicit_requirements
-            if not aspect_source_ids[aspect.aspect_id]
+            aspect.aspect_id for aspect in explicit_requirements if not aspect_source_ids[aspect.aspect_id]
         )
         gap_queries = tuple(
-            dict.fromkeys(
-                query.strip()
-                for query in raw_gap_queries
-                if isinstance(query, str) and query.strip()
-            )
+            dict.fromkeys(query.strip() for query in raw_gap_queries if isinstance(query, str) and query.strip())
         )[:max_gap_queries]
         reason = str(payload.get("reason", "")).strip()
 
@@ -695,12 +645,9 @@ def call_llm_for_literature_synthesis(
     """Build a citation-validated literature review before generation."""
 
     requirement_text = "\n".join(
-        f"- {requirement.aspect_id}: {requirement.description}"
-        for requirement in explicit_requirements
+        f"- {requirement.aspect_id}: {requirement.description}" for requirement in explicit_requirements
     )
-    direction_text = "\n".join(
-        f"- {direction}" for direction in exploration_directions
-    )
+    direction_text = "\n".join(f"- {direction}" for direction in exploration_directions)
     prompt = f"""
 You are preparing the literature review and analytical rationale for a
 scientific Generation agent.
@@ -781,27 +728,15 @@ Retrieved sources:
                     )
             return tuple(findings)
 
-        established_findings = validated_findings(
-            "established_findings"
-        )
+        established_findings = validated_findings("established_findings")
         contradictions = validated_findings("contradictions")
         raw_gaps = payload.get("knowledge_gaps")
-        analytical_rationale = str(
-            payload.get("analytical_rationale", "")
-        ).strip()
+        analytical_rationale = str(payload.get("analytical_rationale", "")).strip()
         if not isinstance(raw_gaps, list):
             raise ValueError("Expected a 'knowledge_gaps' array.")
-        knowledge_gaps = tuple(
-            dict.fromkeys(
-                gap.strip()
-                for gap in raw_gaps
-                if isinstance(gap, str) and gap.strip()
-            )
-        )
+        knowledge_gaps = tuple(dict.fromkeys(gap.strip() for gap in raw_gaps if isinstance(gap, str) and gap.strip()))
         if not established_findings:
-            raise ValueError(
-                "No established finding cited a retrieved source."
-            )
+            raise ValueError("No established finding cited a retrieved source.")
         if not analytical_rationale:
             raise ValueError("Expected a non-empty analytical rationale.")
 
@@ -812,8 +747,7 @@ Retrieved sources:
             analytical_rationale=analytical_rationale,
         )
         logger.info(
-            "Literature synthesis produced %d findings, %d "
-            "contradictions, and %d gaps.",
+            "Literature synthesis produced %d findings, %d contradictions, and %d gaps.",
             len(synthesis.established_findings),
             len(synthesis.contradictions),
             len(synthesis.knowledge_gaps),
@@ -834,16 +768,12 @@ def format_literature_synthesis(
     """Format the structured review for hypothesis generation prompts."""
 
     findings = "\n".join(
-        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}"
-        for finding in synthesis.established_findings
+        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}" for finding in synthesis.established_findings
     )
     contradictions = "\n".join(
-        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}"
-        for finding in synthesis.contradictions
+        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}" for finding in synthesis.contradictions
     )
-    gaps = "\n".join(
-        f"- {gap}" for gap in synthesis.knowledge_gaps
-    )
+    gaps = "\n".join(f"- {gap}" for gap in synthesis.knowledge_gaps)
     return (
         f"Established findings:\n{findings}\n\n"
         f"Contradictions:\n{contradictions or '- None identified'}\n\n"
@@ -867,17 +797,12 @@ def call_llm_for_debate_refinement(
         temperature=temperature,
         model=model,
     )
-    errors = [
-        str(item.get("text", "Unknown debate error"))
-        for item in refined
-        if item.get("title") == "Error"
-    ]
+    errors = [str(item.get("text", "Unknown debate error")) for item in refined if item.get("title") == "Error"]
     if errors:
         return None, f"Scientific debate refinement failed: {errors[0]}"
     if len(refined) != num_hypotheses:
         return None, (
-            "Scientific debate refinement failed: expected "
-            f"{num_hypotheses} hypotheses, received {len(refined)}."
+            f"Scientific debate refinement failed: expected {num_hypotheses} hypotheses, received {len(refined)}."
         )
     return refined, None
 
@@ -1193,11 +1118,7 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
     logger.info("Combining hypotheses %s and %s into %s", hypoA.hypothesis_id, hypoB.hypothesis_id, new_id)
     new_hypothesis = Hypothesis(new_id, combined_title, combined_text)
     new_hypothesis.parent_ids = [hypoA.hypothesis_id, hypoB.hypothesis_id]
-    new_hypothesis.evidence_source_ids = list(
-        dict.fromkeys(
-            hypoA.evidence_source_ids + hypoB.evidence_source_ids
-        )
-    )
+    new_hypothesis.evidence_source_ids = list(dict.fromkeys(hypoA.evidence_source_ids + hypoB.evidence_source_ids))
     return new_hypothesis
 
 
@@ -1244,9 +1165,7 @@ class GenerationAgent:
         seen_ids: set[str] = set()
         for documents in document_groups:
             for document in documents:
-                source_id = str(
-                    document.metadata.get("source_id", "")
-                )
+                source_id = str(document.metadata.get("source_id", ""))
                 canonical_id = re.sub(
                     r"v\d+$",
                     "",
@@ -1268,11 +1187,7 @@ class GenerationAgent:
     ) -> list[Dict]:
         """Refine candidates through a short, stateful expert debate."""
 
-        if (
-            self.debate_rounds == 0
-            or not hypotheses
-            or any(item.get("title") == "Error" for item in hypotheses)
-        ):
+        if self.debate_rounds == 0 or not hypotheses or any(item.get("title") == "Error" for item in hypotheses):
             return hypotheses
 
         roles = (
@@ -1282,10 +1197,7 @@ class GenerationAgent:
         )
         current_hypotheses = hypotheses
         synthesis_text = format_literature_synthesis(synthesis)
-        optional_directions = "\n".join(
-            f"- {direction}"
-            for direction in query_plan.exploration_directions
-        )
+        optional_directions = "\n".join(f"- {direction}" for direction in query_plan.exploration_directions)
         for round_index in range(self.debate_rounds):
             role = roles[round_index % len(roles)]
             debate_prompt = f"""
@@ -1331,8 +1243,7 @@ Your refined contribution:
             )
             if debate_error or refined is None:
                 logger.warning(
-                    "Keeping the last valid hypotheses after debate "
-                    "round %d failed: %s",
+                    "Keeping the last valid hypotheses after debate round %d failed: %s",
                     round_index + 1,
                     debate_error,
                 )
@@ -1362,8 +1273,7 @@ Your refined contribution:
             return [], [error]
 
         logger.info(
-            "Query rewriting produced queries=%s required_terms=%s "
-            "explicit_requirements=%s exploration_directions=%s",
+            "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s exploration_directions=%s",
             query_plan.queries,
             query_plan.required_terms,
             query_plan.explicit_requirements,
@@ -1387,23 +1297,14 @@ Your refined contribution:
         coverage = None
         corrective_round = 0
         while True:
-            candidate_context = format_documents_for_prompt(
-                candidate_documents
-            )
-            candidate_source_ids = {
-                str(document.metadata["source_id"])
-                for document in candidate_documents
-            }
-            relevant_source_ids, relevance_error = (
-                call_llm_for_relevance_filter(
-                    research_goal.description,
-                    candidate_context,
-                    candidate_source_ids,
-                    model=research_goal.llm_model,
-                    explicit_requirements=(
-                        query_plan.explicit_requirements
-                    ),
-                )
+            candidate_context = format_documents_for_prompt(candidate_documents)
+            candidate_source_ids = {str(document.metadata["source_id"]) for document in candidate_documents}
+            relevant_source_ids, relevance_error = call_llm_for_relevance_filter(
+                research_goal.description,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
+                explicit_requirements=(query_plan.explicit_requirements),
             )
             if relevance_error or relevant_source_ids is None:
                 logger.warning(
@@ -1430,24 +1331,18 @@ Your refined contribution:
             )
             if coverage_error or coverage is None:
                 context.last_retrieved_sources = []
-                error = (
-                    coverage_error
-                    or "Evidence coverage grading failed."
-                )
+                error = coverage_error or "Evidence coverage grading failed."
                 logger.error(error)
                 return [], [error]
 
             if coverage.sufficient:
                 break
 
-            if corrective_round >= (
-                self.rag_retriever.corrective_retrieval_rounds
-            ):
+            if corrective_round >= (self.rag_retriever.corrective_retrieval_rounds):
                 missing_descriptions = [
                     aspect.description.rstrip(".")
                     for aspect in query_plan.explicit_requirements
-                    if aspect.aspect_id
-                    in coverage.missing_aspect_ids
+                    if aspect.aspect_id in coverage.missing_aspect_ids
                 ]
                 error = (
                     "Retrieved evidence is insufficient after "
@@ -1461,18 +1356,13 @@ Your refined contribution:
                 return [], [error]
 
             missing_aspects = [
-                aspect
-                for aspect in query_plan.explicit_requirements
-                if aspect.aspect_id in coverage.missing_aspect_ids
+                aspect for aspect in query_plan.explicit_requirements if aspect.aspect_id in coverage.missing_aspect_ids
             ]
             corrective_queries = tuple(
                 dict.fromkeys(
                     [
                         *coverage.gap_queries,
-                        *(
-                            aspect.description
-                            for aspect in missing_aspects
-                        ),
+                        *(aspect.description for aspect in missing_aspects),
                     ]
                 )
             )
@@ -1483,14 +1373,10 @@ Your refined contribution:
                 # or domain-only papers before the relevance grader sees them.
                 required_terms=(),
                 explicit_requirements=query_plan.explicit_requirements,
-                exploration_directions=(
-                    query_plan.exploration_directions
-                ),
+                exploration_directions=(query_plan.exploration_directions),
             )
             logger.info(
-                "Corrective retrieval round %d for missing "
-                "explicit requirements=%s "
-                "queries=%s",
+                "Corrective retrieval round %d for missing explicit requirements=%s queries=%s",
                 corrective_round + 1,
                 coverage.missing_aspect_ids,
                 corrective_queries,
@@ -1507,9 +1393,7 @@ Your refined contribution:
                     exc,
                     exc_info=True,
                 )
-                return [], [
-                    f"Corrective RAG retrieval failed: {exc}"
-                ]
+                return [], [f"Corrective RAG retrieval failed: {exc}"]
             corrective_round += 1
             candidate_documents = self._merge_retrieved_documents(
                 candidate_documents,
@@ -1517,14 +1401,10 @@ Your refined contribution:
             )
 
         coverage_source_ids = {
-            source_id
-            for source_ids in coverage.aspect_source_ids.values()
-            for source_id in source_ids
+            source_id for source_ids in coverage.aspect_source_ids.values() for source_id in source_ids
         }
         retrieved_documents = [
-            document
-            for document in candidate_documents
-            if str(document.metadata["source_id"]) in coverage_source_ids
+            document for document in candidate_documents if str(document.metadata["source_id"]) in coverage_source_ids
         ]
         minimum_sources = self.rag_retriever.minimum_relevant_sources
         if len(retrieved_documents) < minimum_sources:
@@ -1541,12 +1421,7 @@ Your refined contribution:
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         coverage_map = "\n".join(
-            (
-                f"- {aspect.description}: "
-                + ", ".join(
-                    coverage.aspect_source_ids[aspect.aspect_id]
-                )
-            )
+            (f"- {aspect.description}: " + ", ".join(coverage.aspect_source_ids[aspect.aspect_id]))
             for aspect in query_plan.explicit_requirements
         )
 
@@ -1566,10 +1441,7 @@ Your refined contribution:
             logger.error(error)
             return [], [error]
         synthesis_text = format_literature_synthesis(synthesis)
-        optional_directions = "\n".join(
-            f"- {direction}"
-            for direction in query_plan.exploration_directions
-        )
+        optional_directions = "\n".join(f"- {direction}" for direction in query_plan.exploration_directions)
 
         prompt = (
             "You are an expert tasked with formulating novel and robust "

@@ -232,8 +232,7 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
     updates = list(gradio_app_module.run_cycle_with_progress(timeout_seconds=1, poll_seconds=0.001))
 
     assert any(
-        "Active work: generating, reviewing, ranking, and evolving hypotheses." in update[0]
-        for update in updates
+        "Active work: generating, reviewing, ranking, and evolving hypotheses." in update[0] for update in updates
     )
     assert all("Streamed hypothesis" not in update[1] for update in updates[:-1])
     assert any("Elapsed:" in update[0] for update in updates)

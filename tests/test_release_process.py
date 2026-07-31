@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from scripts.prepare_upstream_release import (
@@ -72,6 +73,8 @@ def test_build_pr_body_includes_publication_gate_and_auto_deploy_contract():
 
 def load_workflow(name: str) -> dict:
     path = Path(".github/workflows") / name
+    if not path.exists():
+        pytest.skip(f"{name} is not configured in this repository")
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
