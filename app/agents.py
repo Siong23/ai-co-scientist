@@ -1045,9 +1045,29 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
     prompt = f"""
     You are an expert evaluator tasked with comparing two hypotheses.
 
-    Evaluate the two provided hypotheses (Hypothesis 1 and Hypothesis 2)
-    and determine which one is superior based on the specified {research_goal.idea_attributes}.
-    Provide a concise rationale for your selection, concluding with the phrase "better hypothesis: <1 or 2>".
+    Evaluate the two provided hypotheses (Hypothesis 1 and Hypothesis 2) and
+    determine which one is superior.
+
+    Evaluate the hypotheses based on:
+    - Alignment with the research goal
+    - {research_goal.idea_attributes}
+    - The Evaluation Criteria provided below
+    - Quality and relevance of the supporting evidence
+    - Reviewer comments
+    - Overall scientific merit
+
+    The listed Evidence Sources indicate which retrieved literature supports each
+    hypothesis. Consider the strength and relevance of this supporting evidence
+    during your evaluation, but do not judge solely by the number of supporting
+    sources.
+
+    Provide your reasoning first, then end your response with exactly one of the following:
+
+    better hypothesis: 1
+
+    or
+
+    better hypothesis: 2
 
     Goal:
     {research_goal.description}
@@ -1058,24 +1078,31 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
     Considerations:
     {considerations}
 
-    Each hypothesis includes an independent review.
-    These reviews may contain numerical scores.
-    Disregard these scores in your comparative analysis,
-    as they may not be directly comparable across reviews.
+    Each hypothesis includes an independent review containing novelty and
+    feasibility assessments, reviewer comments, and supporting references.
+
+    Do not determine the winner solely based on the novelty or feasibility
+    ratings. Instead, use the review comments, supporting evidence, and
+    overall scientific quality to make a balanced comparative judgement.
 
     Hypothesis 1:
     {hypoA.text}
 
-    Hypothesis 2:
-    {hypoB.text}
+    Evidence Sources:
+    {chr(10).join(hypoA.evidence_source_ids) if hypoA.evidence_source_ids else "No evidence sources."}
 
     Review of Hypothesis 1:
     {reviewA}
+    
+    Hypothesis 2:
+    {hypoB.text}
+
+    Evidence Sources:
+    {chr(10).join(hypoB.evidence_source_ids) if hypoB.evidence_source_ids else "No evidence sources."}
 
     Review of Hypothesis 2:
     {reviewB}
-
-    Reasoning and conclusion (end with "better hypothesis: <1 or 2>"): 
+    
     """
 
     response = call_llm(
