@@ -162,10 +162,20 @@ def execute_cycle(
 
     try:
         iteration = context.iteration_number + 1
+
+        # Start timing the cycle execution
+        start_time = time.perf_counter()
+
         logger.info(f"Running cycle {iteration}")
 
         # Run the cycle
         cycle_details = cycle_supervisor.run_cycle(research_goal, context)
+
+        # Log execution time
+        total_time = time.perf_counter() - start_time
+        cycle_details["execution_time"] = total_time
+
+        logger.info(f"Cycle execution time: {total_time:.2f} seconds")
 
         # Log all steps and hypotheses
         steps = cycle_details.get("steps", {})
@@ -190,14 +200,18 @@ def execute_cycle(
             categories = sorted({classify_llm_error(e) for e in errors})
             cause = "; ".join(categories)
             if produced_any:
-                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}). Log: {log_file}"
+                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\n Execution Time: {total_time:.2f} seconds.\n Log: {log_file}"
             else:
                 status_msg = (
-                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}. "
+                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n Execution Time: {total_time:.2f} seconds.\n"
                     f"See the results panel for details. Log: {log_file}"
                 )
         else:
-            status_msg = f"✅ Cycle {iteration} completed successfully! Log: {log_file}"
+            status_msg = (
+                f"✅ Cycle {iteration} completed successfully!\n"
+                f"Execution Time: {total_time:.2f} seconds\n"
+                f"Log: {log_file}"
+            )
 
         return {
             "status": status_msg,
@@ -296,10 +310,7 @@ def format_evidence_sources_html(
         )
 
     rendered_sources = ", ".join(links) if links else "None recorded"
-    return (
-        "<p><strong>Evidence Sources:</strong> "
-        f"{rendered_sources}</p>"
-    )
+    return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>"
 
 
 def run_cycle_with_progress(
