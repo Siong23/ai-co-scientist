@@ -13,8 +13,7 @@ jobs:
 
   ci:
 
-    runs-on:
-      - self-hosted
+    runs-on: ubuntu-latest
 
     steps:
 
@@ -41,33 +40,3 @@ jobs:
       - name: Run unit tests
         run: |
           pytest --ignore=tests/test_release_process.py
-
-  deploy:
-
-    needs: ci
-
-    if: github.ref == 'refs/heads/main'
-
-    runs-on:
-      - self-hosted
-
-    steps:
-
-      - name: Update local repository
-        run: |
-          cd /home/server2/ai-co-scientist          
-          git pull origin main
-
-      - name: Install/update dependencies
-        run: |
-          cd /home/server2/ai-co-scientist
-          ./venv/bin/pip install -r requirements.txt || pip install -r requirements.txt
-
-      - name: Restart AI Co-Scientist
-        run: |
-          sudo systemctl restart ai-co-scientist.service
-
-      - name: Verify service
-        run: |
-          sleep 3
-          systemctl status ai-co-scientist.service --no-pager
