@@ -12,7 +12,7 @@ lmstudio_base_url: "http://100.117.90.5:1234/v1"
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
 # llm_model: "meta-llama/llama-3.2-3b-instruct:free"
 # llm_model: "deepseek-ai_deepseek-r1-0528-qwen3-8b"
-llm_model: "qwen/qwen3.6-35b-a3b"
+llm_model: "openai/gpt-oss-120b"
 
 # Number of hypotheses to generate
 num_hypotheses: 4
@@ -56,3 +56,9 @@ rag:
   generation_debate_rounds: 3
   rrf_k: 60
   max_abstract_chars: 1800
+
+# Semantic Scholar fallback (academic search, triggers after arXiv is exhausted).
+# Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).
+semantic_scholar:
+  enabled: true
+  results_per_query: 6
