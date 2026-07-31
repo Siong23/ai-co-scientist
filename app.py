@@ -200,10 +200,10 @@ def execute_cycle(
             categories = sorted({classify_llm_error(e) for e in errors})
             cause = "; ".join(categories)
             if produced_any:
-                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\n Execution Time: {total_time:.2f} seconds.\n Log: {log_file}"
+                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\nExecution Time: {total_time:.2f} seconds.\nLog: {log_file}"
             else:
                 status_msg = (
-                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n Execution Time: {total_time:.2f} seconds.\n"
+                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\nExecution Time: {total_time:.2f} seconds.\n"
                     f"See the results panel for details. Log: {log_file}"
                 )
         else:
