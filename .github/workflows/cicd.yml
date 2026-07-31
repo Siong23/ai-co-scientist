@@ -55,8 +55,21 @@ jobs:
 
       - name: Update local repository
         run: |
-          cd /home/server2/ai-co-scientist          
-          git pull origin main
+          cd /home/server2/ai-co-scientist
+          git fetch origin main
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git stash push -m "pre-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            backup_branch="backup/pre-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            git branch "$backup_branch" HEAD
+            echo "Saved previous deployment commit on $backup_branch"
+          fi
+
+          git checkout main
+          git reset --hard origin/main
 
       - name: Install/update dependencies
         run: |
