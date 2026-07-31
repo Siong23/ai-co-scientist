@@ -5,10 +5,11 @@ ranking (issue llnl#36). Offline: the LLM boundary is mocked at app.agents.call_
 from unittest.mock import patch
 
 import pytest
+from langchain_core.documents import Document
 
 import app.utils as utils
 from app.agents import GenerationAgent, SupervisorAgent
-from app.models import ContextMemory, ResearchGoal
+from app.models import ContextMemory, Hypothesis, ResearchGoal
 from app.utils import classify_llm_error
 
 # --- classifier unit tests (the four required categories + fallback) ---
@@ -24,6 +25,10 @@ from app.utils import classify_llm_error
         ("Error: Could not connect to LM Studio at localhost.", "LM Studio unavailable"),
         ("Could not parse LLM response: Expecting value", "Model returned unparsable output"),
         ("Error: LLM model not configured.", "LLM model not configured"),
+        (
+            "Retrieved evidence is insufficient after 2 rounds.",
+            "Insufficient retrieved evidence",
+        ),
         ("Error: LM Studio call failed: malformed response", "LLM/API error"),
     ],
 )
@@ -38,12 +43,63 @@ def _goal():
     return ResearchGoal("test goal", num_hypotheses=2)
 
 
+QUERY_PLAN = """
+{
+  "queries": ["query 1", "query 2", "query 3", "query 4", "query 5"],
+  "required_terms": ["test"],
+  "explicit_requirements": [
+    {"id": "test_goal", "goal_quote": "test goal"}
+  ],
+  "exploration_directions": []
+}
+"""
+
+COVERAGE = """
+{
+  "aspect_coverage": [
+    {"aspect_id": "test_goal", "source_ids": ["arXiv:1234.5678"]}
+  ],
+  "gap_queries": [],
+  "reason": "All aspects are covered."
+}
+"""
+
+SYNTHESIS = """
+{
+  "established_findings": [
+    {
+      "claim": "The test evidence establishes a premise.",
+      "source_ids": ["arXiv:1234.5678"]
+    }
+  ],
+  "contradictions": [],
+  "knowledge_gaps": ["The proposed relationship remains untested."],
+  "analytical_rationale": "The premise motivates a testable inference."
+}
+"""
+
+
+def _document():
+    return Document(
+        page_content=("Source ID: arXiv:1234.5678\nTitle: Test evidence\nAbstract: test evidence abstract"),
+        metadata={
+            "source_id": "arXiv:1234.5678",
+            "arxiv_id": "1234.5678",
+            "title": "Test evidence",
+            "abstract": "test evidence abstract",
+        },
+    )
+
+
 def test_generate_returns_errors_and_keeps_them_out_of_hypotheses():
     with patch(
         "app.agents.call_llm",
         return_value="Error: LM Studio authentication failed.",
     ):
-        hypos, errors = GenerationAgent().generate_new_hypotheses(_goal(), ContextMemory())
+        hypos, errors = GenerationAgent(
+            minimum_relevant_sources=1,
+            debate_rounds=0,
+        ).generate_new_hypotheses(_goal(), ContextMemory())
 
     assert hypos == []  # error markers must never enter the ranking flow
     assert len(errors) == 1
@@ -51,21 +107,84 @@ def test_generate_returns_errors_and_keeps_them_out_of_hypotheses():
 
 
 def test_generate_happy_path_returns_no_errors():
-    payload = '[{"title": "H1", "text": "idea one"}, {"title": "H2", "text": "idea two"}]'
-    with patch("app.agents.call_llm", return_value=payload):
-        hypos, errors = GenerationAgent().generate_new_hypotheses(_goal(), ContextMemory())
+    payload = """
+    [
+      {
+        "title": "H1",
+        "hypothesis": "idea one",
+        "rationale": "reason one",
+        "feasibility": "method one",
+        "source_ids": ["arXiv:1234.5678"]
+      },
+      {
+        "title": "H2",
+        "hypothesis": "idea two",
+        "rationale": "reason two",
+        "feasibility": "method two",
+        "source_ids": ["1234.5678"]
+      }
+    ]
+    """
+    with (
+        patch(
+            "app.agents.call_llm",
+            side_effect=[QUERY_PLAN, COVERAGE, SYNTHESIS, payload],
+        ),
+        patch.object(
+            GenerationAgent,
+            "_retrieve_scientific_sources",
+            return_value=[_document()],
+        ),
+        patch(
+            "app.agents.call_llm_for_relevance_filter",
+            return_value=(["arXiv:1234.5678"], None),
+        ),
+    ):
+        hypos, errors = GenerationAgent(
+            minimum_relevant_sources=1,
+            debate_rounds=0,
+        ).generate_new_hypotheses(_goal(), ContextMemory())
 
     assert [h.title for h in hypos] == ["H1", "H2"]
+    assert all(h.evidence_source_ids == ["arXiv:1234.5678"] for h in hypos)
     assert errors == []
 
 
 def test_generate_uses_selected_research_goal_model():
-    payload = '[{"title": "H1", "text": "idea one"}]'
+    payload = """
+    [
+      {
+        "title": "H1",
+        "hypothesis": "idea one",
+        "rationale": "reason one",
+        "feasibility": "method one",
+        "source_ids": ["arXiv:1234.5678"]
+      }
+    ]
+    """
     goal = ResearchGoal("test goal", llm_model="chosen-local-model", num_hypotheses=1)
-    with patch("app.agents.call_llm", return_value=payload) as mock_call:
-        GenerationAgent().generate_new_hypotheses(goal, ContextMemory())
+    with (
+        patch(
+            "app.agents.call_llm",
+            side_effect=[QUERY_PLAN, COVERAGE, SYNTHESIS, payload],
+        ) as mock_call,
+        patch.object(
+            GenerationAgent,
+            "_retrieve_scientific_sources",
+            return_value=[_document()],
+        ),
+        patch(
+            "app.agents.call_llm_for_relevance_filter",
+            return_value=(["arXiv:1234.5678"], None),
+        ),
+    ):
+        GenerationAgent(
+            minimum_relevant_sources=1,
+            debate_rounds=0,
+        ).generate_new_hypotheses(goal, ContextMemory())
 
-    assert mock_call.call_args.kwargs["model"] == "chosen-local-model"
+    assert len(mock_call.call_args_list) == 4
+    assert all(call.kwargs["model"] == "chosen-local-model" for call in mock_call.call_args_list)
 
 
 # --- full cycle propagates the cause to cycle_details["errors"] ---
@@ -89,12 +208,38 @@ def test_run_cycle_propagates_generation_error(llm_error, expected_category):
 
 
 def test_run_cycle_no_errors_key_on_success():
-    payload = '[{"title": "H1", "text": "idea one"}]'
-    with patch("app.agents.call_llm", return_value=payload):
+    hypothesis = Hypothesis("G1000", "H1", "idea one")
+    source = {
+        "source_id": "arXiv:1234.5678",
+        "arxiv_id": "1234.5678",
+        "title": "Evidence used",
+        "abstract": "Direct evidence.",
+    }
+    reflection_payload = """
+    {
+      "novelty_review": "HIGH",
+      "feasibility_review": "HIGH",
+      "comment": "Looks good.",
+      "references": []
+    }
+    """
+
+    def generate_with_source(research_goal, context):
+        context.last_retrieved_sources = [source]
+        return [hypothesis], []
+
+    with (
+        patch(
+            "app.agents.GenerationAgent.generate_new_hypotheses",
+            side_effect=generate_with_source,
+        ),
+        patch("app.agents.call_llm", return_value=reflection_payload),
+    ):
         details = SupervisorAgent().run_cycle(_goal(), ContextMemory())
 
     assert "errors" not in details or not details["errors"]
     assert details["steps"]["generation"]["hypotheses"]
+    assert details["steps"]["generation"]["sources"] == [source]
 
 
 def test_surfaced_error_never_contains_key(monkeypatch):

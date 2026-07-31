@@ -110,6 +110,84 @@ def test_local_model_list_comes_from_lmstudio(gradio_app_module):
     mock_fetch.assert_called_once()
 
 
+def test_references_render_only_sources_used_for_generation(
+    gradio_app_module,
+):
+    cycle_details = {
+        "steps": {
+            "generation": {
+                "sources": [
+                    {
+                        "title": "Selected evidence",
+                        "authors": ["Researcher"],
+                        "arxiv_id": "1234.5678v1",
+                        "published": "2024-01-01",
+                        "abstract": "Directly relevant evidence.",
+                        "arxiv_url": ("https://arxiv.org/abs/1234.5678"),
+                        "pdf_url": ("https://arxiv.org/pdf/1234.5678"),
+                    }
+                ]
+            }
+        }
+    }
+
+    html = gradio_app_module.get_references_html(cycle_details)
+
+    assert "Retrieved Evidence Used for Generation" in html
+    assert "Selected evidence" in html
+    assert "Space VLBI" not in html
+
+
+def test_references_do_not_search_again_when_no_source_was_used(
+    gradio_app_module,
+):
+    html = gradio_app_module.get_references_html({"steps": {"generation": {"sources": []}}})
+
+    assert html == ("<p>No retrieved evidence was used for generation.</p>")
+
+
+def test_hypothesis_evidence_sources_are_clickable_and_validated(
+    gradio_app_module,
+):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "generation": {
+                "sources": [
+                    {
+                        "source_id": "arXiv:1111.1111v2",
+                        "arxiv_id": "1111.1111v2",
+                    },
+                    {
+                        "source_id": "arXiv:hep-th/9901001",
+                        "arxiv_id": "hep-th/9901001",
+                    },
+                ],
+                "hypotheses": [
+                    {
+                        "id": "G1",
+                        "title": "Grounded hypothesis",
+                        "text": "Testable claim.",
+                        "evidence_source_ids": [
+                            "arXiv:1111.1111v2",
+                            "arXiv:hep-th/9901001",
+                            "arXiv:9999.9999",
+                        ],
+                    }
+                ],
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert "Evidence Sources:" in html
+    assert 'href="https://arxiv.org/abs/1111.1111v2"' in html
+    assert 'href="https://arxiv.org/abs/hep-th/9901001"' in html
+    assert "arXiv:9999.9999" not in html
+    assert 'target="_blank" rel="noopener noreferrer"' in html
+
+
 def test_advanced_settings_exposes_available_model_choices(gradio_app_module):
     models = [gradio_app_module.CONFIGURED_LLM_MODEL, "local/alternative-model"]
 
@@ -154,8 +232,10 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
     updates = list(gradio_app_module.run_cycle_with_progress(timeout_seconds=1, poll_seconds=0.001))
 
     assert any(
-        "Active work: generating, reviewing, ranking, and evolving hypotheses." in update[0] for update in updates
+        "Active work: generating, reviewing, ranking, and evolving hypotheses." in update[0]
+        for update in updates
     )
+    assert all("Streamed hypothesis" not in update[1] for update in updates[:-1])
     assert any("Elapsed:" in update[0] for update in updates)
     assert updates[-1][0].startswith("done")
     assert updates[-1][1:] == ("<p>done</p>", "<p>refs</p>")

@@ -4,6 +4,7 @@ import threading
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 import gradio as gr
 
@@ -13,7 +14,6 @@ from app.agents import SupervisorAgent
 from app.config import config
 from app.models import ContextMemory, ResearchGoal
 from app.run_store import delete_run, get_reports_dir, history_html, list_runs, report_file_url, save_run, write_report
-from app.tools.arxiv_search import ArxivSearchTool
 from app.utils import (
     classify_llm_error,
     fetch_lmstudio_models,
@@ -267,11 +267,46 @@ def timeout_results_html(timeout_seconds: float) -> str:
     """
 
 
+def format_evidence_sources_html(
+    hypothesis: Dict,
+    generation_sources: List[Dict],
+) -> str:
+    """Render validated hypothesis source IDs as clickable arXiv links."""
+    import html as html_lib
+
+    available_source_ids = {
+        str(source.get("source_id") or f"arXiv:{source.get('arxiv_id')}")
+        for source in generation_sources
+        if source.get("source_id") or source.get("arxiv_id")
+    }
+    evidence_source_ids = hypothesis.get("evidence_source_ids", [])
+    if not isinstance(evidence_source_ids, list):
+        evidence_source_ids = []
+
+    links = []
+    for source_id in dict.fromkeys(evidence_source_ids):
+        if not isinstance(source_id, str) or source_id not in available_source_ids:
+            continue
+        arxiv_id = source_id.removeprefix("arXiv:")
+        href = f"https://arxiv.org/abs/{quote(arxiv_id, safe='/.-')}"
+        links.append(
+            f'<a href="{html_lib.escape(href, quote=True)}" '
+            'target="_blank" rel="noopener noreferrer">'
+            f"{html_lib.escape(source_id)}</a>"
+        )
+
+    rendered_sources = ", ".join(links) if links else "None recorded"
+    return (
+        "<p><strong>Evidence Sources:</strong> "
+        f"{rendered_sources}</p>"
+    )
+
+
 def run_cycle_with_progress(
     timeout_seconds: int = CYCLE_TIMEOUT_SECONDS,
     poll_seconds: float = CYCLE_PROGRESS_INTERVAL_SECONDS,
 ):
-    """Run a cycle in the background and stream status updates until done or timed out."""
+    """Run a cycle in the background and show results once it finishes."""
     global global_context
 
     if not current_research_goal:
@@ -326,7 +361,7 @@ def run_cycle_with_progress(
             "Active work: generating, reviewing, ranking, and evolving hypotheses.\n"
             f"Upper limit: {format_timeout_duration(timeout_seconds)}."
         )
-        yield status, "<p>Cycle is still running. Results will appear when the current step completes.</p>", ""
+        yield status, "<p>Cycle is still running. Results will appear when the cycle completes.</p>", ""
         thread.join(timeout=min(poll_seconds, max(timeout_seconds - elapsed, 0.1)))
 
     cycle_result = result.get("value")
@@ -362,6 +397,9 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
 
     # Process steps in order
     steps = cycle_details.get("steps", {})
+    generation_sources = steps.get("generation", {}).get("sources", [])
+    if not isinstance(generation_sources, list):
+        generation_sources = []
     # Display steps in the order they appear in the steps dict (preserves backend execution order)
     for step_name, step_data in steps.items():
         step_title = {
@@ -391,7 +429,8 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 html += f"""
                 <div style="border-left: 3px solid #28a745; padding-left: 10px; margin: 10px 0;">
                     <h5>#{i + 1}: {hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
-                    <p>{hypo.get("text", "No description")}</p>
+                    <p style="white-space: pre-line;">{hypo.get("text", "No description")}</p>
+                    {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
 
@@ -405,6 +444,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                        <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
                     {f"<p><strong>Comments:</strong> {hypo.get('comments', 'No comments')}</p>" if hypo.get("comments") else ""}
+                    {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
 
@@ -420,6 +460,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     <li style="margin: 5px 0;">
                         <strong>{hypo.get("title", "Untitled")}</strong> (ID: {hypo.get("id", "Unknown")}) 
                         - Elo: {hypo.get("elo_score", 0):.2f}
+                        {format_evidence_sources_html(hypo, generation_sources)}
                     </li>
                     """
                 html += "</ol>"
@@ -432,6 +473,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 <div style="border-left: 3px solid #ffc107; padding-left: 10px; margin: 10px 0;">
                     <h5>{hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
                     <p>{hypo.get("text", "No description")}</p>
+                    {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
 
@@ -512,6 +554,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
                         <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                            <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
+                        {format_evidence_sources_html(hypo, generation_sources)}
                     </div>
                     """
             # Suggested next steps section
@@ -590,6 +633,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
                 <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                    <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
+                {format_evidence_sources_html(hypo, generation_sources)}
             </div>
             """
 
@@ -618,39 +662,46 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
 
 
 def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoal] = None) -> str:
-    """Get references HTML for the cycle."""
-    try:
-        # Search for arXiv papers related to the research goal
-        goal = research_goal or current_research_goal
-        if goal and goal.description:
-            arxiv_tool = ArxivSearchTool(max_results=5)
-            papers = arxiv_tool.search_papers(query=goal.description, max_results=5, sort_by="relevance")
+    """Render the exact sources supplied to the Generation Agent."""
+    import html as html_lib
 
-            if papers:
-                html = "<h3>📚 Related arXiv Papers</h3>"
-                for paper in papers:
-                    html += f"""
-                    <div style="border: 1px solid #e0e0e0; padding: 15px; margin: 10px 0; border-radius: 8px; background-color: #fafafa;">
-                        <h4>{paper.get("title", "Untitled")}</h4>
-                        <p><strong>Authors:</strong> {", ".join(paper.get("authors", [])[:5])}</p>
-                        <p><strong>arXiv ID:</strong> {paper.get("arxiv_id", "Unknown")} | 
-                           <strong>Published:</strong> {paper.get("published", "Unknown")}</p>
-                        <p><strong>Abstract:</strong> {paper.get("abstract", "No abstract")[:300]}...</p>
-                        <p>
-                            <a href="{paper.get("arxiv_url", "#")}" target="_blank">📄 View on arXiv</a> | 
-                            <a href="{paper.get("pdf_url", "#")}" target="_blank">📁 Download PDF</a>
-                        </p>
-                    </div>
-                    """
-                return html
-            else:
-                return "<p>No related arXiv papers found.</p>"
-        else:
-            return "<p>No research goal set for reference search.</p>"
+    sources = cycle_details.get("steps", {}).get("generation", {}).get("sources", [])
+    if not isinstance(sources, list) or not sources:
+        return "<p>No retrieved evidence was used for generation.</p>"
 
-    except Exception as e:
-        logger.error(f"Error fetching references: {e}")
-        return f"<p>Error loading references: {str(e)}</p>"
+    html = "<h3>📚 Retrieved Evidence Used for Generation</h3>"
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        title = html_lib.escape(str(source.get("title") or "Untitled"))
+        authors = html_lib.escape(", ".join(str(author) for author in source.get("authors", [])[:5]))
+        arxiv_id = html_lib.escape(str(source.get("arxiv_id") or "Unknown"))
+        published = html_lib.escape(str(source.get("published") or "Unknown"))
+        abstract = html_lib.escape(str(source.get("abstract") or "No abstract")[:300])
+        arxiv_url = html_lib.escape(
+            str(source.get("arxiv_url") or "#"),
+            quote=True,
+        )
+        pdf_url = html_lib.escape(
+            str(source.get("pdf_url") or "#"),
+            quote=True,
+        )
+        html += f"""
+        <div style="border: 1px solid #e0e0e0; padding: 15px; margin: 10px 0; border-radius: 8px; background-color: #fafafa;">
+            <h4>{title}</h4>
+            <p><strong>Authors:</strong> {authors}</p>
+            <p><strong>arXiv ID:</strong> {arxiv_id} |
+               <strong>Published:</strong> {published}</p>
+            <p><strong>Abstract:</strong> {abstract}...</p>
+            <p>
+                <a href="{arxiv_url}" target="_blank">📄 View on arXiv</a> |
+                <a href="{pdf_url}" target="_blank">📁 Download PDF</a>
+            </p>
+        </div>
+        """
+
+    return html
 
 
 def create_gradio_interface():

@@ -29,6 +29,9 @@ class Hypothesis:
         self.is_active: bool = True
         self.parent_ids: List[str] = []  # Store IDs of parent hypotheses
 
+        #Sources actually retrieved and supplied to GenerationAgent.
+        self.evidence_source_ids: List[str] = []
+
     def to_dict(self) -> dict:
         return {
             "id": self.hypothesis_id,
@@ -41,6 +44,7 @@ class Hypothesis:
             "references": self.references,
             "is_active": self.is_active,
             "parent_ids": self.parent_ids,  # Include parent IDs
+            "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs ,
         }
 
 
@@ -96,6 +100,8 @@ class ContextMemory:
         self.tournament_results: List[Dict] = []
         self.meta_review_feedback: List[Dict] = []
         self.iteration_number: int = 0
+        # Sources retrieved before generation in the latest cycle.
+        self.last_retrieved_sources: List[Dict] = []
 
     def add_hypothesis(self, hypothesis: Hypothesis):
         self.hypotheses[hypothesis.hypothesis_id] = hypothesis
@@ -140,7 +146,9 @@ class HypothesisResponse(BaseModel):
     review_comments: List[str]
     references: List[Dict]
     is_active: bool
+    evidence_source_ids: List[str] = []
     # parent_ids: List[str] # Add if needed in API response
+
 
 
 class OverviewResponse(BaseModel):
