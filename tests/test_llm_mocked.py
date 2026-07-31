@@ -44,10 +44,7 @@ def test_generation_happy_path_parses_hypotheses():
         result = call_llm_for_generation("test goal", num_hypotheses=2, temperature=0.7)
 
     assert [h["title"] for h in result] == ["Hypothesis A", "Hypothesis B"]
-    assert all(
-        {"hypothesis", "rationale", "feasibility", "source_ids"}.issubset(h)
-        for h in result
-    )
+    assert all({"hypothesis", "rationale", "feasibility", "source_ids"}.issubset(h) for h in result)
 
 
 def test_generation_handles_markdown_fenced_json():
