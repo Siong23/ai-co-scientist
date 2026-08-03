@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 
 from pydantic import BaseModel
 
@@ -28,9 +28,11 @@ class Hypothesis:
         self.references: List[Dict] = []
         self.is_active: bool = True
         self.parent_ids: List[str] = []  # Store IDs of parent hypotheses
+        self.reflection_report: Optional[ReflectionReport] = None
 
         # Sources actually retrieved and supplied to GenerationAgent.
         self.evidence_source_ids: List[str] = []
+        self.evidence_sources: List[Dict] = []  # Store the actual source documents
 
     def to_dict(self) -> dict:
         return {
@@ -44,7 +46,9 @@ class Hypothesis:
             "references": self.references,
             "is_active": self.is_active,
             "parent_ids": self.parent_ids,  # Include parent IDs
-            "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs ,
+            "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs
+            "evidence_sources": self.evidence_sources,  # Include the actual source documents
+            "reflection_report": self.reflection_report.dict() if self.reflection_report else None,
         }
 
 
@@ -149,6 +153,57 @@ class OverviewResponse(BaseModel):
     meta_review_critique: List[str]
     top_hypotheses: List[HypothesisResponse]
     suggested_next_steps: List[str]
+
+
+class PairwiseDecision(BaseModel):
+    hypothesis_a_id: str
+    hypothesis_b_id: str
+
+    outcome: Literal["A","B","TIE","ABSTAIN"]
+
+    scores_a: Dict[str, float] = {}
+    scores_b: Dict[str, float] = {}
+
+    decisive_criteria: List[str] = []
+
+    confidence: float
+
+    reasoning: str
+
+
+class ClaimAssessment(BaseModel):
+    claim: str
+
+    status: Literal[
+        "SUPPORTED",
+        "CONTRADICTED",
+        "MIXED",
+        "NOT_FOUND",
+        "UNVERIFIED"
+    ]
+
+    supporting_evidence: List[Dict] = []
+    contradictory_evidence: List[Dict] = []
+
+    confidence: float = 0.0
+
+
+class ReflectionReport(BaseModel):
+    claims: List[ClaimAssessment] = []
+
+    novelty_score: float = 0.0
+    feasibility_score: float = 0.0
+    plausibility_score: float = 0.0
+    testability_score: float = 0.0
+    evidence_quality_score: float = 0.0
+
+    strengths: List[str] = []
+    weaknesses: List[str] = []
+    contradictions: List[str] = []
+
+    recommendation: str = ""
+
+    confidence: float = 0.0
 
 
 ###############################################################################
