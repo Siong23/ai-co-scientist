@@ -326,7 +326,7 @@ def run_cycle_with_progress(
     global global_context
 
     if not current_research_goal:
-        yield f"❌ {to_bold('Error:')} No research goal set. Please set a research goal first.", "", ""
+        yield f"❌ Error: No research goal set. Please set a research goal first.", "", ""
         return
 
     run_goal = current_research_goal
@@ -365,7 +365,7 @@ def run_cycle_with_progress(
             )
             report_path = write_report(saved_run)
             yield (
-                f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
+                f"{timeout_status}\nRun ID: {saved_run['run_id']}\nReport: {report_file_url(report_path)}",
                 timeout_html,
                 "",
             )
@@ -382,7 +382,7 @@ def run_cycle_with_progress(
 
     cycle_result = result.get("value")
     if not cycle_result:
-        yield f"❌ {to_bold('Error:')} Cycle ended without a result.", "", ""
+        yield f"❌ Error: Cycle ended without a result.", "", ""
         return
     if current_research_goal is run_goal:
         global_context = run_context
