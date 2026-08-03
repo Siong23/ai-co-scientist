@@ -95,7 +95,7 @@ def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[s
         return f"❌ {to_bold('Error:')} Select a saved run to delete.", history_html(), gr.update(choices=history_run_choices(), value=None)
 
     deleted = delete_run(selected_run_id)
-    message = f"✅ {to_bold('Success:')} Deleted saved run {selected_run_id}." if deleted else f"❌ {to_bold('Error:')} Saved run {selected_run_id} was not found."
+    message = f"Deleted saved run {selected_run_id}." if deleted else f"Saved run {selected_run_id} was not found."
     return message, history_html(), gr.update(choices=history_run_choices(), value=None)
 
 # Create a small helper function to turn plain text into bold text
