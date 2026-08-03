@@ -10,6 +10,7 @@ from langchain_core.vectorstores import InMemoryVectorStore
 
 from .config import config
 from .tools.arxiv_search import ArxivSearchTool
+from .tools.semantic_scholar_search import SemanticScholarSearchTool
 from .utils import get_sentence_transformer_model, logger
 
 
@@ -68,7 +69,7 @@ def reciprocal_rank_fusion(
     ranked_results: Sequence[Sequence[dict[str, Any]]],
     k: int = 60,
 ) -> list[dict[str, Any]]:
-    """Fuse arXiv result rankings and deduplicate papers by canonical ID."""
+    """Fuse result rankings and deduplicate papers by canonical ID."""
 
     scores: dict[str, float] = {}
     papers: dict[str, dict[str, Any]] = {}
@@ -132,6 +133,13 @@ class ArxivRAGRetriever:
         self.max_abstract_chars = max_abstract_chars or int(rag_config.get("max_abstract_chars", 1800))
 
         self.arxiv = ArxivSearchTool(max_results=self.results_per_query)
+        semantic_scholar_config = config.get("semantic_scholar", {})
+        semantic_scholar_results = int(semantic_scholar_config.get("results_per_query", self.results_per_query))
+        self.semantic_scholar = (
+            SemanticScholarSearchTool(max_results=semantic_scholar_results)
+            if semantic_scholar_config.get("enabled", True)
+            else None
+        )
         self.embeddings = SharedSentenceTransformerEmbeddings()
 
     def retrieve(
@@ -213,12 +221,51 @@ class ArxivRAGRetriever:
         ).casefold()
         return any(term.casefold() in searchable_text for term in required_terms)
 
+    def retrieve_fallback(
+        self,
+        original_query: str,
+        query_plan: SearchQueryPlan,
+    ) -> list[Document]:
+        """Retrieve Semantic Scholar papers after arXiv evidence is exhausted."""
+
+        original_query = original_query.strip()
+        if not original_query or self.semantic_scholar is None:
+            return []
+
+        ranked_results = [self.semantic_scholar.search_papers(query=query) for query in query_plan.queries]
+        fused_papers = reciprocal_rank_fusion(ranked_results, k=self.rrf_k)
+        documents = [
+            self._paper_to_document(paper) for paper in fused_papers if paper.get("abstract") and paper.get("arxiv_id")
+        ]
+        if not documents:
+            logger.info(
+                "Semantic Scholar fallback returned no documents for query %r.",
+                original_query,
+            )
+            return []
+
+        vector_store = InMemoryVectorStore(embedding=self.embeddings)
+        vector_store.add_documents(
+            documents=documents,
+            ids=[str(document.metadata["source_id"]) for document in documents],
+        )
+        selected = vector_store.similarity_search(
+            original_query,
+            k=min(self.top_k, len(documents)),
+        )
+        logger.info(
+            "Semantic Scholar fallback selected %d source(s) from %d candidate(s).",
+            len(selected),
+            len(documents),
+        )
+        return selected
+
     def _paper_to_document(
         self,
         paper: dict[str, Any],
     ) -> Document:
         arxiv_id = str(paper["arxiv_id"])
-        source_id = f"arXiv:{arxiv_id}"
+        source_id = arxiv_id if arxiv_id.startswith("s2:") else f"arXiv:{arxiv_id}"
         abstract = str(paper.get("abstract", ""))[: self.max_abstract_chars]
 
         page_content = (
