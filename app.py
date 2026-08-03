@@ -98,6 +98,10 @@ def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[s
     message = f"Deleted saved run {selected_run_id}." if deleted else f"Saved run {selected_run_id} was not found."
     return message, history_html(), gr.update(choices=history_run_choices(), value=None)
 
+# Create a small helper function to turn plain text into bold text
+def to_bold(text):
+    # Mapping for a-z and A-Z to Mathematical Bold Capital/Small letters
+    return "".join(chr(ord(c) + 119743) if 'A' <= c <= 'Z' else chr(ord(c) + 119737) if 'a' <= c <= 'z' else c for c in text)
 
 def set_research_goal(
     description: str,
@@ -133,7 +137,8 @@ def set_research_goal(
         logger.info(f"Research goal set: {description}")
         logger.info(f"Settings: model={current_research_goal.llm_model}, num={current_research_goal.num_hypotheses}")
 
-        status_msg = f"✅ Research goal set successfully!\n\n**Goal:** {description}\n**Model:** {current_research_goal.llm_model or 'Default'}\n**Hypotheses per cycle:** {num_hypotheses}"
+        # status_msg = f"✅ Research goal set successfully!\n\n**Goal:** {description}\n**Model:** {current_research_goal.llm_model or 'Default'}\n**Hypotheses per cycle:** {num_hypotheses}"
+        status_msg = f"✅ Research goal set successfully!\n\n{to_bold('Goal:')} {description}\n{to_bold('Model:')} {current_research_goal.llm_model or 'Default'}\n{to_bold('Hypotheses per cycle:')} {num_hypotheses}"
 
         return status_msg, "Ready to run first cycle. Click 'Run Cycle' to begin."
 
@@ -200,17 +205,17 @@ def execute_cycle(
             categories = sorted({classify_llm_error(e) for e in errors})
             cause = "; ".join(categories)
             if produced_any:
-                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\nExecution Time: {total_time:.2f} seconds.\nLog: {log_file}"
+                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\n\n{to_bold('Execution Time:')} {total_time:.2f} seconds.\n{to_bold('Log:')} {log_file}"
             else:
                 status_msg = (
-                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\nExecution Time: {total_time:.2f} seconds.\n"
-                    f"See the results panel for details. Log: {log_file}"
+                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n\n{to_bold('Execution Time:')} {total_time:.2f} seconds.\n"
+                    f"See the results panel for details. {to_bold('Log:')} {log_file}"
                 )
         else:
             status_msg = (
-                f"✅ Cycle {iteration} completed successfully!\n"
-                f"Execution Time: {total_time:.2f} seconds\n"
-                f"Log: {log_file}"
+                f"✅ Cycle {iteration} completed successfully!\n\n"
+                f"{to_bold('Execution Time:')} {total_time:.2f} seconds\n"
+                f"{to_bold('Log:')} {log_file}"
             )
 
         return {
