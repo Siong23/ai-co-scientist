@@ -21,14 +21,14 @@ def score_hypothesis(
 
     report = hypothesis.reflection_report
 
+    if report is None:
+        return {}
+
     alignment = (
         report.novelty_score +
         report.feasibility_score +
         report.plausibility_score
     ) / 3
-
-    if report is None:
-        return {}
 
     return {
         "research_goal_alignment": alignment,
