@@ -302,141 +302,13 @@ def judge_debate(
 def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: ResearchGoal) -> PairwiseDecision:
     """Compares two hypotheses based on novelty and feasibility scores."""
 
-    # def score(h: Hypothesis) -> int:
-    #     mapping = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, None: 0, "ERROR": 0}  # Handle ERROR case
-    #     score_novelty = mapping.get(h.novelty_review, 0) if isinstance(h.novelty_review, str) else 0
-    #     score_feasibility = mapping.get(h.feasibility_review, 0) if isinstance(h.feasibility_review, str) else 0
-    #     return score_novelty + score_feasibility
-
-    # scoreA = score(hypoA)
-    # scoreB = score(hypoB)
-
-    # if scoreA > scoreB:
-    #     winner = hypoA
-    # elif scoreB > scoreA:
-    #     winner = hypoB
-    # else:
-    #     winner = random.choice([hypoA, hypoB])  # Tie-breaker
-
-    # logger.info(
-    #     "Debate: %s (score %d) vs %s (score %d) => Winner: %s",
-    #     hypoA.hypothesis_id,
-    #     scoreA,
-    #     hypoB.hypothesis_id,
-    #     scoreB,
-    #     winner.hypothesis_id,
-    # )
-    # return winner
-
-    # reviewA = f"""
-    # Novelty Review:
-    # {hypoA.novelty_review}
-
-    # Feasibility Review:
-    # {hypoA.feasibility_review}
-
-    # Reviewer Comments:
-    # {chr(10).join(map(str, hypoA.review_comments))}
-
-    # References:
-    # {format_references(hypoA.references)}
-    # """
-
     reviewA = format_reflection_report(
         hypoA.reflection_report
     )
 
-    # reviewB = f"""
-    # Novelty Review:
-    # {hypoB.novelty_review}
-
-    # Feasibility Review:
-    # {hypoB.feasibility_review}
-
-    # Reviewer Comments:
-    # {chr(10).join(map(str, hypoB.review_comments))}
-
-    # References:
-    # {format_references(hypoB.references)}
-    # """
-
     reviewB = format_reflection_report(
         hypoB.reflection_report
     )
-
-    # Format constraints into readable bullet points
-    # considerations = (
-    #     "\n".join(f"- {k}: {v}" for k, v in research_goal.constraints.items()) if research_goal.constraints else "None"
-    # )
-
-    # prompt = f"""
-    # You are an expert evaluator tasked with comparing two hypotheses.
-
-    # Evaluate the two provided hypotheses (Hypothesis 1 and Hypothesis 2) and
-    # determine which one is superior.
-
-    # Evaluate the hypotheses based on:
-    # - Alignment with the research goal
-    # - {research_goal.idea_attributes}
-    # - The Evaluation Criteria provided below
-    # - Quality and relevance of the supporting evidence
-    # - Reviewer comments
-    # - Overall scientific merit
-
-    # The listed Evidence Sources indicate which retrieved literature supports each
-    # hypothesis. Consider the strength and relevance of this supporting evidence
-    # during your evaluation, but do not judge solely by the number of supporting
-    # sources.
-
-    # Provide your reasoning first, then end your response with exactly one of the following:
-
-    # better hypothesis: 1
-
-    # or
-
-    # better hypothesis: 2
-
-    # Goal:
-    # {research_goal.description}
-
-    # Evaluation Criteria:
-    # {research_goal.preferences}
-
-    # Considerations:
-    # {considerations}
-
-    # Each hypothesis includes an independent review containing novelty and
-    # feasibility assessments, reviewer comments, and supporting references.
-
-    # Do not determine the winner solely based on the novelty or feasibility
-    # ratings. Instead, use the review comments, supporting evidence, and
-    # overall scientific quality to make a balanced comparative judgement.
-
-    # Hypothesis 1:
-    # {hypoA.text}
-
-    # Evidence Sources:
-    # {chr(10).join(hypoA.evidence_source_ids) if hypoA.evidence_source_ids else "No evidence sources."}
-
-    # Review of Hypothesis 1:
-    # {reviewA}
-    
-    # Hypothesis 2:
-    # {hypoB.text}
-
-    # Evidence Sources:
-    # {chr(10).join(hypoB.evidence_source_ids) if hypoB.evidence_source_ids else "No evidence sources."}
-
-    # Review of Hypothesis 2:
-    # {reviewB}
-    
-    # """
-
-    # response = call_llm(
-    #     prompt,
-    #     temperature=0.2,
-    #     model=research_goal.llm_model,
-    # )
 
     scores_a = score_hypothesis(
         hypoA,
@@ -523,17 +395,6 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
 
     criteria = parse_decisive_criteria(response)
 
-    # final = parse_pairwise_result(response)
-
-    # if final=="A":
-    #     winner=hypoA
-
-    # elif final=="B":
-    #     winner=hypoB
-
-    # else:
-    #     winner=None
-
     reasoning = f"""
     === Debate for Hypothesis 1 ===
 
@@ -564,19 +425,6 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
 
     logger.info("Pairwise ranking response:\n%s", response)
 
-    # try:
-    #     winner_index = parse_pairwise_result(response)
-
-    #     winner = hypoA if winner_index == 1 else hypoB
-
-    # except ValueError:
-    #     logger.warning(
-    #         "Could not parse LLM ranking response.\n%s",
-    #         response,
-    #     )
-
-    #     winner = random.choice([hypoA, hypoB])
-
     return PairwiseDecision(
         hypothesis_a_id = hypoA.hypothesis_id,
         hypothesis_b_id = hypoB.hypothesis_id,
@@ -587,20 +435,6 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
         reasoning = reasoning,
         decisive_criteria = criteria,
     )
-
-    # match = re.search(
-    #     r"better\s+(?:idea|hypothesis)\s*:\s*([12])",
-    #     response,
-    #     re.IGNORECASE,
-    # )
-
-    # if match:
-    #     winner = hypoA if match.group(1) == "1" else hypoB
-    # else:
-    #     logger.warning("Could not parse LLM ranking. Using random winner.")
-    #     winner = random.choice([hypoA, hypoB])
-
-    # return winner, response
 
 def update_elo_tie(hypoA, hypoB, k_factor):
 
@@ -656,7 +490,6 @@ def parse_pairwise_result(response: str) -> str:
         ],
 
         "TIE": [
-            # r"better\s+hypothesis\s*:\s*tie",
             r"decision\s*:\s*tie",
             r"result\s*:\s*tie",
         ],
