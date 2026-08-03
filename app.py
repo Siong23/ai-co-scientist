@@ -365,7 +365,7 @@ def run_cycle_with_progress(
             )
             report_path = write_report(saved_run)
             yield (
-                f"{timeout_status}\nRun ID: {saved_run['run_id']}\nReport: {report_file_url(report_path)}",
+                f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
                 timeout_html,
                 "",
             )
