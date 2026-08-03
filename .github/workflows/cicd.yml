@@ -18,10 +18,10 @@ jobs:
     steps:
 
       - name: Checkout source code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -40,3 +40,47 @@ jobs:
       - name: Run unit tests
         run: |
           pytest --ignore=tests/test_release_process.py
+
+
+  deploy:
+
+    needs: ci
+
+    if: github.ref == 'refs/heads/main'
+
+    runs-on:
+      - self-hosted
+
+    steps:
+
+      - name: Update local repository
+        run: |
+          cd /home/server2/ai-co-scientist
+          git fetch origin main
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            git stash push -m "pre-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+            backup_branch="backup/pre-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            git branch "$backup_branch" HEAD
+            echo "Saved previous deployment commit on $backup_branch"
+          fi
+
+          git checkout main
+          git reset --hard origin/main
+
+      - name: Install/update dependencies
+        run: |
+          cd /home/server2/ai-co-scientist
+          ./venv/bin/pip install -r requirements.txt || pip install -r requirements.txt
+
+      - name: Restart AI Co-Scientist
+        run: |
+          sudo systemctl restart ai-co-scientist.service
+
+      - name: Verify service
+        run: |
+          sleep 3
+          systemctl status ai-co-scientist.service --no-pager

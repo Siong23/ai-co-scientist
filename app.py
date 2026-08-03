@@ -98,6 +98,10 @@ def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[s
     message = f"Deleted saved run {selected_run_id}." if deleted else f"Saved run {selected_run_id} was not found."
     return message, history_html(), gr.update(choices=history_run_choices(), value=None)
 
+# Create a small helper function to turn plain text into bold text
+def to_bold(text):
+    # Mapping for a-z and A-Z to Mathematical Bold Capital/Small letters
+    return "".join(chr(ord(c) + 119743) if 'A' <= c <= 'Z' else chr(ord(c) + 119737) if 'a' <= c <= 'z' else c for c in text)
 
 def set_research_goal(
     description: str,
@@ -133,7 +137,8 @@ def set_research_goal(
         logger.info(f"Research goal set: {description}")
         logger.info(f"Settings: model={current_research_goal.llm_model}, num={current_research_goal.num_hypotheses}")
 
-        status_msg = f"✅ Research goal set successfully!\n\n**Goal:** {description}\n**Model:** {current_research_goal.llm_model or 'Default'}\n**Hypotheses per cycle:** {num_hypotheses}"
+        # status_msg = f"✅ Research goal set successfully!\n\n**Goal:** {description}\n**Model:** {current_research_goal.llm_model or 'Default'}\n**Hypotheses per cycle:** {num_hypotheses}"
+        status_msg = f"✅ Research goal set successfully!\n\n{to_bold('Goal:')} {description}\n{to_bold('Model:')} {current_research_goal.llm_model or 'Default'}\n{to_bold('Hypotheses per cycle:')} {num_hypotheses}"
 
         return status_msg, "Ready to run first cycle. Click 'Run Cycle' to begin."
 
@@ -162,10 +167,20 @@ def execute_cycle(
 
     try:
         iteration = context.iteration_number + 1
+
+        # Start timing the cycle execution
+        start_time = time.perf_counter()
+
         logger.info(f"Running cycle {iteration}")
 
         # Run the cycle
         cycle_details = cycle_supervisor.run_cycle(research_goal, context)
+
+        # Log execution time
+        total_time = time.perf_counter() - start_time
+        cycle_details["execution_time"] = total_time
+
+        logger.info(f"Cycle execution time: {total_time:.2f} seconds")
 
         # Log all steps and hypotheses
         steps = cycle_details.get("steps", {})
@@ -190,14 +205,18 @@ def execute_cycle(
             categories = sorted({classify_llm_error(e) for e in errors})
             cause = "; ".join(categories)
             if produced_any:
-                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}). Log: {log_file}"
+                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\n\n{to_bold('Execution Time:')} {total_time:.2f} seconds.\n{to_bold('Log:')} {log_file}"
             else:
                 status_msg = (
-                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}. "
-                    f"See the results panel for details. Log: {log_file}"
+                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n\n{to_bold('Execution Time:')} {total_time:.2f} seconds.\n"
+                    f"See the results panel for details. {to_bold('Log:')} {log_file}"
                 )
         else:
-            status_msg = f"✅ Cycle {iteration} completed successfully! Log: {log_file}"
+            status_msg = (
+                f"✅ Cycle {iteration} completed successfully!\n\n"
+                f"{to_bold('Execution Time:')} {total_time:.2f} seconds\n"
+                f"{to_bold('Log:')} {log_file}"
+            )
 
         return {
             "status": status_msg,
@@ -296,10 +315,7 @@ def format_evidence_sources_html(
         )
 
     rendered_sources = ", ".join(links) if links else "None recorded"
-    return (
-        "<p><strong>Evidence Sources:</strong> "
-        f"{rendered_sources}</p>"
-    )
+    return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>"
 
 
 def run_cycle_with_progress(
@@ -349,7 +365,7 @@ def run_cycle_with_progress(
             )
             report_path = write_report(saved_run)
             yield (
-                f"{timeout_status}\nRun ID: {saved_run['run_id']}\nReport: {report_file_url(report_path)}",
+                f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
                 timeout_html,
                 "",
             )
@@ -358,7 +374,7 @@ def run_cycle_with_progress(
         status = (
             f"⏳ Cycle {iteration} is running.\n"
             f"Elapsed: {format_timeout_duration(elapsed)}.\n"
-            "Active work: generating, reviewing, ranking, and evolving hypotheses.\n"
+            f"Active work: generating, reviewing, ranking, and evolving hypotheses.\n"
             f"Upper limit: {format_timeout_duration(timeout_seconds)}."
         )
         yield status, "<p>Cycle is still running. Results will appear when the cycle completes.</p>", ""

@@ -17,13 +17,7 @@ from ._compat import _legacy
 
 
 class GenerationAgent:
-    """Generate hypotheses grounded in multi-source academic retrieval.
-
-    Primary source: arXiv (all runs).
-    Fallback source: Semantic Scholar â€” triggered automatically when arXiv
-    corrective retrieval rounds are exhausted without sufficient evidence
-    coverage.  No extra LLM calls are required for the fallback.
-    """
+    """Generate hypotheses grounded in multi-source academic retrieval."""
 
     def __init__(
         self,
@@ -191,6 +185,7 @@ Your refined contribution:
         retrieved_documents = []
         coverage = None
         corrective_round = 0
+        fallback_attempted = False
         while True:
             candidate_context = format_documents_for_prompt(candidate_documents)
             candidate_source_ids = {str(document.metadata["source_id"]) for document in candidate_documents}
@@ -234,45 +229,50 @@ Your refined contribution:
                 break
 
             if corrective_round >= (self.rag_retriever.corrective_retrieval_rounds):
+                if not fallback_attempted:
+                    fallback_attempted = True
+                    missing_aspects = [
+                        aspect
+                        for aspect in query_plan.explicit_requirements
+                        if aspect.aspect_id in coverage.missing_aspect_ids
+                    ]
+                    fallback_queries = tuple(
+                        dict.fromkeys(
+                            [
+                                *coverage.gap_queries,
+                                *(aspect.description for aspect in missing_aspects),
+                            ]
+                        )
+                    )
+                    fallback_plan = SearchQueryPlan(
+                        queries=fallback_queries or query_plan.queries,
+                        required_terms=(),
+                        explicit_requirements=query_plan.explicit_requirements,
+                        exploration_directions=query_plan.exploration_directions,
+                    )
+                    try:
+                        fallback_documents = self.rag_retriever.retrieve_fallback(
+                            research_goal.description,
+                            fallback_plan,
+                        )
+                    except Exception as exc:
+                        _legacy.logger.error(
+                            "Semantic Scholar fallback failed: %s",
+                            _legacy.redact_secrets(str(exc)),
+                        )
+                        fallback_documents = []
+                    if fallback_documents:
+                        candidate_documents = self._merge_retrieved_documents(
+                            candidate_documents,
+                            fallback_documents,
+                        )
+                        continue
+
                 missing_descriptions = [
                     aspect.description.rstrip(".")
                     for aspect in query_plan.explicit_requirements
                     if aspect.aspect_id in coverage.missing_aspect_ids
                 ]
-                # Before giving up, try Semantic Scholar as an academic fallback.
-                _legacy.logger.info(
-                    "arXiv exhausted after %d corrective round(s). "
-                    "Attempting Semantic Scholar fallback for missing: %s",
-                    corrective_round,
-                    list(coverage.missing_aspect_ids),
-                )
-                try:
-                    # ``gap_plan`` is only defined after the first corrective
-                    # round has run.  On round 0 we fall back to the original
-                    # query plan which already captures the research goal well.
-                    fallback_plan = (
-                        gap_plan  # noqa: F821 â€“ defined by previous loop iter
-                        if corrective_round > 0
-                        else query_plan
-                    )
-                    fallback_docs = self.rag_retriever.retrieve_fallback(
-                        research_goal.description,
-                        fallback_plan,
-                    )
-                except Exception as exc:
-                    _legacy.logger.error(
-                        "Semantic Scholar fallback failed: %s",
-                        exc,
-                        exc_info=True,
-                    )
-                    fallback_docs = []
-
-                if fallback_docs:
-                    candidate_documents = self._merge_retrieved_documents(candidate_documents, fallback_docs)
-                    # Allow one more coverage check with the enriched pool.
-                    corrective_round += 1
-                    continue
-
                 error = (
                     "Retrieved evidence is insufficient after "
                     f"{corrective_round} corrective retrieval "

@@ -26,6 +26,7 @@ from .utils import (
     generate_unique_id,
     generate_visjs_data,
     logger,  # Use the logger configured in utils
+    redact_secrets,
     similarity_score,
 )
 
@@ -47,16 +48,10 @@ def _parse_generation_response(response: str) -> List[Dict]:
         # Some local models add a short explanation before or after the JSON.
         # raw_decode accepts the first complete JSON value without weakening
         # validation of the hypothesis objects themselves.
-        starts = [
-            index
-            for index in (cleaned.find("["), cleaned.find("{"))
-            if index >= 0
-        ]
+        starts = [index for index in (cleaned.find("["), cleaned.find("{")) if index >= 0]
         if not starts:
             raise ValueError("No JSON object or array was found.")
-        hypotheses_data, _ = json.JSONDecoder().raw_decode(
-            cleaned[min(starts) :]
-        )
+        hypotheses_data, _ = json.JSONDecoder().raw_decode(cleaned[min(starts) :])
 
         if isinstance(hypotheses_data, dict):
             error_text = hypotheses_data.get("error")
@@ -84,12 +79,7 @@ def _parse_generation_response(response: str) -> List[Dict]:
                 "evidence_sources": "source_ids",
             }
             hypotheses_data = [
-                {
-                    aliases.get(key, key): value
-                    for key, value in item.items()
-                }
-                if isinstance(item, dict)
-                else item
+                {aliases.get(key, key): value for key, value in item.items()} if isinstance(item, dict) else item
                 for item in hypotheses_data
             ]
 
@@ -154,8 +144,7 @@ def call_llm_for_generation(
         return _parse_generation_response(response)
     except ValueError as first_error:
         logger.warning(
-            "Initial generation output was not valid structured JSON; "
-            "requesting one format-only repair: %s",
+            "Initial generation output was not valid structured JSON; requesting one format-only repair: %s",
             first_error,
         )
 
@@ -199,9 +188,7 @@ def call_llm_for_search_queries(
 ) -> tuple[SearchQueryPlan | None, str | None]:
     """Create a goal-faithful plan with hard and optional search dimensions."""
 
-    query_example = ", ".join(
-        f'"query {index}"' for index in range(1, query_count + 1)
-    )
+    query_example = ", ".join(f'"query {index}"' for index in range(1, query_count + 1))
     base_prompt = f"""
 You are a goal-faithful scientific search planner. Decompose the user's
 research goal before rewriting it into precise arXiv queries.
@@ -267,9 +254,7 @@ Research goal:
             or not isinstance(raw_directions, list)
         ):
             raise ValueError(
-                "Expected 'queries', 'required_terms', "
-                "'explicit_requirements', and "
-                "'exploration_directions' arrays."
+                "Expected 'queries', 'required_terms', 'explicit_requirements', and 'exploration_directions' arrays."
             )
 
         normalized_queries = tuple(
@@ -290,9 +275,7 @@ Research goal:
                 continue
             aspect_id = str(raw_aspect.get("id", "")).strip()
             goal_quote = str(raw_aspect.get("goal_quote", "")).strip()
-            normalized_goal = " ".join(
-                research_goal.casefold().split()
-            )
+            normalized_goal = " ".join(research_goal.casefold().split())
             normalized_quote = " ".join(goal_quote.casefold().split())
             if (
                 not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", aspect_id)
@@ -310,21 +293,14 @@ Research goal:
                 )
             )
         if not 1 <= len(explicit_requirements) <= 5:
-            raise ValueError(
-                "Expected 1 to 5 unique explicit requirements with "
-                "verbatim goal quotes."
-            )
+            raise ValueError("Expected 1 to 5 unique explicit requirements with verbatim goal quotes.")
         exploration_directions = tuple(
             dict.fromkeys(
-                direction.strip()
-                for direction in raw_directions
-                if isinstance(direction, str) and direction.strip()
+                direction.strip() for direction in raw_directions if isinstance(direction, str) and direction.strip()
             )
         )
         if len(exploration_directions) > 5:
-            raise ValueError(
-                "Expected no more than 5 exploration directions."
-            )
+            raise ValueError("Expected no more than 5 exploration directions.")
 
         return SearchQueryPlan(
             queries=normalized_queries,
@@ -396,7 +372,14 @@ def _resolve_retrieved_source_id(
     source_id: str,
     available_source_ids: set[str],
 ) -> str | None:
-    """Resolve a model-emitted arXiv ID to one unique retrieved source."""
+    """Resolve a model-emitted ID to one unique retrieved source."""
+
+    normalized_id = source_id.strip()
+    exact_matches = [
+        available_id for available_id in available_source_ids if available_id.casefold() == normalized_id.casefold()
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
 
     requested_canonical_id = _canonical_arxiv_id(source_id)
     if requested_canonical_id is None:
@@ -440,10 +423,7 @@ def call_llm_for_relevance_filter(
 ) -> tuple[list[str] | None, str | None]:
     """Suggest sources that directly support the goal without gating coverage."""
 
-    aspect_text = "\n".join(
-        f"- {aspect.aspect_id}: {aspect.description}"
-        for aspect in explicit_requirements
-    )
+    aspect_text = "\n".join(f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements)
     prompt = f"""
 You are a strict relevance grader for scientific literature retrieval.
 
@@ -539,10 +519,7 @@ def call_llm_for_evidence_coverage(
 ) -> tuple[EvidenceCoverage | None, str | None]:
     """Check collective evidence coverage and propose corrective searches."""
 
-    aspect_text = "\n".join(
-        f"- {aspect.aspect_id}: {aspect.description}"
-        for aspect in explicit_requirements
-    )
+    aspect_text = "\n".join(f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements)
     prompt = f"""
 You are an evidence-coverage auditor for scientific hypothesis generation.
 
@@ -606,47 +583,28 @@ Retrieved sources:
             raw_gap_queries,
             list,
         ):
-            raise ValueError(
-                "Expected 'aspect_coverage' and 'gap_queries' arrays."
-            )
+            raise ValueError("Expected 'aspect_coverage' and 'gap_queries' arrays.")
 
-        known_aspect_ids = {
-            aspect.aspect_id for aspect in explicit_requirements
-        }
-        aspect_source_ids: dict[str, tuple[str, ...]] = {
-            aspect_id: () for aspect_id in known_aspect_ids
-        }
+        known_aspect_ids = {aspect.aspect_id for aspect in explicit_requirements}
+        aspect_source_ids: dict[str, tuple[str, ...]] = {aspect_id: () for aspect_id in known_aspect_ids}
         for item in raw_coverage:
             if not isinstance(item, dict):
                 continue
             aspect_id = str(item.get("aspect_id", "")).strip()
             raw_source_ids = item.get("source_ids")
-            if (
-                aspect_id not in known_aspect_ids
-                or not isinstance(raw_source_ids, list)
-            ):
+            if aspect_id not in known_aspect_ids or not isinstance(raw_source_ids, list):
                 continue
             valid_ids = _resolve_retrieved_source_ids(
                 raw_source_ids,
                 available_source_ids,
             )
-            aspect_source_ids[aspect_id] = tuple(
-                dict.fromkeys(
-                    (*aspect_source_ids[aspect_id], *valid_ids)
-                )
-            )
+            aspect_source_ids[aspect_id] = tuple(dict.fromkeys((*aspect_source_ids[aspect_id], *valid_ids)))
 
         missing_aspect_ids = tuple(
-            aspect.aspect_id
-            for aspect in explicit_requirements
-            if not aspect_source_ids[aspect.aspect_id]
+            aspect.aspect_id for aspect in explicit_requirements if not aspect_source_ids[aspect.aspect_id]
         )
         gap_queries = tuple(
-            dict.fromkeys(
-                query.strip()
-                for query in raw_gap_queries
-                if isinstance(query, str) and query.strip()
-            )
+            dict.fromkeys(query.strip() for query in raw_gap_queries if isinstance(query, str) and query.strip())
         )[:max_gap_queries]
         reason = str(payload.get("reason", "")).strip()
 
@@ -702,12 +660,9 @@ def call_llm_for_literature_synthesis(
     """Build a citation-validated literature review before generation."""
 
     requirement_text = "\n".join(
-        f"- {requirement.aspect_id}: {requirement.description}"
-        for requirement in explicit_requirements
+        f"- {requirement.aspect_id}: {requirement.description}" for requirement in explicit_requirements
     )
-    direction_text = "\n".join(
-        f"- {direction}" for direction in exploration_directions
-    )
+    direction_text = "\n".join(f"- {direction}" for direction in exploration_directions)
     prompt = f"""
 You are preparing the literature review and analytical rationale for a
 scientific Generation agent.
@@ -788,27 +743,15 @@ Retrieved sources:
                     )
             return tuple(findings)
 
-        established_findings = validated_findings(
-            "established_findings"
-        )
+        established_findings = validated_findings("established_findings")
         contradictions = validated_findings("contradictions")
         raw_gaps = payload.get("knowledge_gaps")
-        analytical_rationale = str(
-            payload.get("analytical_rationale", "")
-        ).strip()
+        analytical_rationale = str(payload.get("analytical_rationale", "")).strip()
         if not isinstance(raw_gaps, list):
             raise ValueError("Expected a 'knowledge_gaps' array.")
-        knowledge_gaps = tuple(
-            dict.fromkeys(
-                gap.strip()
-                for gap in raw_gaps
-                if isinstance(gap, str) and gap.strip()
-            )
-        )
+        knowledge_gaps = tuple(dict.fromkeys(gap.strip() for gap in raw_gaps if isinstance(gap, str) and gap.strip()))
         if not established_findings:
-            raise ValueError(
-                "No established finding cited a retrieved source."
-            )
+            raise ValueError("No established finding cited a retrieved source.")
         if not analytical_rationale:
             raise ValueError("Expected a non-empty analytical rationale.")
 
@@ -819,8 +762,7 @@ Retrieved sources:
             analytical_rationale=analytical_rationale,
         )
         logger.info(
-            "Literature synthesis produced %d findings, %d "
-            "contradictions, and %d gaps.",
+            "Literature synthesis produced %d findings, %d contradictions, and %d gaps.",
             len(synthesis.established_findings),
             len(synthesis.contradictions),
             len(synthesis.knowledge_gaps),
@@ -841,16 +783,12 @@ def format_literature_synthesis(
     """Format the structured review for hypothesis generation prompts."""
 
     findings = "\n".join(
-        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}"
-        for finding in synthesis.established_findings
+        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}" for finding in synthesis.established_findings
     )
     contradictions = "\n".join(
-        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}"
-        for finding in synthesis.contradictions
+        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}" for finding in synthesis.contradictions
     )
-    gaps = "\n".join(
-        f"- {gap}" for gap in synthesis.knowledge_gaps
-    )
+    gaps = "\n".join(f"- {gap}" for gap in synthesis.knowledge_gaps)
     return (
         f"Established findings:\n{findings}\n\n"
         f"Contradictions:\n{contradictions or '- None identified'}\n\n"
@@ -874,17 +812,12 @@ def call_llm_for_debate_refinement(
         temperature=temperature,
         model=model,
     )
-    errors = [
-        str(item.get("text", "Unknown debate error"))
-        for item in refined
-        if item.get("title") == "Error"
-    ]
+    errors = [str(item.get("text", "Unknown debate error")) for item in refined if item.get("title") == "Error"]
     if errors:
         return None, f"Scientific debate refinement failed: {errors[0]}"
     if len(refined) != num_hypotheses:
         return None, (
-            "Scientific debate refinement failed: expected "
-            f"{num_hypotheses} hypotheses, received {len(refined)}."
+            f"Scientific debate refinement failed: expected {num_hypotheses} hypotheses, received {len(refined)}."
         )
     return refined, None
 
@@ -1052,9 +985,29 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
     prompt = f"""
     You are an expert evaluator tasked with comparing two hypotheses.
 
-    Evaluate the two provided hypotheses (Hypothesis 1 and Hypothesis 2)
-    and determine which one is superior based on the specified {research_goal.idea_attributes}.
-    Provide a concise rationale for your selection, concluding with the phrase "better hypothesis: <1 or 2>".
+    Evaluate the two provided hypotheses (Hypothesis 1 and Hypothesis 2) and
+    determine which one is superior.
+
+    Evaluate the hypotheses based on:
+    - Alignment with the research goal
+    - {research_goal.idea_attributes}
+    - The Evaluation Criteria provided below
+    - Quality and relevance of the supporting evidence
+    - Reviewer comments
+    - Overall scientific merit
+
+    The listed Evidence Sources indicate which retrieved literature supports each
+    hypothesis. Consider the strength and relevance of this supporting evidence
+    during your evaluation, but do not judge solely by the number of supporting
+    sources.
+
+    Provide your reasoning first, then end your response with exactly one of the following:
+
+    better hypothesis: 1
+
+    or
+
+    better hypothesis: 2
 
     Goal:
     {research_goal.description}
@@ -1065,24 +1018,31 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
     Considerations:
     {considerations}
 
-    Each hypothesis includes an independent review.
-    These reviews may contain numerical scores.
-    Disregard these scores in your comparative analysis,
-    as they may not be directly comparable across reviews.
+    Each hypothesis includes an independent review containing novelty and
+    feasibility assessments, reviewer comments, and supporting references.
+
+    Do not determine the winner solely based on the novelty or feasibility
+    ratings. Instead, use the review comments, supporting evidence, and
+    overall scientific quality to make a balanced comparative judgement.
 
     Hypothesis 1:
     {hypoA.text}
 
-    Hypothesis 2:
-    {hypoB.text}
+    Evidence Sources:
+    {chr(10).join(hypoA.evidence_source_ids) if hypoA.evidence_source_ids else "No evidence sources."}
 
     Review of Hypothesis 1:
     {reviewA}
 
+    Hypothesis 2:
+    {hypoB.text}
+
+    Evidence Sources:
+    {chr(10).join(hypoB.evidence_source_ids) if hypoB.evidence_source_ids else "No evidence sources."}
+
     Review of Hypothesis 2:
     {reviewB}
 
-    Reasoning and conclusion (end with "better hypothesis: <1 or 2>"): 
     """
 
     response = call_llm(
@@ -1169,25 +1129,18 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
     new_id = generate_unique_id("E")  # Use utility function
     combined_title = f"Combined: {hypoA.title} & {hypoB.title}"
     # Consider a more sophisticated combination prompt/logic if needed
-    combined_text = f"Combination of:\n1. {hypoA.text}\n2. {hypoB.text}"
+    combined_text = (
+        "Combination of:<br>"
+        f"1. {hypoA.text}<br>"
+        f"2. {hypoB.text}"
+        )
     logger.info("Combining hypotheses %s and %s into %s", hypoA.hypothesis_id, hypoB.hypothesis_id, new_id)
     new_hypothesis = Hypothesis(new_id, combined_title, combined_text)
     new_hypothesis.parent_ids = [hypoA.hypothesis_id, hypoB.hypothesis_id]
-    new_hypothesis.evidence_source_ids = list(
-        dict.fromkeys(
-            hypoA.evidence_source_ids + hypoB.evidence_source_ids
-        )
-    )
+    new_hypothesis.evidence_source_ids = list(dict.fromkeys(hypoA.evidence_source_ids + hypoB.evidence_source_ids))
     return new_hypothesis
 
 
-###############################################################################
-# Agent Implementations
-###############################################################################
-
-
-
-
 __all__ = [
     "ArxivRAGRetriever",
     "ContextMemory",
@@ -1220,45 +1173,7 @@ __all__ = [
     "generate_visjs_data",
     "logger",
     "parse_pairwise_result",
-    "run_pairwise_debate",
-    "serialize_documents",
-    "similarity_score",
-    "update_elo",
-]
-
-
-__all__ = [
-    "ArxivRAGRetriever",
-    "ContextMemory",
-    "EvidenceAspect",
-    "EvolutionAgent",
-    "GenerationAgent",
-    "Hypothesis",
-    "LiteratureFinding",
-    "LiteratureSynthesis",
-    "MetaReviewAgent",
-    "ProximityAgent",
-    "RankingAgent",
-    "ReflectionAgent",
-    "ResearchGoal",
-    "SearchQueryPlan",
-    "SupervisorAgent",
-    "call_llm",
-    "call_llm_for_debate_refinement",
-    "call_llm_for_evidence_coverage",
-    "call_llm_for_generation",
-    "call_llm_for_literature_synthesis",
-    "call_llm_for_relevance_filter",
-    "call_llm_for_reflection",
-    "call_llm_for_search_queries",
-    "combine_hypotheses",
-    "format_documents_for_prompt",
-    "format_literature_synthesis",
-    "format_references",
-    "generate_unique_id",
-    "generate_visjs_data",
-    "logger",
-    "parse_pairwise_result",
+    "redact_secrets",
     "run_pairwise_debate",
     "serialize_documents",
     "similarity_score",

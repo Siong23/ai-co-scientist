@@ -60,9 +60,7 @@ def _query_plan_payload(
             ],
             "required_terms": ["Malaysia", "Malaya"],
             "explicit_requirements": requirements,
-            "exploration_directions": [
-                "Compare alternative historical interpretations."
-            ],
+            "exploration_directions": ["Compare alternative historical interpretations."],
         }
     )
 
@@ -106,12 +104,8 @@ def _synthesis_payload(*source_ids: str) -> str:
                 }
             ],
             "contradictions": [],
-            "knowledge_gaps": [
-                "The proposed relationship remains untested."
-            ],
-            "analytical_rationale": (
-                "The established premise motivates a new testable inference."
-            ),
+            "knowledge_gaps": ["The proposed relationship remains untested."],
+            "analytical_rationale": ("The established premise motivates a new testable inference."),
         }
     )
 
@@ -130,17 +124,9 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert plan is not None
     assert len(plan.queries) == 5
     assert plan.required_terms == ("Malaysia", "Malaya")
-    assert [
-        aspect.aspect_id
-        for aspect in plan.explicit_requirements
-    ] == ["goal_scope"]
-    assert [
-        aspect.description
-        for aspect in plan.explicit_requirements
-    ] == ["brief describe the malaysia history"]
-    assert plan.exploration_directions == (
-        "Compare alternative historical interpretations.",
-    )
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["goal_scope"]
+    assert [aspect.description for aspect in plan.explicit_requirements] == ["brief describe the malaysia history"]
+    assert plan.exploration_directions == ("Compare alternative historical interpretations.",)
     assert mock_call.call_args.kwargs == {
         "temperature": 0.0,
         "model": "chosen-model",
@@ -148,10 +134,7 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     planner_prompt = mock_call.call_args.args[0]
     normalized_planner_prompt = " ".join(planner_prompt.split())
     assert "goal_quote copied verbatim" in normalized_planner_prompt
-    assert (
-        "must never become evidence gates"
-        in normalized_planner_prompt
-    )
+    assert "must never become evidence gates" in normalized_planner_prompt
 
 
 def test_query_rewriting_rejects_invalid_or_incomplete_json():
@@ -197,9 +180,7 @@ def test_query_rewriting_rejects_hard_requirement_absent_from_goal():
     )
 
     with patch("app.agents.call_llm", return_value=payload):
-        plan, error = call_llm_for_search_queries(
-            "Compare concept bottleneck models with Grad-CAM."
-        )
+        plan, error = call_llm_for_search_queries("Compare concept bottleneck models with Grad-CAM.")
 
     assert plan is None
     assert error is not None
@@ -243,16 +224,11 @@ def test_query_rewriting_retries_a_composite_requirement_as_atomic_quotes():
                 },
                 {
                     "id": "domain",
-                    "goal_quote": (
-                        "deep-learning-based medical image classification"
-                    ),
+                    "goal_quote": ("deep-learning-based medical image classification"),
                 },
                 {
                     "id": "comparator",
-                    "goal_quote": (
-                        "post-hoc explanation methods such as SHAP and "
-                        "Grad-CAM"
-                    ),
+                    "goal_quote": ("post-hoc explanation methods such as SHAP and Grad-CAM"),
                 },
                 {
                     "id": "outcomes",
@@ -358,6 +334,21 @@ def test_source_id_resolution_rejects_ambiguous_retrieved_versions():
     assert selected_ids == []
 
 
+def test_source_id_resolution_accepts_exact_semantic_scholar_id():
+    with patch(
+        "app.agents.call_llm",
+        return_value=_relevance_payload("s2:paper-id"),
+    ):
+        selected_ids, error = call_llm_for_relevance_filter(
+            "research goal",
+            "retrieved context",
+            {"s2:paper-id"},
+        )
+
+    assert error is None
+    assert selected_ids == ["s2:paper-id"]
+
+
 def test_coverage_grader_ignores_unknown_sources_and_finds_missing_aspects():
     aspects = (
         EvidenceAspect("intervention", "Concept bottleneck models."),
@@ -392,15 +383,11 @@ def test_coverage_grader_ignores_unknown_sources_and_finds_missing_aspects():
     assert coverage is not None
     assert coverage.sufficient is False
     assert coverage.missing_aspect_ids == ("comparator",)
-    assert coverage.gap_queries == (
-        "medical imaging CBM SHAP Grad-CAM",
-    )
+    assert coverage.gap_queries == ("medical imaging CBM SHAP Grad-CAM",)
 
 
 def test_literature_synthesis_keeps_only_findings_with_retrieved_sources():
-    aspects = (
-        EvidenceAspect("core_topic", "The user-stated core topic."),
-    )
+    aspects = (EvidenceAspect("core_topic", "The user-stated core topic."),)
     payload = json.dumps(
         {
             "established_findings": [
@@ -415,9 +402,7 @@ def test_literature_synthesis_keeps_only_findings_with_retrieved_sources():
             ],
             "contradictions": [],
             "knowledge_gaps": ["A direct comparison remains unresolved."],
-            "analytical_rationale": (
-                "The supported premise motivates a testable comparison."
-            ),
+            "analytical_rationale": ("The supported premise motivates a testable comparison."),
         }
     )
 
@@ -432,12 +417,8 @@ def test_literature_synthesis_keeps_only_findings_with_retrieved_sources():
 
     assert synthesis_error is None
     assert synthesis is not None
-    assert [finding.claim for finding in synthesis.established_findings] == [
-        "Supported premise."
-    ]
-    assert synthesis.established_findings[0].source_ids == (
-        "arXiv:2205.15480v2",
-    )
+    assert [finding.claim for finding in synthesis.established_findings] == ["Supported premise."]
+    assert synthesis.established_findings[0].source_ids == ("arXiv:2205.15480v2",)
 
 
 def test_reciprocal_rank_fusion_deduplicates_versions_and_rewards_recurrence():
@@ -592,9 +573,40 @@ def test_targeted_corrective_retrieval_can_skip_initial_entity_filter():
         )
 
     assert len(documents) == 1
-    assert documents[0].metadata["source_id"] == (
-        "arXiv:2401.00001v1"
+    assert documents[0].metadata["source_id"] == ("arXiv:2401.00001v1")
+
+
+def test_semantic_scholar_fallback_fuses_and_reranks_results():
+    semantic_scholar_paper = _paper(
+        "s2:paper-id",
+        "Semantic Scholar result",
+        "Evidence from a paper outside arXiv.",
     )
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.semantic_scholar = Mock()
+    retriever.semantic_scholar.search_papers.side_effect = [
+        [semantic_scholar_paper],
+        [semantic_scholar_paper],
+    ]
+    query_plan = SearchQueryPlan(
+        queries=("first query", "second query"),
+        required_terms=(),
+    )
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch(
+        "app.rag_retriever.InMemoryVectorStore",
+        return_value=fake_store,
+    ):
+        documents = retriever.retrieve_fallback("research goal", query_plan)
+
+    assert retriever.semantic_scholar.search_papers.call_count == 2
+    assert len(documents) == 1
+    assert documents[0].metadata["source_id"] == "s2:paper-id"
+    assert fake_store.similarity_search.call_args.kwargs["k"] == 1
 
 
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
@@ -638,13 +650,13 @@ def test_generation_prompt_contains_retrieved_abstract_and_source_id():
         ),
         patch(
             "app.agents.call_llm",
-                side_effect=[
-                    query_plan,
-                    _relevance_payload("arXiv:2001.03488v1"),
-                    _coverage_payload("arXiv:2001.03488v1"),
-                    _synthesis_payload("arXiv:2001.03488v1"),
-                    generation_payload,
-                ],
+            side_effect=[
+                query_plan,
+                _relevance_payload("arXiv:2001.03488v1"),
+                _coverage_payload("arXiv:2001.03488v1"),
+                _synthesis_payload("arXiv:2001.03488v1"),
+                generation_payload,
+            ],
         ) as mock_llm,
     ):
         hypotheses, errors = agent.generate_new_hypotheses(
@@ -773,10 +785,7 @@ def test_empty_relevance_suggestion_does_not_override_complete_coverage():
 
 
 def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
-    goal = (
-        "Compare GNN intrusion detection with conventional DNN baselines "
-        "in 5G under adversarial robustness"
-    )
+    goal = "Compare GNN intrusion detection with conventional DNN baselines in 5G under adversarial robustness"
     requirements = [
         {"id": "method", "goal_quote": "GNN intrusion detection"},
         {
@@ -819,11 +828,7 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
     documents = []
     for arxiv_id, title, abstract in document_specs:
         document = Mock()
-        document.page_content = (
-            f"Source ID: arXiv:{arxiv_id}\n"
-            f"Title: {title}\n"
-            f"Abstract: {abstract}"
-        )
+        document.page_content = f"Source ID: arXiv:{arxiv_id}\nTitle: {title}\nAbstract: {abstract}"
         document.metadata = {
             "source_id": f"arXiv:{arxiv_id}",
             "arxiv_id": arxiv_id,
@@ -926,9 +931,7 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
     assert "GNN_UNIQUE" in synthesis_prompt
     assert "GNN_UNIQUE" in generation_prompt
     assert len(context.last_retrieved_sources) == 4
-    assert {
-        source["source_id"] for source in context.last_retrieved_sources
-    } == {
+    assert {source["source_id"] for source in context.last_retrieved_sources} == {
         "arXiv:2101.00001v1",
         "arXiv:2102.00002v2",
         "arXiv:2103.00003v1",
@@ -944,9 +947,7 @@ def test_generation_can_enforce_a_configured_minimum_source_count():
     documents = []
     for arxiv_id in ("1111.1111", "2222.2222"):
         document = Mock()
-        document.page_content = (
-            f"Source ID: arXiv:{arxiv_id}\nAbstract: directly relevant"
-        )
+        document.page_content = f"Source ID: arXiv:{arxiv_id}\nAbstract: directly relevant"
         document.metadata = {
             "source_id": f"arXiv:{arxiv_id}",
             "arxiv_id": arxiv_id,
@@ -1062,10 +1063,7 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         debate_rounds=0,
     )
     subject_document = Mock()
-    subject_document.page_content = (
-        "Source ID: arXiv:1111.1111\n"
-        "Abstract: Evidence about the subject."
-    )
+    subject_document.page_content = "Source ID: arXiv:1111.1111\nAbstract: Evidence about the subject."
     subject_document.metadata = {
         "source_id": "arXiv:1111.1111",
         "arxiv_id": "1111.1111",
@@ -1073,10 +1071,7 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "abstract": "Evidence about the subject.",
     }
     outcome_document = Mock()
-    outcome_document.page_content = (
-        "Source ID: arXiv:2222.2222\n"
-        "Abstract: Evidence about the requested outcome."
-    )
+    outcome_document.page_content = "Source ID: arXiv:2222.2222\nAbstract: Evidence about the requested outcome."
     outcome_document.metadata = {
         "source_id": "arXiv:2222.2222",
         "arxiv_id": "2222.2222",
@@ -1207,10 +1202,7 @@ def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
         debate_rounds=0,
     )
     document = Mock()
-    document.page_content = (
-        "Source ID: arXiv:1111.1111\n"
-        "Abstract: Evidence about only one aspect."
-    )
+    document.page_content = "Source ID: arXiv:1111.1111\nAbstract: Evidence about only one aspect."
     document.metadata = {
         "source_id": "arXiv:1111.1111",
         "arxiv_id": "1111.1111",
@@ -1257,6 +1249,11 @@ def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
             "app.agents.call_llm_for_evidence_coverage",
             return_value=(incomplete_coverage, None),
         ),
+        patch.object(
+            agent.rag_retriever,
+            "retrieve_fallback",
+            side_effect=RuntimeError("fallback unavailable"),
+        ) as mock_fallback,
     ):
         context = ContextMemory()
         hypotheses, errors = agent.generate_new_hypotheses(
@@ -1274,6 +1271,117 @@ def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
     gap_plan = mock_retrieve.call_args_list[1].args[1]
     assert gap_plan.queries == ("scientific goal",)
     assert gap_plan.required_terms == ()
+    mock_fallback.assert_called_once()
+
+
+def test_semantic_scholar_fallback_can_fill_gap_after_arxiv_is_exhausted():
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        corrective_retrieval_rounds=0,
+        debate_rounds=0,
+    )
+    arxiv_document = Mock()
+    arxiv_document.page_content = "Source ID: arXiv:1111.1111\nAbstract: Evidence about the subject."
+    arxiv_document.metadata = {
+        "source_id": "arXiv:1111.1111",
+        "arxiv_id": "1111.1111",
+        "title": "Subject evidence",
+        "abstract": "Evidence about the subject.",
+    }
+    fallback_document = Mock()
+    fallback_document.page_content = "Source ID: s2:outcome\nAbstract: Evidence about the requested outcome."
+    fallback_document.metadata = {
+        "source_id": "s2:outcome",
+        "arxiv_id": "s2:outcome",
+        "title": "Outcome evidence",
+        "abstract": "Evidence about the requested outcome.",
+    }
+    incomplete_coverage = EvidenceCoverage(
+        aspect_source_ids={
+            "subject_scope": ("arXiv:1111.1111",),
+            "requested_outcome": (),
+        },
+        missing_aspect_ids=("requested_outcome",),
+        gap_queries=("targeted outcome evidence",),
+        reason="Outcome evidence is missing.",
+    )
+    complete_coverage = EvidenceCoverage(
+        aspect_source_ids={
+            "subject_scope": ("arXiv:1111.1111",),
+            "requested_outcome": ("s2:outcome",),
+        },
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="All aspects are covered.",
+    )
+    generation_payload = json.dumps(
+        [
+            {
+                "title": "Fallback-grounded hypothesis",
+                "hypothesis": "A grounded relationship can be tested.",
+                "rationale": "Both evidence dimensions are represented.",
+                "feasibility": "Compare measurable outcomes.",
+                "source_ids": ["arXiv:1111.1111", "s2:outcome"],
+            }
+        ]
+    )
+
+    with (
+        patch(
+            "app.agents.call_llm",
+            side_effect=[
+                _query_plan_payload(
+                    "A multi-aspect scientific goal",
+                    requirements=[
+                        {"id": "subject_scope", "goal_quote": "multi-aspect"},
+                        {
+                            "id": "requested_outcome",
+                            "goal_quote": "scientific goal",
+                        },
+                    ],
+                ),
+                _synthesis_payload("arXiv:1111.1111", "s2:outcome"),
+                generation_payload,
+            ],
+        ),
+        patch.object(
+            agent,
+            "_retrieve_scientific_sources",
+            return_value=[arxiv_document],
+        ),
+        patch.object(
+            agent.rag_retriever,
+            "retrieve_fallback",
+            return_value=[fallback_document],
+        ) as mock_fallback,
+        patch(
+            "app.agents.call_llm_for_relevance_filter",
+            side_effect=[
+                (["arXiv:1111.1111"], None),
+                (["arXiv:1111.1111", "s2:outcome"], None),
+            ],
+        ),
+        patch(
+            "app.agents.call_llm_for_evidence_coverage",
+            side_effect=[
+                (incomplete_coverage, None),
+                (complete_coverage, None),
+            ],
+        ),
+    ):
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("A multi-aspect scientific goal", num_hypotheses=1),
+            ContextMemory(),
+        )
+
+    assert errors == []
+    assert hypotheses[0].evidence_source_ids == ["arXiv:1111.1111", "s2:outcome"]
+    fallback_plan = mock_fallback.call_args.args[1]
+    assert fallback_plan.queries == (
+        "targeted outcome evidence",
+        "scientific goal",
+    )
+    assert fallback_plan.required_terms == ()
 
 
 def test_generation_debate_runs_three_stateful_refinement_turns():
@@ -1339,15 +1447,9 @@ def test_generation_debate_runs_three_stateful_refinement_turns():
     assert result[0]["title"] == "Integrated"
     assert mock_debate.call_count == 3
     assert "turn 1 of" in mock_debate.call_args_list[0].args[0]
-    assert "Candidate hypotheses from the preceding discussion" in (
-        mock_debate.call_args_list[1].args[0]
-    )
-    final_debate_prompt = " ".join(
-        mock_debate.call_args_list[2].args[0].split()
-    )
-    assert "may inspire refinement but are not requirements" in (
-        final_debate_prompt
-    )
+    assert "Candidate hypotheses from the preceding discussion" in (mock_debate.call_args_list[1].args[0])
+    final_debate_prompt = " ".join(mock_debate.call_args_list[2].args[0].split())
+    assert "may inspire refinement but are not requirements" in (final_debate_prompt)
 
 
 def test_generation_debate_keeps_last_valid_turn_when_next_turn_fails():
@@ -1355,9 +1457,7 @@ def test_generation_debate_keeps_last_valid_turn_when_next_turn_fails():
     query_plan = SearchQueryPlan(
         queries=("query",),
         required_terms=("method",),
-        explicit_requirements=(
-            EvidenceAspect("core_topic", "The requested topic."),
-        ),
+        explicit_requirements=(EvidenceAspect("core_topic", "The requested topic."),),
     )
     synthesis = LiteratureSynthesis(
         established_findings=(
