@@ -1,0 +1,34 @@
+"""Tests for the modular agent layout and compatibility façade."""
+
+from app.agents import (
+    EvolutionAgent,
+    GenerationAgent,
+    MetaReviewAgent,
+    ProximityAgent,
+    RankingAgent,
+    ReflectionAgent,
+    SupervisorAgent,
+)
+from app.agents_modules.evolution import EvolutionAgent as ModularEvolutionAgent
+from app.agents_modules.generation import GenerationAgent as ModularGenerationAgent
+from app.agents_modules.meta_review import MetaReviewAgent as ModularMetaReviewAgent
+from app.agents_modules.proximity import ProximityAgent as ModularProximityAgent
+from app.agents_modules.ranking import RankingAgent as ModularRankingAgent
+from app.agents_modules.reflection import ReflectionAgent as ModularReflectionAgent
+from app.agents_modules.supervisor import SupervisorAgent as ModularSupervisorAgent
+
+
+def test_agents_are_reexported_from_individual_modules():
+    agent_pairs = (
+        (GenerationAgent, ModularGenerationAgent),
+        (ReflectionAgent, ModularReflectionAgent),
+        (RankingAgent, ModularRankingAgent),
+        (EvolutionAgent, ModularEvolutionAgent),
+        (ProximityAgent, ModularProximityAgent),
+        (MetaReviewAgent, ModularMetaReviewAgent),
+        (SupervisorAgent, ModularSupervisorAgent),
+    )
+
+    for facade_class, modular_class in agent_pairs:
+        assert facade_class is modular_class
+        assert facade_class.__module__.startswith("app.agents_modules.")
