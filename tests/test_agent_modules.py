@@ -8,6 +8,10 @@ from app.agents import (
     RankingAgent,
     ReflectionAgent,
     SupervisorAgent,
+    call_llm_for_generation,
+    call_llm_for_reflection,
+    combine_hypotheses,
+    run_pairwise_debate,
 )
 from app.agents_modules.evolution import EvolutionAgent as ModularEvolutionAgent
 from app.agents_modules.generation import GenerationAgent as ModularGenerationAgent
@@ -32,3 +36,15 @@ def test_agents_are_reexported_from_individual_modules():
     for facade_class, modular_class in agent_pairs:
         assert facade_class is modular_class
         assert facade_class.__module__.startswith("app.agents_modules.")
+
+
+def test_agent_helpers_are_implemented_outside_the_compatibility_facade():
+    helper_functions = (
+        call_llm_for_generation,
+        call_llm_for_reflection,
+        run_pairwise_debate,
+        combine_hypotheses,
+    )
+
+    for helper in helper_functions:
+        assert helper.__module__.startswith("app.agents_modules.")

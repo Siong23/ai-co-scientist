@@ -78,11 +78,6 @@ class SupervisorAgent:
         self.ranking_agent.run_tournament(active_hypos, context, research_goal)  # Pass research_goal
         cycle_details["steps"]["ranking2"] = {"hypotheses": [h.to_dict() for h in active_hypos]}
 
-        # Ensure context.active_hypotheses reflects the final ranked hypotheses for meta-review
-        # Use all hypotheses from the final ranking step (not just active_hypos, which may be filtered)
-        final_ranked_hypos = [h for h in active_hypos]
-        context.active_hypotheses = {h.hypothesis_id: h for h in final_ranked_hypos}
-
         # 6. Proximity Analysis
         _legacy.logger.info("Step 6: Proximity Analysis")
         proximity_result = self.proximity_agent.build_proximity_graph(context)  # Pass context
