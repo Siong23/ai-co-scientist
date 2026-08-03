@@ -373,9 +373,9 @@ def run_cycle_with_progress(
 
         status = (
             f"⏳ Cycle {iteration} is running.\n"
-            f"{to_bold('Elapsed:')} {format_timeout_duration(elapsed)}.\n"
-            f"{to_bold('Active work:')} generating, reviewing, ranking, and evolving hypotheses.\n"
-            f"{to_bold('Upper limit:')} {format_timeout_duration(timeout_seconds)}."
+            f"Elapsed: {format_timeout_duration(elapsed)}.\n"
+            f"Active work: generating, reviewing, ranking, and evolving hypotheses.\n"
+            f"Upper limit: {format_timeout_duration(timeout_seconds)}."
         )
         yield status, "<p>Cycle is still running. Results will appear when the cycle completes.</p>", ""
         thread.join(timeout=min(poll_seconds, max(timeout_seconds - elapsed, 0.1)))
