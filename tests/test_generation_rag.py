@@ -334,6 +334,21 @@ def test_source_id_resolution_rejects_ambiguous_retrieved_versions():
     assert selected_ids == []
 
 
+def test_source_id_resolution_accepts_exact_semantic_scholar_id():
+    with patch(
+        "app.agents.call_llm",
+        return_value=_relevance_payload("s2:paper-id"),
+    ):
+        selected_ids, error = call_llm_for_relevance_filter(
+            "research goal",
+            "retrieved context",
+            {"s2:paper-id"},
+        )
+
+    assert error is None
+    assert selected_ids == ["s2:paper-id"]
+
+
 def test_coverage_grader_ignores_unknown_sources_and_finds_missing_aspects():
     aspects = (
         EvidenceAspect("intervention", "Concept bottleneck models."),
@@ -559,6 +574,39 @@ def test_targeted_corrective_retrieval_can_skip_initial_entity_filter():
 
     assert len(documents) == 1
     assert documents[0].metadata["source_id"] == ("arXiv:2401.00001v1")
+
+
+def test_semantic_scholar_fallback_fuses_and_reranks_results():
+    semantic_scholar_paper = _paper(
+        "s2:paper-id",
+        "Semantic Scholar result",
+        "Evidence from a paper outside arXiv.",
+    )
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.semantic_scholar = Mock()
+    retriever.semantic_scholar.search_papers.side_effect = [
+        [semantic_scholar_paper],
+        [semantic_scholar_paper],
+    ]
+    query_plan = SearchQueryPlan(
+        queries=("first query", "second query"),
+        required_terms=(),
+    )
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch(
+        "app.rag_retriever.InMemoryVectorStore",
+        return_value=fake_store,
+    ):
+        documents = retriever.retrieve_fallback("research goal", query_plan)
+
+    assert retriever.semantic_scholar.search_papers.call_count == 2
+    assert len(documents) == 1
+    assert documents[0].metadata["source_id"] == "s2:paper-id"
+    assert fake_store.similarity_search.call_args.kwargs["k"] == 1
 
 
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
@@ -1201,6 +1249,11 @@ def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
             "app.agents.call_llm_for_evidence_coverage",
             return_value=(incomplete_coverage, None),
         ),
+        patch.object(
+            agent.rag_retriever,
+            "retrieve_fallback",
+            side_effect=RuntimeError("fallback unavailable"),
+        ) as mock_fallback,
     ):
         context = ContextMemory()
         hypotheses, errors = agent.generate_new_hypotheses(
@@ -1218,6 +1271,117 @@ def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
     gap_plan = mock_retrieve.call_args_list[1].args[1]
     assert gap_plan.queries == ("scientific goal",)
     assert gap_plan.required_terms == ()
+    mock_fallback.assert_called_once()
+
+
+def test_semantic_scholar_fallback_can_fill_gap_after_arxiv_is_exhausted():
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        corrective_retrieval_rounds=0,
+        debate_rounds=0,
+    )
+    arxiv_document = Mock()
+    arxiv_document.page_content = "Source ID: arXiv:1111.1111\nAbstract: Evidence about the subject."
+    arxiv_document.metadata = {
+        "source_id": "arXiv:1111.1111",
+        "arxiv_id": "1111.1111",
+        "title": "Subject evidence",
+        "abstract": "Evidence about the subject.",
+    }
+    fallback_document = Mock()
+    fallback_document.page_content = "Source ID: s2:outcome\nAbstract: Evidence about the requested outcome."
+    fallback_document.metadata = {
+        "source_id": "s2:outcome",
+        "arxiv_id": "s2:outcome",
+        "title": "Outcome evidence",
+        "abstract": "Evidence about the requested outcome.",
+    }
+    incomplete_coverage = EvidenceCoverage(
+        aspect_source_ids={
+            "subject_scope": ("arXiv:1111.1111",),
+            "requested_outcome": (),
+        },
+        missing_aspect_ids=("requested_outcome",),
+        gap_queries=("targeted outcome evidence",),
+        reason="Outcome evidence is missing.",
+    )
+    complete_coverage = EvidenceCoverage(
+        aspect_source_ids={
+            "subject_scope": ("arXiv:1111.1111",),
+            "requested_outcome": ("s2:outcome",),
+        },
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="All aspects are covered.",
+    )
+    generation_payload = json.dumps(
+        [
+            {
+                "title": "Fallback-grounded hypothesis",
+                "hypothesis": "A grounded relationship can be tested.",
+                "rationale": "Both evidence dimensions are represented.",
+                "feasibility": "Compare measurable outcomes.",
+                "source_ids": ["arXiv:1111.1111", "s2:outcome"],
+            }
+        ]
+    )
+
+    with (
+        patch(
+            "app.agents.call_llm",
+            side_effect=[
+                _query_plan_payload(
+                    "A multi-aspect scientific goal",
+                    requirements=[
+                        {"id": "subject_scope", "goal_quote": "multi-aspect"},
+                        {
+                            "id": "requested_outcome",
+                            "goal_quote": "scientific goal",
+                        },
+                    ],
+                ),
+                _synthesis_payload("arXiv:1111.1111", "s2:outcome"),
+                generation_payload,
+            ],
+        ),
+        patch.object(
+            agent,
+            "_retrieve_scientific_sources",
+            return_value=[arxiv_document],
+        ),
+        patch.object(
+            agent.rag_retriever,
+            "retrieve_fallback",
+            return_value=[fallback_document],
+        ) as mock_fallback,
+        patch(
+            "app.agents.call_llm_for_relevance_filter",
+            side_effect=[
+                (["arXiv:1111.1111"], None),
+                (["arXiv:1111.1111", "s2:outcome"], None),
+            ],
+        ),
+        patch(
+            "app.agents.call_llm_for_evidence_coverage",
+            side_effect=[
+                (incomplete_coverage, None),
+                (complete_coverage, None),
+            ],
+        ),
+    ):
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("A multi-aspect scientific goal", num_hypotheses=1),
+            ContextMemory(),
+        )
+
+    assert errors == []
+    assert hypotheses[0].evidence_source_ids == ["arXiv:1111.1111", "s2:outcome"]
+    fallback_plan = mock_fallback.call_args.args[1]
+    assert fallback_plan.queries == (
+        "targeted outcome evidence",
+        "scientific goal",
+    )
+    assert fallback_plan.required_terms == ()
 
 
 def test_generation_debate_runs_three_stateful_refinement_turns():
