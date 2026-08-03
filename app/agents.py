@@ -3,9 +3,16 @@ import math
 import random
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 # Import necessary components from other modules
+from .agents_modules.evolution import EvolutionAgent
+from .agents_modules.generation import GenerationAgent
+from .agents_modules.meta_review import MetaReviewAgent
+from .agents_modules.proximity import ProximityAgent
+from .agents_modules.ranking import RankingAgent
+from .agents_modules.reflection import ReflectionAgent
+from .agents_modules.supervisor import SupervisorAgent
 from .models import ContextMemory, Hypothesis, ResearchGoal
 from .rag_retriever import (
     ArxivRAGRetriever,
@@ -1179,753 +1186,81 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
 ###############################################################################
 
 
-class GenerationAgent:
-    """Generate hypotheses grounded in multi-query arXiv retrieval."""
 
-    def __init__(
-        self,
-        minimum_relevant_sources: int | None = None,
-        corrective_retrieval_rounds: int | None = None,
-        debate_rounds: int | None = None,
-    ) -> None:
-        self.rag_retriever = ArxivRAGRetriever(
-            minimum_relevant_sources=minimum_relevant_sources,
-            corrective_retrieval_rounds=corrective_retrieval_rounds,
-            generation_debate_rounds=debate_rounds,
-        )
-        self.debate_rounds = max(
-            0,
-            min(5, self.rag_retriever.generation_debate_rounds),
-        )
 
-    def _retrieve_scientific_sources(
-        self,
-        research_goal: ResearchGoal,
-        query_plan: SearchQueryPlan,
-        rerank_query: str | None = None,
-    ):
-        return self.rag_retriever.retrieve(
-            rerank_query or research_goal.description,
-            query_plan,
-        )
-
-    @staticmethod
-    def _merge_retrieved_documents(*document_groups):
-        """Merge retrieval rounds while deduplicating arXiv versions."""
-
-        merged = []
-        seen_ids: set[str] = set()
-        for documents in document_groups:
-            for document in documents:
-                source_id = str(
-                    document.metadata.get("source_id", "")
-                )
-                canonical_id = re.sub(
-                    r"v\d+$",
-                    "",
-                    source_id,
-                    flags=re.IGNORECASE,
-                )
-                if not canonical_id or canonical_id in seen_ids:
-                    continue
-                seen_ids.add(canonical_id)
-                merged.append(document)
-        return merged
-
-    def _run_scientific_debate(
-        self,
-        research_goal: ResearchGoal,
-        query_plan: SearchQueryPlan,
-        synthesis: LiteratureSynthesis,
-        hypotheses: list[Dict],
-    ) -> list[Dict]:
-        """Refine candidates through a short, stateful expert debate."""
-
-        if (
-            self.debate_rounds == 0
-            or not hypotheses
-            or any(item.get("title") == "Error" for item in hypotheses)
-        ):
-            return hypotheses
-
-        roles = (
-            "evidence and research-goal alignment reviewer",
-            "skeptical methods and falsifiability reviewer",
-            "integrating domain expert",
-        )
-        current_hypotheses = hypotheses
-        synthesis_text = format_literature_synthesis(synthesis)
-        optional_directions = "\n".join(
-            f"- {direction}"
-            for direction in query_plan.exploration_directions
-        )
-        for round_index in range(self.debate_rounds):
-            role = roles[round_index % len(roles)]
-            debate_prompt = f"""
-You are the {role} in turn {round_index + 1} of
-{self.debate_rounds} of a simulated scientific debate.
-
-Collaboratively refine the candidate hypotheses for the user's exact research
-goal. Critically examine factual grounding, alignment, novelty, utility,
-specificity, falsifiability, limitations, and practical feasibility. Remove or
-rewrite unsupported factual premises. Preserve bold new inference when it is
-clearly presented as a hypothesis rather than established fact.
-
-The optional exploration directions below may inspire refinement but are not
-requirements. Do not expand the user's goal or introduce new mandatory
-datasets, metrics, mechanisms, populations, or outcomes.
-
-Return exactly {len(current_hypotheses)} refined hypotheses. Keep each
-hypothesis self-contained. Use only Source IDs present in the literature
-review, and retain citations for every established premise.
-
-Research goal:
-{research_goal.description}
-
-Constraints:
-{research_goal.constraints}
-
-Optional exploration directions:
-{optional_directions or "- None"}
-
-Literature review and analytical rationale:
-{synthesis_text}
-
-Candidate hypotheses from the preceding discussion:
-{json.dumps(current_hypotheses, ensure_ascii=False)}
-
-Your refined contribution:
-""".strip()
-            refined, debate_error = call_llm_for_debate_refinement(
-                debate_prompt,
-                num_hypotheses=len(current_hypotheses),
-                temperature=research_goal.generation_temperature,
-                model=research_goal.llm_model,
-            )
-            if debate_error or refined is None:
-                logger.warning(
-                    "Keeping the last valid hypotheses after debate "
-                    "round %d failed: %s",
-                    round_index + 1,
-                    debate_error,
-                )
-                break
-            current_hypotheses = refined
-
-        return current_hypotheses
-
-    def generate_new_hypotheses(
-        self,
-        research_goal: ResearchGoal,
-        context: ContextMemory,
-    ) -> Tuple[List[Hypothesis], List[str]]:
-        """Retrieve external evidence, then generate hypotheses."""
-
-        num_to_generate = research_goal.num_hypotheses
-        gen_temp = research_goal.generation_temperature
-        query_plan, rewrite_error = call_llm_for_search_queries(
-            research_goal.description,
-            model=research_goal.llm_model,
-            query_count=self.rag_retriever.query_count,
-        )
-        if rewrite_error or query_plan is None:
-            context.last_retrieved_sources = []
-            error = rewrite_error or "Query rewriting failed."
-            logger.error(error)
-            return [], [error]
-
-        logger.info(
-            "Query rewriting produced queries=%s required_terms=%s "
-            "explicit_requirements=%s exploration_directions=%s",
-            query_plan.queries,
-            query_plan.required_terms,
-            query_plan.explicit_requirements,
-            query_plan.exploration_directions,
-        )
-
-        try:
-            candidate_documents = self._retrieve_scientific_sources(
-                research_goal,
-                query_plan,
-            )
-        except Exception as exc:
-            logger.error(
-                "RAG retrieval failed: %s",
-                exc,
-                exc_info=True,
-            )
-            return [], [f"RAG retrieval failed: {exc}"]
-
-        retrieved_documents = []
-        coverage = None
-        corrective_round = 0
-        while True:
-            candidate_context = format_documents_for_prompt(
-                candidate_documents
-            )
-            candidate_source_ids = {
-                str(document.metadata["source_id"])
-                for document in candidate_documents
-            }
-            relevant_source_ids, relevance_error = (
-                call_llm_for_relevance_filter(
-                    research_goal.description,
-                    candidate_context,
-                    candidate_source_ids,
-                    model=research_goal.llm_model,
-                    explicit_requirements=(
-                        query_plan.explicit_requirements
-                    ),
-                )
-            )
-            if relevance_error or relevant_source_ids is None:
-                logger.warning(
-                    "Evidence relevance grading was unavailable; coverage "
-                    "will still audit all %d candidate source(s): %s",
-                    len(candidate_documents),
-                    relevance_error or "no relevance result",
-                )
-                relevant_source_ids = []
-            else:
-                logger.info(
-                    "RAG candidate count=%d relevance suggestions=%s",
-                    len(candidate_documents),
-                    relevant_source_ids,
-                )
-
-            coverage, coverage_error = call_llm_for_evidence_coverage(
-                research_goal.description,
-                query_plan.explicit_requirements,
-                candidate_context,
-                candidate_source_ids,
-                model=research_goal.llm_model,
-                max_gap_queries=self.rag_retriever.query_count,
-            )
-            if coverage_error or coverage is None:
-                context.last_retrieved_sources = []
-                error = (
-                    coverage_error
-                    or "Evidence coverage grading failed."
-                )
-                logger.error(error)
-                return [], [error]
-
-            if coverage.sufficient:
-                break
-
-            if corrective_round >= (
-                self.rag_retriever.corrective_retrieval_rounds
-            ):
-                missing_descriptions = [
-                    aspect.description.rstrip(".")
-                    for aspect in query_plan.explicit_requirements
-                    if aspect.aspect_id
-                    in coverage.missing_aspect_ids
-                ]
-                error = (
-                    "Retrieved evidence is insufficient after "
-                    f"{corrective_round} corrective retrieval "
-                    "round(s). Missing explicit requirements: "
-                    + "; ".join(missing_descriptions)
-                    + ". Hypothesis generation was not executed."
-                )
-                logger.error(error)
-                context.last_retrieved_sources = []
-                return [], [error]
-
-            missing_aspects = [
-                aspect
-                for aspect in query_plan.explicit_requirements
-                if aspect.aspect_id in coverage.missing_aspect_ids
-            ]
-            corrective_queries = tuple(
-                dict.fromkeys(
-                    [
-                        *coverage.gap_queries,
-                        *(
-                            aspect.description
-                            for aspect in missing_aspects
-                        ),
-                    ]
-                )
-            )
-            gap_plan = SearchQueryPlan(
-                queries=corrective_queries,
-                # Gap queries are already targeted at a missing requirement.
-                # Reusing the initial entity filter can discard comparator-only
-                # or domain-only papers before the relevance grader sees them.
-                required_terms=(),
-                explicit_requirements=query_plan.explicit_requirements,
-                exploration_directions=(
-                    query_plan.exploration_directions
-                ),
-            )
-            logger.info(
-                "Corrective retrieval round %d for missing "
-                "explicit requirements=%s "
-                "queries=%s",
-                corrective_round + 1,
-                coverage.missing_aspect_ids,
-                corrective_queries,
-            )
-            try:
-                gap_documents = self._retrieve_scientific_sources(
-                    research_goal,
-                    gap_plan,
-                    rerank_query=" ".join(corrective_queries),
-                )
-            except Exception as exc:
-                logger.error(
-                    "Corrective RAG retrieval failed: %s",
-                    exc,
-                    exc_info=True,
-                )
-                return [], [
-                    f"Corrective RAG retrieval failed: {exc}"
-                ]
-            corrective_round += 1
-            candidate_documents = self._merge_retrieved_documents(
-                candidate_documents,
-                gap_documents,
-            )
-
-        coverage_source_ids = {
-            source_id
-            for source_ids in coverage.aspect_source_ids.values()
-            for source_id in source_ids
-        }
-        retrieved_documents = [
-            document
-            for document in candidate_documents
-            if str(document.metadata["source_id"]) in coverage_source_ids
-        ]
-        minimum_sources = self.rag_retriever.minimum_relevant_sources
-        if len(retrieved_documents) < minimum_sources:
-            error = (
-                f"RAG coverage auditing confirmed {len(retrieved_documents)} "
-                "supporting arXiv source(s), but at least "
-                f"{minimum_sources} are required. Hypothesis generation "
-                "was not executed."
-            )
-            logger.error(error)
-            context.last_retrieved_sources = []
-            return [], [error]
-
-        context.last_retrieved_sources = serialize_documents(retrieved_documents)
-        retrieved_context = format_documents_for_prompt(retrieved_documents)
-        coverage_map = "\n".join(
-            (
-                f"- {aspect.description}: "
-                + ", ".join(
-                    coverage.aspect_source_ids[aspect.aspect_id]
-                )
-            )
-            for aspect in query_plan.explicit_requirements
-        )
-
-        allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
-
-        synthesis, synthesis_error = call_llm_for_literature_synthesis(
-            research_goal.description,
-            query_plan.explicit_requirements,
-            query_plan.exploration_directions,
-            retrieved_context,
-            allowed_source_ids,
-            model=research_goal.llm_model,
-        )
-        if synthesis_error or synthesis is None:
-            context.last_retrieved_sources = []
-            error = synthesis_error or "Literature synthesis failed."
-            logger.error(error)
-            return [], [error]
-        synthesis_text = format_literature_synthesis(synthesis)
-        optional_directions = "\n".join(
-            f"- {direction}"
-            for direction in query_plan.exploration_directions
-        )
-
-        prompt = (
-            "You are an expert tasked with formulating novel and robust "
-            "scientific hypotheses for an audience of domain experts.\n\n"
-            f"Goal:\n{research_goal.description}\n\n"
-            "Criteria for a strong hypothesis:\n"
-            "- Precisely align with the user's goal and constraints.\n"
-            "- Be plausible, novel, specific, falsifiable, feasible, and "
-            "safe.\n"
-            "- Explicitly acknowledge relevant contradictions or "
-            "limitations.\n\n"
-            f"Constraints:\n{research_goal.constraints}\n\n"
-            "Existing hypotheses to avoid duplicating:\n"
-            f"{list(context.hypotheses.keys())}\n\n"
-            "Explicit requirements validated against the literature:\n"
-            f"{coverage_map}\n\n"
-            "Optional exploration directions (inspiration only, not "
-            "requirements):\n"
-            f"{optional_directions or '- None'}\n\n"
-            "Literature review and analytical rationale:\n"
-            f"{synthesis_text}\n\n"
-            "Retrieved articles available for citation:\n"
-            f"{retrieved_context}\n\n"
-            "Use the literature review as the factual foundation. Do not "
-            "introduce factual claims, statistics, events, or established "
-            "mechanisms absent from the retrieved evidence.\n"
-            "A hypothesis may propose a new mechanism or outcome. Clearly "
-            "label that part as new inference, and explain how it follows "
-            "from established findings rather than presenting it as fact.\n"
-            "If the evidence is insufficient or not directly relevant, "
-            "do not generate hypotheses; return the specified error object.\n"
-            f"Otherwise, propose {num_to_generate} concise, novel, feasible, "
-            "specific, and experimentally testable hypotheses.\n"
-            "Use this output structure for every item:\n"
-            "- title: a short descriptive name.\n"
-            "- hypothesis: one clear, testable claim.\n"
-            "- rationale: why the claim follows from the retrieved evidence "
-            "and why it matters.\n"
-            "- feasibility: a concise practical method for testing the claim, "
-            "including measurable outcomes where supported.\n"
-            "- source_ids: the exact retrieved Source IDs supporting it.\n"
-            "Return exactly these five fields and no additional prose "
-            "sections inside each item.\n"
-            "Include only exact Source IDs present in the retrieved evidence. "
-            "Do not invent Source IDs. Every hypothesis must cite the specific "
-            "retrieved sources supporting it in source_ids; cite more than one "
-            "source when the claim combines evidence from multiple papers.\n"
-        )
-
-        raw_output = call_llm_for_generation(
-            prompt,
-            num_hypotheses=num_to_generate,
-            temperature=gen_temp,
-            model=research_goal.llm_model,
-        )
-        raw_output = self._run_scientific_debate(
-            research_goal,
-            query_plan,
-            synthesis,
-            raw_output,
-        )
-
-        new_hypos: List[Hypothesis] = []
-        errors: List[str] = []
-
-        for idea in raw_output:
-            if idea.get("title") == "Error":
-                error_text = str(idea.get("text", "Unknown generation error"))
-                logger.error(
-                    "Hypothesis generation failed: %s",
-                    error_text,
-                )
-                errors.append(error_text)
-                continue
-
-            claimed_source_ids = idea.get(
-                "source_ids",
-                [],
-            )
-
-            if not isinstance(claimed_source_ids, list):
-                claimed_source_ids = []
-
-            valid_source_ids = _resolve_retrieved_source_ids(
-                claimed_source_ids,
-                allowed_source_ids,
-            )
-
-            # Reject hypotheses whose citations were not retrieved.
-            if not valid_source_ids:
-                error = f"Generated hypothesis has no valid retrieved source IDs: {idea.get('title', 'Untitled')}"
-                logger.warning(error)
-                errors.append(error)
-                continue
-
-            hypo_id = generate_unique_id("G")
-
-            while hypo_id in context.hypotheses:
-                hypo_id = generate_unique_id("G")
-
-            hypothesis = Hypothesis(
-                hypo_id,
-                str(idea["title"]).strip(),
-                (
-                    f"Hypothesis: {str(idea['hypothesis']).strip()}\n\n"
-                    f"Rationale: {str(idea['rationale']).strip()}\n\n"
-                    f"Feasibility: {str(idea['feasibility']).strip()}"
-                ),
-            )
-            hypothesis.evidence_source_ids = valid_source_ids
-
-            logger.info(
-                "Generated RAG-grounded hypothesis: %s",
-                hypothesis.to_dict(),
-            )
-            new_hypos.append(hypothesis)
-
-        return new_hypos, errors
-
-
-class ReflectionAgent:
-    def review_hypotheses(
-        self, hypotheses: List[Hypothesis], context: ContextMemory, research_goal: ResearchGoal
-    ) -> None:
-        """Reviews hypotheses using LLM, based on research_goal settings."""
-        # Use reflection temperature from research_goal
-        reflect_temp = research_goal.reflection_temperature
-
-        for h in hypotheses:
-            # Avoid re-reviewing if already reviewed (optional optimization)
-            # if h.novelty_review is not None and h.feasibility_review is not None:
-            #    continue
-            # Pass the specific temperature
-            result = call_llm_for_reflection(h.text, temperature=reflect_temp, model=research_goal.llm_model)
-            h.novelty_review = result["novelty_review"]
-            h.feasibility_review = result["feasibility_review"]
-            # Append comment only if it's not the default error message
-            if result["comment"] != "Could not parse LLM response.":
-                h.review_comments.append(result["comment"])
-            # Only extend references if the list is not empty
-            if result["references"]:
-                h.references.extend(result["references"])
-            logger.info(
-                "Reviewed hypothesis: %s, Novelty: %s, Feasibility: %s",
-                h.hypothesis_id,
-                h.novelty_review,
-                h.feasibility_review,
-            )
-
-
-class RankingAgent:
-    def run_tournament(self, hypotheses: List[Hypothesis], context: ContextMemory, research_goal: ResearchGoal) -> None:
-        """Runs a pairwise tournament to rank hypotheses, using research_goal settings."""
-        # Use k_factor from research_goal
-        k_factor = research_goal.elo_k_factor
-
-        if len(hypotheses) < 2:
-            logger.info("Not enough hypotheses to run a tournament.")
-            return
-
-        active_hypotheses = [h for h in hypotheses if h.is_active]
-        if len(active_hypotheses) < 2:
-            logger.info("Not enough *active* hypotheses to run a tournament.")
-            return
-
-        random.shuffle(active_hypotheses)  # Shuffle only active ones
-
-        # Simple round-robin: each active hypothesis debates every other active one once
-        pairs = []
-        for i in range(len(active_hypotheses)):
-            for j in range(i + 1, len(active_hypotheses)):
-                pairs.append((active_hypotheses[i], active_hypotheses[j]))
-
-        logger.info(f"Running tournament with {len(pairs)} pairs.")
-        for hA, hB in pairs:
-            # winner = run_pairwise_debate(hA, hB)
-            winner, reasoning = run_pairwise_debate(
-                hA,
-                hB,
-                research_goal,
-            )
-            loser = hB if winner == hA else hA
-            # Pass the specific k_factor
-            update_elo(winner, loser, k_factor=k_factor)
-            # Record result in context (consider if this needs iteration info)
-            context.tournament_results.append(
-                {
-                    "iteration": context.iteration_number,  # Add iteration number
-                    "winner": winner.hypothesis_id,
-                    "loser": loser.hypothesis_id,
-                    "winner_score_after": winner.elo_score,
-                    "loser_score_after": loser.elo_score,
-                    "reasoning": reasoning,
-                }
-            )
-
-
-class EvolutionAgent:
-    def evolve_hypotheses(self, context: ContextMemory, research_goal: ResearchGoal) -> List[Hypothesis]:
-        """Evolves hypotheses by combining top candidates, using research_goal settings."""
-        # Use top_k from research_goal
-        top_k = research_goal.top_k_hypotheses
-        active = context.get_active_hypotheses()
-        if len(active) < 2:
-            logger.info("Not enough active hypotheses to perform evolution.")
-            return []
-
-        sorted_by_elo = sorted(active, key=lambda h: h.elo_score, reverse=True)
-        top_candidates = sorted_by_elo[:top_k]
-
-        new_hypotheses = []
-        # Combine the top two for now, could be extended
-        if len(top_candidates) >= 2:
-            # Optional: Add check to prevent combining very similar hypotheses
-            # sim = similarity_score(top_candidates[0].text, top_candidates[1].text)
-            # if sim < 0.8: # Example threshold
-            new_h = combine_hypotheses(top_candidates[0], top_candidates[1])
-            logger.info("Evolved hypothesis created: %s from parents %s", new_h.hypothesis_id, new_h.parent_ids)
-            new_hypotheses.append(new_h)
-            # else:
-            #     logger.info("Skipping evolution: Top 2 hypotheses are too similar (score: %.2f)", sim)
-
-        return new_hypotheses
-
-
-class ProximityAgent:
-    def build_proximity_graph(self, context: ContextMemory) -> Dict:
-        """Builds proximity graph data based on hypothesis similarity."""
-        active_hypotheses = context.get_active_hypotheses()
-        adjacency = {}
-        if not active_hypotheses:
-            logger.info("No active hypotheses to build proximity graph.")
-            return {"adjacency_graph": {}, "nodes": [], "edges": []}
-
-        for i in range(len(active_hypotheses)):
-            hypo_i = active_hypotheses[i]
-            adjacency[hypo_i.hypothesis_id] = []
-            for j in range(len(active_hypotheses)):
-                if i == j:
-                    continue
-                hypo_j = active_hypotheses[j]
-                if hypo_i.text and hypo_j.text:
-                    sim = similarity_score(hypo_i.text, hypo_j.text)
-                    adjacency[hypo_i.hypothesis_id].append({"other_id": hypo_j.hypothesis_id, "similarity": sim})
-                else:
-                    logger.warning(
-                        f"Skipping similarity for {hypo_i.hypothesis_id} or {hypo_j.hypothesis_id} due to empty text."
-                    )
-
-        visjs_data = generate_visjs_data(adjacency)  # Use utility function
-        logger.info("Built proximity graph adjacency with %d nodes.", len(active_hypotheses))
-        return {"adjacency_graph": adjacency, "nodes": visjs_data["nodes"], "edges": visjs_data["edges"]}
-
-
-class MetaReviewAgent:
-    def summarize_and_feedback(self, context: ContextMemory, adjacency: Dict) -> Dict:
-        """Summarizes research state and provides feedback."""
-        active_hypotheses = context.get_active_hypotheses()
-        if not active_hypotheses:
-            return {
-                "meta_review_critique": ["No active hypotheses."],
-                "research_overview": {"top_ranked_hypotheses": [], "suggested_next_steps": []},
-            }
-
-        comment_summary = set()
-        for h in active_hypotheses:
-            # Example critique based on reviews
-            if h.novelty_review == "LOW":
-                comment_summary.add("Some ideas lack novelty.")
-            if h.feasibility_review == "LOW":
-                comment_summary.add("Some ideas may have low feasibility.")
-            # Could add critiques based on adjacency graph (e.g., clusters, outliers)
-
-        best_hypotheses = sorted(active_hypotheses, key=lambda h: h.elo_score, reverse=True)[:3]
-        logger.info("Top hypotheses for meta-review: %s", [h.hypothesis_id for h in best_hypotheses])
-
-        # Example suggested next steps
-        next_steps = [
-            "Refine top hypotheses based on review comments.",
-            "Consider exploring areas with fewer, less connected hypotheses (if any).",
-            "Seek external expert feedback on top candidates.",
-        ]
-        if not comment_summary:
-            comment_summary.add("Overall hypothesis quality seems reasonable based on automated review.")
-
-        overview = {
-            "meta_review_critique": list(comment_summary),
-            "research_overview": {
-                "top_ranked_hypotheses": [h.to_dict() for h in best_hypotheses],  # Use to_dict for serialization
-                "suggested_next_steps": next_steps,
-            },
-        }
-        context.meta_review_feedback.append(overview)  # Store feedback in context
-        logger.info("Meta-review complete: %s", overview)
-        return overview
-
-
-class SupervisorAgent:
-    """Orchestrates the Open AI Co-Scientist workflow."""
-
-    def __init__(self):
-        self.generation_agent = GenerationAgent()
-        self.reflection_agent = ReflectionAgent()
-        self.ranking_agent = RankingAgent()
-        self.evolution_agent = EvolutionAgent()
-        self.proximity_agent = ProximityAgent()
-        self.meta_review_agent = MetaReviewAgent()
-
-    def run_cycle(self, research_goal: ResearchGoal, context: ContextMemory) -> Dict:
-        """Runs a single cycle of hypothesis generation and refinement."""
-        logger.info("--- Starting Cycle %d ---", context.iteration_number + 1)
-        cycle_details = {"iteration": context.iteration_number + 1, "steps": {}, "meta_review": {}}
-
-        # 1. Generation
-        logger.info("Step 1: Generation")
-        new_hypotheses, generation_errors = self.generation_agent.generate_new_hypotheses(research_goal, context)
-        for nh in new_hypotheses:
-            context.add_hypothesis(nh)  # Add to central context
-        cycle_details["steps"]["generation"] = {
-            "hypotheses": [h.to_dict() for h in new_hypotheses],
-            "sources": list(context.last_retrieved_sources),
-        }
-
-        # Propagate LLM errors to top-level errors field for frontend display, so a
-        # generation failure surfaces its real cause instead of an empty ranking.
-        if generation_errors:
-            cycle_details["errors"] = generation_errors
-
-        # Get all active hypotheses for subsequent steps
-        active_hypos = context.get_active_hypotheses()
-
-        # 2. Reflection
-        logger.info("Step 2: Reflection")
-        self.reflection_agent.review_hypotheses(active_hypos, context, research_goal)  # Pass research_goal
-        cycle_details["steps"]["reflection"] = {"hypotheses": [h.to_dict() for h in active_hypos]}
-
-        # 3. Ranking (Tournament 1)
-        logger.info("Step 3: Ranking 1")
-        self.ranking_agent.run_tournament(active_hypos, context, research_goal)  # Pass research_goal
-        cycle_details["steps"]["ranking1"] = {"hypotheses": [h.to_dict() for h in active_hypos]}
-
-        # 4. Evolution
-        logger.info("Step 4: Evolution")
-        evolved_hypotheses = self.evolution_agent.evolve_hypotheses(context, research_goal)  # Pass research_goal
-        if evolved_hypotheses:
-            for eh in evolved_hypotheses:
-                context.add_hypothesis(eh)
-            logger.info("Step 4a: Reviewing Evolved Hypotheses")
-            self.reflection_agent.review_hypotheses(evolved_hypotheses, context, research_goal)  # Pass research_goal
-            active_hypos = context.get_active_hypotheses()  # Update active list
-            cycle_details["steps"]["evolution"] = {"hypotheses": [h.to_dict() for h in evolved_hypotheses]}
-            # Add explicit step for reviewing evolved hypotheses AFTER evolution
-            cycle_details["steps"]["reflection_evolved"] = {"hypotheses": [h.to_dict() for h in evolved_hypotheses]}
-        else:
-            cycle_details["steps"]["evolution"] = {"hypotheses": []}
-
-        # 5. Ranking (Tournament 2 - includes evolved)
-        logger.info("Step 5: Ranking 2")
-        self.ranking_agent.run_tournament(active_hypos, context, research_goal)  # Pass research_goal
-        cycle_details["steps"]["ranking2"] = {"hypotheses": [h.to_dict() for h in active_hypos]}
-
-        # Ensure context.active_hypotheses reflects the final ranked hypotheses for meta-review
-        # Use all hypotheses from the final ranking step (not just active_hypos, which may be filtered)
-        final_ranked_hypos = [h for h in active_hypos]
-        context.active_hypotheses = {h.hypothesis_id: h for h in final_ranked_hypos}
-
-        # 6. Proximity Analysis
-        logger.info("Step 6: Proximity Analysis")
-        proximity_result = self.proximity_agent.build_proximity_graph(context)  # Pass context
-        cycle_details["steps"]["proximity"] = {
-            "adjacency_graph": proximity_result["adjacency_graph"],
-            "nodes": proximity_result["nodes"],
-            "edges": proximity_result["edges"],
-        }
-
-        # 7. Meta-review
-        logger.info("Step 7: Meta-Review")
-        overview = self.meta_review_agent.summarize_and_feedback(context, proximity_result["adjacency_graph"])
-        cycle_details["meta_review"] = overview
-        # Add meta-review to steps for consistency
-        cycle_details["steps"]["meta_review"] = overview
-
-        # Increment iteration number at the end of the cycle
-        context.iteration_number += 1
-        logger.info("--- Cycle %d Complete ---", context.iteration_number)
-        return cycle_details
+__all__ = [
+    "ArxivRAGRetriever",
+    "ContextMemory",
+    "EvidenceAspect",
+    "EvolutionAgent",
+    "GenerationAgent",
+    "Hypothesis",
+    "LiteratureFinding",
+    "LiteratureSynthesis",
+    "MetaReviewAgent",
+    "ProximityAgent",
+    "RankingAgent",
+    "ReflectionAgent",
+    "ResearchGoal",
+    "SearchQueryPlan",
+    "SupervisorAgent",
+    "call_llm",
+    "call_llm_for_debate_refinement",
+    "call_llm_for_evidence_coverage",
+    "call_llm_for_generation",
+    "call_llm_for_literature_synthesis",
+    "call_llm_for_relevance_filter",
+    "call_llm_for_reflection",
+    "call_llm_for_search_queries",
+    "combine_hypotheses",
+    "format_documents_for_prompt",
+    "format_literature_synthesis",
+    "format_references",
+    "generate_unique_id",
+    "generate_visjs_data",
+    "logger",
+    "parse_pairwise_result",
+    "run_pairwise_debate",
+    "serialize_documents",
+    "similarity_score",
+    "update_elo",
+]
+
+
+__all__ = [
+    "ArxivRAGRetriever",
+    "ContextMemory",
+    "EvidenceAspect",
+    "EvolutionAgent",
+    "GenerationAgent",
+    "Hypothesis",
+    "LiteratureFinding",
+    "LiteratureSynthesis",
+    "MetaReviewAgent",
+    "ProximityAgent",
+    "RankingAgent",
+    "ReflectionAgent",
+    "ResearchGoal",
+    "SearchQueryPlan",
+    "SupervisorAgent",
+    "call_llm",
+    "call_llm_for_debate_refinement",
+    "call_llm_for_evidence_coverage",
+    "call_llm_for_generation",
+    "call_llm_for_literature_synthesis",
+    "call_llm_for_relevance_filter",
+    "call_llm_for_reflection",
+    "call_llm_for_search_queries",
+    "combine_hypotheses",
+    "format_documents_for_prompt",
+    "format_literature_synthesis",
+    "format_references",
+    "generate_unique_id",
+    "generate_visjs_data",
+    "logger",
+    "parse_pairwise_result",
+    "run_pairwise_debate",
+    "serialize_documents",
+    "similarity_score",
+    "update_elo",
+]

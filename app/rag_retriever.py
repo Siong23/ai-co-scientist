@@ -10,6 +10,7 @@ from langchain_core.vectorstores import InMemoryVectorStore
 
 from .config import config
 from .tools.arxiv_search import ArxivSearchTool
+from .tools.semantic_scholar_search import SemanticScholarSearchTool
 from .utils import get_sentence_transformer_model, logger
 
 
@@ -68,7 +69,9 @@ def reciprocal_rank_fusion(
     ranked_results: Sequence[Sequence[dict[str, Any]]],
     k: int = 60,
 ) -> list[dict[str, Any]]:
-    """Fuse arXiv result rankings and deduplicate papers by canonical ID."""
+    """Fuse multi-source result rankings and deduplicate papers by canonical ID."""
+    # Works for any source whose papers carry an "arxiv_id" dedup key
+    # (real arXiv IDs or s2:... prefixes from Semantic Scholar).
 
     scores: dict[str, float] = {}
     papers: dict[str, dict[str, Any]] = {}
@@ -134,6 +137,9 @@ class ArxivRAGRetriever:
         self.max_abstract_chars = max_abstract_chars or int(rag_config.get("max_abstract_chars", 1800))
 
         self.arxiv = ArxivSearchTool(max_results=self.results_per_query)
+        self.semantic_scholar = SemanticScholarSearchTool(
+            max_results=self.results_per_query
+        )
         self.embeddings = SharedSentenceTransformerEmbeddings()
 
     def retrieve(
@@ -215,12 +221,73 @@ class ArxivRAGRetriever:
         ).casefold()
         return any(term.casefold() in searchable_text for term in required_terms)
 
+    def retrieve_fallback(
+        self,
+        original_query: str,
+        query_plan: SearchQueryPlan,
+    ) -> list[Document]:
+        """Search Semantic Scholar as a fallback when arXiv is insufficient.
+
+        Uses the same query plan produced by the LLM query planner so no extra
+        LLM calls are needed.  Results are fused via RRF and semantically
+        reranked, identical to the primary arXiv retrieval path.
+
+        Returns an empty list (never raises) so the caller can always treat the
+        result as a plain list and decide whether to continue or report an error.
+        """
+        original_query = original_query.strip()
+        if not original_query:
+            return []
+
+        ranked_results = [
+            self.semantic_scholar.search_papers(
+                query=query,
+                max_results=self.results_per_query,
+            )
+            for query in query_plan.queries
+        ]
+        fused_papers = reciprocal_rank_fusion(ranked_results, k=self.rrf_k)
+
+        documents = [
+            self._paper_to_document(paper)
+            for paper in fused_papers
+            if paper.get("abstract") and paper.get("arxiv_id")
+        ]
+        if not documents:
+            logger.info(
+                "Semantic Scholar fallback returned no documents for query: %r",
+                original_query,
+            )
+            return []
+
+        vector_store = InMemoryVectorStore(embedding=self.embeddings)
+        vector_store.add_documents(
+            documents=documents,
+            ids=[str(d.metadata["source_id"]) for d in documents],
+        )
+        selected = vector_store.similarity_search(
+            original_query,
+            k=min(self.top_k, len(documents)),
+        )
+        logger.info(
+            "Semantic Scholar fallback selected %d sources from %d candidates: %s",
+            len(selected),
+            len(documents),
+            [d.metadata.get("source_id") for d in selected],
+        )
+        return selected
+
     def _paper_to_document(
         self,
         paper: dict[str, Any],
     ) -> Document:
         arxiv_id = str(paper["arxiv_id"])
-        source_id = f"arXiv:{arxiv_id}"
+        # Semantic Scholar papers without an arXiv ID use "s2:..." prefix;
+        # real arXiv papers get the standard "arXiv:" prefix.
+        if arxiv_id.startswith("s2:"):
+            source_id = arxiv_id
+        else:
+            source_id = f"arXiv:{arxiv_id}"
         abstract = str(paper.get("abstract", ""))[: self.max_abstract_chars]
 
         page_content = (
