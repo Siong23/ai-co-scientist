@@ -146,24 +146,6 @@ def format_reflection_report(report):
 
     """
 
-# def format_references(references):
-#     if not references:
-#         return "No references provided."
-
-#     formatted = []
-
-#     for ref in references:
-#         if isinstance(ref, dict):
-#             title = ref.get("title", "Unknown title")
-#             authors = ref.get("authors", "")
-#             year = ref.get("year", "")
-
-#             formatted.append(f"{title} ({authors}, {year})")
-#         else:
-#             formatted.append(str(ref))
-
-#     return "\n".join(formatted)
-
 def generate_debate_argument(
     candidate: Hypothesis,
     opponent: Hypothesis,
