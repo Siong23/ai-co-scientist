@@ -19,6 +19,7 @@ from .utils import (
     generate_unique_id,
     generate_visjs_data,
     logger,  # Use the logger configured in utils
+    redact_secrets,
     similarity_score,
 )
 
@@ -364,7 +365,14 @@ def _resolve_retrieved_source_id(
     source_id: str,
     available_source_ids: set[str],
 ) -> str | None:
-    """Resolve a model-emitted arXiv ID to one unique retrieved source."""
+    """Resolve a model-emitted ID to one unique retrieved source."""
+
+    normalized_id = source_id.strip()
+    exact_matches = [
+        available_id for available_id in available_source_ids if available_id.casefold() == normalized_id.casefold()
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
 
     requested_canonical_id = _canonical_arxiv_id(source_id)
     if requested_canonical_id is None:
@@ -1132,7 +1140,7 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
 
 
 class GenerationAgent:
-    """Generate hypotheses grounded in multi-query arXiv retrieval."""
+    """Generate hypotheses grounded in multi-source academic retrieval."""
 
     def __init__(
         self,
@@ -1300,6 +1308,7 @@ Your refined contribution:
         retrieved_documents = []
         coverage = None
         corrective_round = 0
+        fallback_attempted = False
         while True:
             candidate_context = format_documents_for_prompt(candidate_documents)
             candidate_source_ids = {str(document.metadata["source_id"]) for document in candidate_documents}
@@ -1343,6 +1352,45 @@ Your refined contribution:
                 break
 
             if corrective_round >= (self.rag_retriever.corrective_retrieval_rounds):
+                if not fallback_attempted:
+                    fallback_attempted = True
+                    missing_aspects = [
+                        aspect
+                        for aspect in query_plan.explicit_requirements
+                        if aspect.aspect_id in coverage.missing_aspect_ids
+                    ]
+                    fallback_queries = tuple(
+                        dict.fromkeys(
+                            [
+                                *coverage.gap_queries,
+                                *(aspect.description for aspect in missing_aspects),
+                            ]
+                        )
+                    )
+                    fallback_plan = SearchQueryPlan(
+                        queries=fallback_queries or query_plan.queries,
+                        required_terms=(),
+                        explicit_requirements=query_plan.explicit_requirements,
+                        exploration_directions=query_plan.exploration_directions,
+                    )
+                    try:
+                        fallback_documents = self.rag_retriever.retrieve_fallback(
+                            research_goal.description,
+                            fallback_plan,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Semantic Scholar fallback failed: %s",
+                            redact_secrets(str(exc)),
+                        )
+                        fallback_documents = []
+                    if fallback_documents:
+                        candidate_documents = self._merge_retrieved_documents(
+                            candidate_documents,
+                            fallback_documents,
+                        )
+                        continue
+
                 missing_descriptions = [
                     aspect.description.rstrip(".")
                     for aspect in query_plan.explicit_requirements
@@ -1351,7 +1399,8 @@ Your refined contribution:
                 error = (
                     "Retrieved evidence is insufficient after "
                     f"{corrective_round} corrective retrieval "
-                    "round(s). Missing explicit requirements: "
+                    "round(s) and Semantic Scholar fallback. "
+                    "Missing explicit requirements: "
                     + "; ".join(missing_descriptions)
                     + ". Hypothesis generation was not executed."
                 )
