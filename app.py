@@ -92,10 +92,10 @@ def refresh_history_view() -> Tuple[str, Dict[str, Any], str]:
 def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[str, Any]]:
     """Delete the selected saved run and refresh the history display."""
     if not selected_run_id:
-        return "Select a saved run to delete.", history_html(), gr.update(choices=history_run_choices(), value=None)
+        return f"❌ {to_bold('Error:')} Select a saved run to delete.", history_html(), gr.update(choices=history_run_choices(), value=None)
 
     deleted = delete_run(selected_run_id)
-    message = f"Deleted saved run {selected_run_id}." if deleted else f"Saved run {selected_run_id} was not found."
+    message = f"✅ {to_bold('Success:')} Deleted saved run {selected_run_id}." if deleted else f"❌ {to_bold('Error:')} Saved run {selected_run_id} was not found."
     return message, history_html(), gr.update(choices=history_run_choices(), value=None)
 
 # Create a small helper function to turn plain text into bold text
@@ -116,7 +116,7 @@ def set_research_goal(
     global current_research_goal, global_context
 
     if not description.strip():
-        return "❌ Error: Please enter a research goal.", ""
+        return f"❌ {to_bold('Error:')} Please enter a research goal.", ""
 
     try:
         # Create research goal with settings
@@ -143,7 +143,7 @@ def set_research_goal(
         return status_msg, "Ready to run first cycle. Click 'Run Cycle' to begin."
 
     except Exception as e:
-        error_msg = f"❌ Error setting research goal: {str(e)}"
+        error_msg = f"❌ {to_bold('Error setting research goal:')} {str(e)}"
         logger.error(error_msg)
         return error_msg, ""
 
@@ -227,7 +227,7 @@ def execute_cycle(
         }
 
     except Exception as e:
-        error_msg = f"❌ Error during cycle execution: {str(e)}"
+        error_msg = f"❌ {to_bold('Error during cycle execution:')} {str(e)}"
         logger.error(error_msg, exc_info=True)
         return {
             "status": error_msg,
@@ -249,7 +249,7 @@ def persist_cycle_result(research_goal: ResearchGoal, cycle_result: Dict[str, An
         log_file=cycle_result["log_file"],
     )
     report_path = write_report(saved_run)
-    status_msg = f"{cycle_result['status']}\nRun ID: {saved_run['run_id']}\nReport: {report_file_url(report_path)}"
+    status_msg = f"{cycle_result['status']}\n\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}"
     return status_msg, cycle_result["results_html"], cycle_result["references_html"]
 
 
@@ -258,7 +258,7 @@ def run_cycle() -> Tuple[str, str, str]:
     global current_research_goal, global_context, supervisor
 
     if not current_research_goal:
-        return "❌ Error: No research goal set. Please set a research goal first.", "", ""
+        return f"❌ {to_bold('Error:')} No research goal set. Please set a research goal first.", "", ""
 
     return persist_cycle_result(
         current_research_goal,
@@ -326,7 +326,7 @@ def run_cycle_with_progress(
     global global_context
 
     if not current_research_goal:
-        yield "❌ Error: No research goal set. Please set a research goal first.", "", ""
+        yield f"❌ {to_bold('Error:')} No research goal set. Please set a research goal first.", "", ""
         return
 
     run_goal = current_research_goal
@@ -365,24 +365,24 @@ def run_cycle_with_progress(
             )
             report_path = write_report(saved_run)
             yield (
-                f"{timeout_status}\nRun ID: {saved_run['run_id']}\nReport: {report_file_url(report_path)}",
+                f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
                 timeout_html,
                 "",
             )
             return
 
         status = (
-            f"⏳ Cycle {iteration} is running.\n"
-            f"Elapsed: {format_timeout_duration(elapsed)}.\n"
-            "Active work: generating, reviewing, ranking, and evolving hypotheses.\n"
-            f"Upper limit: {format_timeout_duration(timeout_seconds)}."
+            f"⏳ Cycle {iteration} is running.\n\n"
+            f"{to_bold('Elapsed:')} {format_timeout_duration(elapsed)}.\n"
+            f"{to_bold('Active work:')} generating, reviewing, ranking, and evolving hypotheses.\n"
+            f"{to_bold('Upper limit:')} {format_timeout_duration(timeout_seconds)}."
         )
         yield status, "<p>Cycle is still running. Results will appear when the cycle completes.</p>", ""
         thread.join(timeout=min(poll_seconds, max(timeout_seconds - elapsed, 0.1)))
 
     cycle_result = result.get("value")
     if not cycle_result:
-        yield "❌ Error: Cycle ended without a result.", "", ""
+        yield f"❌ {to_bold('Error:')} Cycle ended without a result.", "", ""
         return
     if current_research_goal is run_goal:
         global_context = run_context
