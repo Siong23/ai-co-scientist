@@ -35,7 +35,16 @@ from .agents_modules.ranking_helpers import (
     update_elo_tie,
 )
 from .agents_modules.reflection import ReflectionAgent
-from .agents_modules.reflection_helpers import call_llm_for_reflection
+from .agents_modules.reflection_helpers import call_llm_for_reflection as _call_llm_for_reflection
+
+def call_llm_for_reflection(hypothesis, research_goal=None, context=None, *args, **kwargs):
+    """
+    Compatibility wrapper so callers that pass only `hypothesis` still work.
+    The underlying implementation now accepts (hypothesis, research_goal, context).
+    Accepts additional args/kwargs and forwards them through.
+    """
+    return _call_llm_for_reflection(hypothesis, research_goal, context, *args, **kwargs)
+
 from .agents_modules.supervisor import SupervisorAgent
 from .models import ContextMemory, Hypothesis, ResearchGoal
 from .rag_retriever import (
