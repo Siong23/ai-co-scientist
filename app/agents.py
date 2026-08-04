@@ -32,6 +32,7 @@ from .agents_modules.ranking_helpers import (
     parse_pairwise_result,
     run_pairwise_debate,
     update_elo,
+    update_elo_tie,
 )
 from .agents_modules.reflection import ReflectionAgent
 from .agents_modules.reflection_helpers import call_llm_for_reflection
@@ -91,4 +92,5 @@ __all__ = [
     "serialize_documents",
     "similarity_score",
     "update_elo",
+    "update_elo_tie",
 ]

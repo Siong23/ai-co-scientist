@@ -8,7 +8,7 @@ import re
 # import logging
 
 from typing import Dict, List
-from ..models import Hypothesis, ResearchGoal, PairwiseDecision
+from ..models import Hypothesis, ResearchGoal, PairwiseDecision, ReflectionReport
 from ..utils import logger
 from .generation_helpers import _call_llm
 
@@ -61,7 +61,7 @@ def parse_decisive_criteria(response: str) -> List[str]:
 
     return criteria
 
-def format_evidence_sources(hypothesis):
+def format_evidence_sources(hypothesis: Hypothesis) -> str:
     
     if not hypothesis.evidence_sources:
         return "No evidence provided."
@@ -142,7 +142,7 @@ def format_references(hypothesis_or_sources):
 
     return "\n\n".join(output)
 
-def format_reflection_report(report):
+def format_reflection_report(report: ReflectionReport | None,) -> str:
 
     if report is None:
         return "No reflection report available."
@@ -167,6 +167,9 @@ def format_reflection_report(report):
 
     Evidence Quality:
     {report.evidence_quality_score}/10
+
+    Expected Research Value:
+    {report.expected_research_value_score}/10
 
 
     Strengths:
@@ -485,7 +488,7 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
         decisive_criteria = criteria,
     )
 
-def update_elo_tie(hypoA, hypoB, k_factor):
+def update_elo_tie(hypoA: Hypothesis, hypoB: Hypothesis, k_factor: int):
 
     ratingA=hypoA.elo_score
     ratingB=hypoB.elo_score
