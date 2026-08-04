@@ -14,6 +14,14 @@ from .generation_helpers import _call_llm
 
 # logger=logging.getLogger(__name__)
 
+def clean_markdown(text):
+    if not text:
+        return ""
+
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = text.replace("**", "")
+    return text.strip()
+
 def score_hypothesis(
     hypothesis: Hypothesis,
     research_goal: ResearchGoal,
@@ -40,10 +48,28 @@ def score_hypothesis(
         "expected_research_value": report.expected_research_value_score,
     }
 
+def parse_confidence(response):
+
+    match = re.search(
+        r"confidence\s*:\s*(0?\.\d+|1\.0|[0-9]+%)",
+        response,
+        re.IGNORECASE
+    )
+
+    if match:
+        value = match.group(1)
+
+        if "%" in value:
+            return float(value.replace("%","")) / 100
+
+        return float(value)
+
+    return 0.0
+
 def parse_decisive_criteria(response: str) -> List[str]:
 
     match = re.search(
-        r"Decisive Criteria:\s*(.*?)(?:Confidence:|$)",
+        r"Decisive Criteria:\s*(.*?)(?:Conclusion:|Decision:|Confidence:|$)",
         response,
         re.DOTALL | re.IGNORECASE,
     )
@@ -56,8 +82,8 @@ def parse_decisive_criteria(response: str) -> List[str]:
     for line in match.group(1).splitlines():
         line = line.strip("- ").strip()
 
-        if line:
-            criteria.append(line)
+        if line and line != "**":
+            criteria.append(clean_markdown(line))
 
     return criteria
 
@@ -294,23 +320,23 @@ def judge_debate(
     Idea Attributes:
     {research_goal.idea_attributes}
 
-    Hypothesis 1
+    Hypothesis A
 
     {hypoA.text}
 
-    Hypothesis 2
+    Hypothesis B
 
     {hypoB.text}
 
     ----------------------------------
 
-    Argument defending Hypothesis 1
+    Argument defending Hypothesis A
 
     {debateA}
 
     ----------------------------------
 
-    Argument defending Hypothesis 2
+    Argument defending Hypothesis B
 
     {debateB}
 
@@ -331,18 +357,20 @@ def judge_debate(
 
     Explain your reasoning.
 
-    Finish your response exactly:
+    Finish your response EXACTLY in the following format:
 
     Decision:
     A/B/TIE/ABSTAIN
 
-    Decisive Criteria:
+    Short Justification:
+    One or two sentences explaining why the winning hypothesis is better.
 
-    - Evidence Quality
-    - Feasibility
+    Decisive Criteria:
+    - Criterion 1
+    - Criterion 2
 
     Confidence:
-    0.82
+    Provide your confidence as a decimal number between 0 and 1.
     """
 
     return _call_llm(
@@ -350,6 +378,19 @@ def judge_debate(
         temperature=0.2,
         model=research_goal.llm_model,
     )
+
+def parse_short_justification(response: str) -> str:
+
+    match = re.search(
+        r"Short Justification:\s*(.*?)(?:Decisive Criteria:|Confidence:|$)",
+        response,
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    if match:
+        return clean_markdown(match.group(1).strip())
+
+    return ""
 
 def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: ResearchGoal) -> PairwiseDecision:
     """Compares two hypotheses based on novelty and feasibility scores."""
@@ -447,33 +488,35 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
 
     criteria = parse_decisive_criteria(response)
 
-    reasoning = f"""
-    === Debate for Hypothesis 1 ===
+    # reasoning = f"""
+    # === Debate for Hypothesis 1 ===
 
-    {debateA}
+    # {debateA}
 
-    ===============================
+    # ===============================
 
-    === Debate for Hypothesis 2 ===
+    # === Debate for Hypothesis 2 ===
 
-    {debateB}
+    # {debateB}
 
-    ===============================
+    # ===============================
 
-    === Judge Round 1 ===
+    # === Judge Round 1 ===
 
-    {response1}
+    # {response1}
 
-    === Judge Round 2 (Swapped)  ===
+    # === Judge Round 2 (Swapped)  ===
 
-    {response2}
+    # {response2}
 
-    ===============================
+    # ===============================
     
-    === Final Decision ===
+    # === Final Decision ===
 
-    {response}
-    """
+    # {response}
+    # """
+
+    reasoning = clean_markdown(parse_short_justification(response))
 
     logger.info("Pairwise ranking response:\n%s", response)
 
@@ -506,18 +549,6 @@ def update_elo_tie(hypoA: Hypothesis, hypoB: Hypothesis, k_factor: int):
 
     hypoB.elo_score += k_factor*(0.5-expectedB)
 
-def parse_confidence(response):
-
-    match = re.search(
-        r"confidence\s*:\s*(0?\.\d+|1\.0)",
-        response,
-        re.IGNORECASE
-    )
-
-    if match:
-        return float(match.group(1))
-
-    return 0.0
 
 def parse_pairwise_result(response: str) -> str:
     """
@@ -531,25 +562,22 @@ def parse_pairwise_result(response: str) -> str:
     """
 
     patterns = {
-        "A": [
-            r"decision\s*:\s*A",
-            r"winner\s*:\s*A",
+        "A":[
+            r"decision\s*:\s*A\b",
+            r"winner\s*:\s*A\b",
         ],
 
-        "B": [
-            r"decision\s*:\s*B",
-            r"winner\s*:\s*B",
+        "B":[
+            r"decision\s*:\s*B\b",
+            r"winner\s*:\s*B\b",
         ],
 
-        "TIE": [
-            r"decision\s*:\s*tie",
-            r"result\s*:\s*tie",
+        "TIE":[
+            r"decision\s*:\s*TIE\b",
         ],
 
-        "ABSTAIN": [
-            r"decision\s*:\s*abstain",
-            r"result\s*:\s*abstain",
-            r"insufficient\s+evidence",
+        "ABSTAIN":[
+            r"decision\s*:\s*ABSTAIN\b",
         ]
     }
 

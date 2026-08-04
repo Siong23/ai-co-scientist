@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import gradio as gr
+from numpy.ma import count
 
 from app.agents import SupervisorAgent
 
@@ -466,20 +467,88 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
 
         elif step_name.startswith("ranking"):
             hypotheses = step_data.get("hypotheses", [])
+            tournament_results = step_data.get("tournament_results", [])
+            title_map = {
+                h.get("id"): h.get("title", "Untitled")
+                for h in hypotheses
+            }
             if hypotheses:
-                # Sort by Elo score
-                sorted_hypotheses = sorted(hypotheses, key=lambda h: h.get("elo_score", 0), reverse=True)
+                sorted_hypotheses = sorted(
+                    hypotheses,
+                    key=lambda h: h.get("elo_score", 0),
+                    reverse=True
+                )
                 html += f"<p><strong>Ranking results ({len(hypotheses)} hypotheses):</strong></p>"
                 html += "<ol>"
                 for hypo in sorted_hypotheses:
                     html += f"""
-                    <li style="margin: 5px 0;">
-                        <strong>{hypo.get("title", "Untitled")}</strong> (ID: {hypo.get("id", "Unknown")}) 
-                        - Elo: {hypo.get("elo_score", 0):.2f}
+                    <li style="margin:5px 0;">
+                        <strong>{hypo.get("title","Untitled")}</strong>
+                        (ID: {hypo.get("id","Unknown")})
+                        - Elo: {hypo.get("elo_score",0):.2f}
                         {format_evidence_sources_html(hypo, generation_sources)}
                     </li>
                     """
                 html += "</ol>"
+            if tournament_results:
+                html += "<h4>⚔️ Tournament Debate Results</h4>"
+                count = 0 # initialize match counter
+                for match in tournament_results:
+                    count += 1 # increment for each match counter
+                    title_a = title_map.get(
+                        match["hypothesis_a"],
+                        match["hypothesis_a"]
+                    )
+                    title_b = title_map.get(
+                        match["hypothesis_b"],
+                        match["hypothesis_b"]
+                    )
+                    if match["outcome"] == "A":
+                        winner = title_a
+                    elif match["outcome"] == "B":
+                        winner = title_b
+                    elif match["outcome"] == "TIE":
+                        winner = "Tie"
+                    else:
+                        winner = "Abstain"
+                    html += f"""
+                    <div style="
+                        border:1px solid #ddd;
+                        border-radius:10px;
+                        padding:15px;
+                        margin:15px 0;
+                        background:#f8f9fa;">
+
+                    <h4>⚔️ Tournament Match {count}</h4>
+
+                    <hr>
+
+                    <p><b>🅰 Hypothesis A</b><br>
+                    {title_a}</p>
+
+                    <p><b>🅱 Hypothesis B</b><br>
+                    {title_b}</p>
+                    
+                    <br>
+
+                    <p><b>🏆 Winner</b><br>
+                    {winner}</p>
+
+                    <p><b>🎯 Confidence</b><br>
+                    {match.get("confidence",0)*100:.0f}%</p>
+
+                    <p><b>💡 Why it won</b><br>
+                    {match.get("reasoning","No reason provided.")}</p>
+
+                    <p><b>📌 Decisive Criteria</b></p>
+
+                    <ul>
+                        {''.join(f"<li>{c}</li>" for c in match.get("criteria", []))}
+                    </ul>
+
+                    </div>
+                    """
+                
 
         elif step_name == "evolution":
             hypotheses = step_data.get("hypotheses", [])

@@ -7,6 +7,8 @@ from typing import List
 
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ._compat import _legacy
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 
 class RankingAgent:
@@ -33,31 +35,70 @@ class RankingAgent:
                 pairs.append((active_hypotheses[i], active_hypotheses[j]))
 
         _legacy.logger.info(f"Running tournament with {len(pairs)} pairs.")
-        for hA, hB in pairs:
-            # winner = _legacy.run_pairwise_debate(hA, hB)
-            decision = _legacy.run_pairwise_debate(
-                hA,
-                hB,
-                research_goal,
+
+        # ---- Parallel LLM Debates ----
+        def run_match(pair):
+            hA, hB = pair
+            try:
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] START {hA.hypothesis_id} vs {hB.hypothesis_id}"
+                )
+                decision = _legacy.run_pairwise_debate(
+                    hA,
+                    hB,
+                    research_goal
+                )
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] END {hA.hypothesis_id} vs {hB.hypothesis_id}"
+                )
+                return hA, hB, decision
+
+            except Exception as e:
+                _legacy.logger.error(
+                    f"Ranking failed for {hA.hypothesis_id} vs {hB.hypothesis_id}: {e}"
+                )
+                return None
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(
+                executor.map(run_match, pairs)
             )
-            # outcome = decision.outcome
 
-            # loser = hB if winner == hA else hA
-            # # Pass the specific k_factor
-            # _legacy.update_elo(winner, loser, k_factor=k_factor)
+        # ---- Sequential Elo Update + Save Results ----
+        for result in results:
+            if result is None:
+                continue
 
-            # Elo Update
+            hA, hB, decision = result
+
             if decision.outcome == "A":
-                _legacy.update_elo(hA, hB, k_factor = k_factor)
+                _legacy.update_elo(
+                    hA,
+                    hB,
+                    k_factor=k_factor
+                )
             elif decision.outcome == "B":
-                _legacy.update_elo(hB, hA, k_factor = k_factor)
+                _legacy.update_elo(
+                    hB,
+                    hA,
+                    k_factor=k_factor
+                )
             elif decision.outcome == "TIE":
-                # Handle tie: no Elo update, but log it
-                _legacy.logger.info(f"Tie between {hA.hypothesis_id} and {hB.hypothesis_id}. No Elo update.")
-                _legacy.update_elo_tie(hA, hB, k_factor = k_factor)
+                _legacy.update_elo_tie(
+                    hA,
+                    hB,
+                    k_factor=k_factor
+                )
             elif decision.outcome == "ABSTAIN":
-                # Handle abstain: no Elo update, but log it
-                _legacy.logger.info(f"Abstain between {hA.hypothesis_id} and {hB.hypothesis_id}. No Elo update.")
+                _legacy.logger.info(
+                    f"Judge abstained: no clear winner determined between "
+                    f"{hA.hypothesis_id} and {hB.hypothesis_id}."
+                )
+                if not decision.reasoning:
+                    decision.reasoning = (
+                        "The judge could not determine a clear winner "
+                        "after evaluating both hypotheses."
+                    )
 
             # Record result in context (consider if this needs iteration info)
             context.tournament_results.append(
