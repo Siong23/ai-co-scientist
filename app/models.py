@@ -17,22 +17,41 @@ from .config import config
 
 
 class Hypothesis:
-    def __init__(self, hypothesis_id: str, title: str, text: str):
-        self.hypothesis_id = hypothesis_id
-        self.title = title
-        self.text = text
-        self.novelty_review: Optional[str] = None  # "HIGH", "MEDIUM", "LOW"
+    # def __init__(self, hypothesis_id: str, title: str, text: str):
+    #     self.hypothesis_id = hypothesis_id
+    #     self.title = title
+    #     self.text = text
+    #     self.novelty_review: Optional[str] = None  # "HIGH", "MEDIUM", "LOW"
+    #     self.feasibility_review: Optional[str] = None
+    #     self.elo_score: float = 1200.0  # initial Elo score
+    #     self.review_comments: List[str] = []
+    #     self.references: List[Dict] = []
+    #     self.is_active: bool = True
+    #     self.parent_ids: List[str] = []  # Store IDs of parent hypotheses
+    #     self.reflection_report: Optional[ReflectionReport] = None
+
+    #     # Sources actually retrieved and supplied to GenerationAgent.
+    #     self.evidence_source_ids: List[str] = []
+    #     self.evidence_sources: List[Dict] = []  # Store the actual source documents
+
+    def __init__(self, hypothesis_id: Optional[str] = None, title: Optional[str] = None, text: Optional[str] = None, **kwargs):
+        # Preserve backwards-compatibility with callers using positional args or old keywords
+        self.hypothesis_id = hypothesis_id or kwargs.get("hypothesis_id") or ""
+        # If title missing but text provided, use a truncated text as a fallback title
+        if title is None and text:
+            title = text if len(text) <= 120 else text[:117] + "..."
+        self.title = title or ""
+        self.text = text or ""
+        self.novelty_review: Optional[str] = None
         self.feasibility_review: Optional[str] = None
-        self.elo_score: float = 1200.0  # initial Elo score
+        self.elo_score: float = 1200.0
         self.review_comments: List[str] = []
         self.references: List[Dict] = []
         self.is_active: bool = True
-        self.parent_ids: List[str] = []  # Store IDs of parent hypotheses
-        self.reflection_report: Optional[ReflectionReport] = None
-
-        # Sources actually retrieved and supplied to GenerationAgent.
+        self.parent_ids: List[str] = []
+        self.reflection_report = None  # keep same shape as before
         self.evidence_source_ids: List[str] = []
-        self.evidence_sources: List[Dict] = []  # Store the actual source documents
+        self.evidence_sources: List[Dict] = []
 
     def to_dict(self) -> dict:
         return {
