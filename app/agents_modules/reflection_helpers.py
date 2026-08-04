@@ -11,9 +11,9 @@ from ..models import ContextMemory, Hypothesis, ResearchGoal
 
 def call_llm_for_reflection(
     hypothesis: Hypothesis,
-    research_goal: ResearchGoal,
-    context: ContextMemory,
-    temperature: float = 0.5,
+    research_goal: ResearchGoal | None = None,
+    context: ContextMemory | None = None,
+    temperature: float = 0.3,
     model: str | None = None,
 ) -> Dict:
     """Evaluates a hypothesis against strictly provided retrieved sources to prevent hallucinated references."""
