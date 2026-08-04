@@ -93,6 +93,55 @@ def format_evidence_sources(hypothesis):
 
     return "\n".join(output)
 
+def format_references(hypothesis_or_sources):
+    """
+    Backwards-compatible wrapper expected by app.agents.
+    Accepts either a Hypothesis (with .evidence_sources) or a list of source dicts,
+    and returns the same formatted string as format_evidence_sources.
+    """
+    # If passed a Hypothesis-like object with evidence_sources attribute
+    if hypothesis_or_sources is None:
+        return "No evidence provided."
+
+    sources = None
+    if hasattr(hypothesis_or_sources, "evidence_sources"):
+        sources = hypothesis_or_sources.evidence_sources
+    elif isinstance(hypothesis_or_sources, list):
+        sources = hypothesis_or_sources
+    else:
+        # Fallback: try to treat it as a single source dict
+        try:
+            if isinstance(hypothesis_or_sources, dict):
+                sources = [hypothesis_or_sources]
+            else:
+                return str(hypothesis_or_sources)
+        except Exception:
+            return "No evidence provided."
+
+    if not sources:
+        return "No evidence provided."
+
+    output = []
+    for idx, source in enumerate(sources, start=1):
+        title = source.get("title", "No title")
+        finding = source.get("finding", "")
+        limitation = source.get("limitation", "")
+        url = source.get("url", "")
+        entry_lines = [
+            f"Evidence {idx}",
+            "",
+            f"Title:\n{title}",
+            "",
+            f"Finding:\n{finding}",
+            "",
+            f"Limitation:\n{limitation}",
+        ]
+        if url:
+            entry_lines.extend(["", f"URL:\n{url}"])
+        output.append("\n".join(entry_lines))
+
+    return "\n\n".join(output)
+
 def format_reflection_report(report):
 
     if report is None:
