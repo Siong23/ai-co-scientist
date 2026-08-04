@@ -63,3 +63,9 @@ rag:
 semantic_scholar:
   enabled: true
   results_per_query: 6
+
+# Tavily web-search fallback, used alongside Semantic Scholar when arXiv evidence
+# is insufficient. Set TAVILY_API_KEY in .env to enable it; no key is stored here.
+tavily:
+  enabled: true
+  results_per_query: 6

@@ -609,6 +609,29 @@ def test_semantic_scholar_fallback_fuses_and_reranks_results():
     assert fake_store.similarity_search.call_args.kwargs["k"] == 1
 
 
+def test_tavily_fallback_fuses_web_evidence_for_generation():
+    tavily_result = _paper(
+        "tavily:source-id",
+        "Web evidence",
+        "Evidence from a relevant web source.",
+    )
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1)
+    retriever.semantic_scholar = None
+    retriever.tavily = Mock()
+    retriever.tavily.search.return_value = [tavily_result]
+    query_plan = SearchQueryPlan(queries=("web evidence query",), required_terms=())
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
+        documents = retriever.retrieve_fallback("research goal", query_plan)
+
+    retriever.tavily.search.assert_called_once_with(query="web evidence query")
+    assert documents[0].metadata["source_id"] == "tavily:source-id"
+
+
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
     agent = GenerationAgent(debate_rounds=0)
     query_plan = _query_plan_payload()

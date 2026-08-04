@@ -11,6 +11,7 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from .config import config
 from .tools.arxiv_search import ArxivSearchTool
 from .tools.semantic_scholar_search import SemanticScholarSearchTool
+from .tools.tavily_search import TavilySearchTool
 from .utils import get_sentence_transformer_model, logger
 
 
@@ -140,6 +141,9 @@ class ArxivRAGRetriever:
             if semantic_scholar_config.get("enabled", True)
             else None
         )
+        tavily_config = config.get("tavily", {})
+        tavily = TavilySearchTool(max_results=int(tavily_config.get("results_per_query", self.results_per_query)))
+        self.tavily = tavily if tavily_config.get("enabled", True) and tavily.is_configured else None
         self.embeddings = SharedSentenceTransformerEmbeddings()
 
     def retrieve(
@@ -226,20 +230,28 @@ class ArxivRAGRetriever:
         original_query: str,
         query_plan: SearchQueryPlan,
     ) -> list[Document]:
-        """Retrieve Semantic Scholar papers after arXiv evidence is exhausted."""
+        """Retrieve supplementary Semantic Scholar and Tavily evidence after arXiv."""
 
         original_query = original_query.strip()
-        if not original_query or self.semantic_scholar is None:
+        if not original_query:
             return []
 
-        ranked_results = [self.semantic_scholar.search_papers(query=query) for query in query_plan.queries]
+        ranked_results: list[list[dict[str, Any]]] = []
+        if self.semantic_scholar is not None:
+            ranked_results.extend(
+                self.semantic_scholar.search_papers(query=query) for query in query_plan.queries
+            )
+        if self.tavily is not None:
+            ranked_results.extend(self.tavily.search(query=query) for query in query_plan.queries)
+        if not ranked_results:
+            return []
         fused_papers = reciprocal_rank_fusion(ranked_results, k=self.rrf_k)
         documents = [
             self._paper_to_document(paper) for paper in fused_papers if paper.get("abstract") and paper.get("arxiv_id")
         ]
         if not documents:
             logger.info(
-                "Semantic Scholar fallback returned no documents for query %r.",
+                "Supplementary search fallback returned no documents for query %r.",
                 original_query,
             )
             return []
@@ -254,7 +266,7 @@ class ArxivRAGRetriever:
             k=min(self.top_k, len(documents)),
         )
         logger.info(
-            "Semantic Scholar fallback selected %d source(s) from %d candidate(s).",
+            "Supplementary search fallback selected %d source(s) from %d candidate(s).",
             len(selected),
             len(documents),
         )
@@ -265,7 +277,7 @@ class ArxivRAGRetriever:
         paper: dict[str, Any],
     ) -> Document:
         arxiv_id = str(paper["arxiv_id"])
-        source_id = arxiv_id if arxiv_id.startswith("s2:") else f"arXiv:{arxiv_id}"
+        source_id = arxiv_id if arxiv_id.startswith(("s2:", "tavily:")) else f"arXiv:{arxiv_id}"
         abstract = str(paper.get("abstract", ""))[: self.max_abstract_chars]
 
         page_content = (
