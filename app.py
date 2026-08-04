@@ -249,7 +249,7 @@ def persist_cycle_result(research_goal: ResearchGoal, cycle_result: Dict[str, An
         log_file=cycle_result["log_file"],
     )
     report_path = write_report(saved_run)
-    status_msg = f"{cycle_result['status']}\nRun ID: {saved_run['run_id']}\nReport: {report_file_url(report_path)}"
+    status_msg = f"{cycle_result['status']}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}"
     return status_msg, cycle_result["results_html"], cycle_result["references_html"]
 
 
