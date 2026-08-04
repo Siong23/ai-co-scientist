@@ -6,7 +6,6 @@ import math
 # import random
 import re
 # import logging
-
 from typing import Dict, List
 from ..models import Hypothesis, ResearchGoal, PairwiseDecision, ReflectionReport
 from ..utils import logger

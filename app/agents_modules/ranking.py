@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import random
 from typing import List
-
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ._compat import _legacy
 from concurrent.futures import ThreadPoolExecutor

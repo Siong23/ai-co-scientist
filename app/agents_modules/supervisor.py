@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Dict
-
 from ..models import ContextMemory, ResearchGoal
 from ._compat import _legacy
 from .evolution import EvolutionAgent
