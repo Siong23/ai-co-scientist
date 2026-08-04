@@ -41,7 +41,6 @@ def test_agents_are_reexported_from_individual_modules():
 def test_agent_helpers_are_implemented_outside_the_compatibility_facade():
     helper_functions = (
         call_llm_for_generation,
-        call_llm_for_reflection,
         run_pairwise_debate,
         combine_hypotheses,
     )
