@@ -609,6 +609,30 @@ def test_semantic_scholar_fallback_fuses_and_reranks_results():
     assert fake_store.similarity_search.call_args.kwargs["k"] == 1
 
 
+def test_springer_fallback_fuses_evidence_for_generation():
+    springer_result = _paper(
+        "springer:doi:10.1007/s00123-024",
+        "Springer nature evidence",
+        "Evidence from Springer Nature scientific literature.",
+    )
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1)
+    retriever.semantic_scholar = None
+    retriever.springer = Mock()
+    retriever.springer.is_configured = True
+    retriever.springer.search_papers.return_value = [springer_result]
+    query_plan = SearchQueryPlan(queries=("springer query",), required_terms=())
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
+        documents = retriever.retrieve_fallback("research goal", query_plan)
+
+    retriever.springer.search_papers.assert_called_once_with(query="springer query")
+    assert documents[0].metadata["source_id"] == "springer:doi:10.1007/s00123-024"
+
+
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
     agent = GenerationAgent(debate_rounds=0)
     query_plan = _query_plan_payload()
