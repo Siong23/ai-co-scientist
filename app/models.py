@@ -196,6 +196,7 @@ class ReflectionReport(BaseModel):
     plausibility_score: float = 0.0
     testability_score: float = 0.0
     evidence_quality_score: float = 0.0
+    expected_research_value_score: float = 0.0
 
     strengths: List[str] = []
     weaknesses: List[str] = []
