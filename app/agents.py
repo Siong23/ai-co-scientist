@@ -36,12 +36,13 @@ from .agents_modules.ranking_helpers import (
 )
 from .agents_modules.reflection import ReflectionAgent
 from .agents_modules.reflection_helpers import call_llm_for_reflection as _call_llm_for_reflection
+from functools import wraps
 
+@wraps(_call_llm_for_reflection)
 def call_llm_for_reflection(hypothesis, research_goal=None, context=None, *args, **kwargs):
     """
     Compatibility wrapper so callers that pass only `hypothesis` still work.
-    The underlying implementation now accepts (hypothesis, research_goal, context).
-    Accepts additional args/kwargs and forwards them through.
+    Forwards research_goal and context (defaults to None) to the underlying helper.
     """
     return _call_llm_for_reflection(hypothesis, research_goal, context, *args, **kwargs)
 
