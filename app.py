@@ -1045,13 +1045,16 @@ def create_gradio_interface():
             """
         )
 
-    return demo, theme, css
+    demo.theme = theme
+    demo.css = css
+
+    return demo
 
 
 if __name__ == "__main__":
     # Create and launch the Gradio app
     logger.info("Using LM Studio API at %s", get_lmstudio_base_url())
-    demo, theme, css = create_gradio_interface()
+    demo = create_gradio_interface()
 
     reports_dir = get_reports_dir()
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1061,6 +1064,6 @@ if __name__ == "__main__":
         share=False,
         show_error=True,
         allowed_paths=[str(reports_dir.resolve())],
-        theme=theme,
-        css=css,
+        theme=getattr(demo, "theme", None),
+        css=getattr(demo, "css", None),
     )
