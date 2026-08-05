@@ -58,15 +58,21 @@ rag:
   rrf_k: 60
   max_abstract_chars: 1800
 
-# Semantic Scholar fallback (academic search, triggers after arXiv is exhausted).
+# Semantic Scholar academic search. It first receives the original research goal,
+# then participates in expanded-query retrieval when direct retrieval is insufficient.
 # Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).
 semantic_scholar:
   enabled: true
   results_per_query: 6
 
-# Springer Nature API fallback (Open Access & Meta API).
+# Springer Nature academic search (Open Access & Meta API). It follows the same
+# retrieval sequence when its API key is configured.
 # Set SPRINGER_API_KEY (or SPRINGER_OPEN_ACCESS_API_KEY / SPRINGER_META_API_KEY) in .env to enable.
 springer:
+  enabled: true
+  results_per_query: 6
+
+tavily:
   enabled: true
   results_per_query: 6
 

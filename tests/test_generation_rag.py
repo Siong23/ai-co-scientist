@@ -1,6 +1,8 @@
 import json
 from unittest.mock import Mock, patch
 
+import pytest
+
 from app.agents import (
     EvidenceCoverage,
     GenerationAgent,
@@ -19,6 +21,13 @@ from app.rag_retriever import (
     SearchQueryPlan,
     reciprocal_rank_fusion,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_live_original_goal_search_for_generation_agent(monkeypatch):
+    """Keep generation tests offline; source-stage behavior is tested separately."""
+
+    monkeypatch.setattr(GenerationAgent, "_retrieve_original_scientific_sources", lambda *_: [])
 
 
 def _paper(
@@ -479,6 +488,8 @@ def test_multi_query_retrieval_filters_irrelevant_history_papers():
         top_k=4,
     )
     retriever.arxiv = Mock()
+    retriever.semantic_scholar = None
+    retriever.springer = None
     retriever.arxiv.search_papers.side_effect = [
         [malaysia, context_history],
         [duplicate, quantum_history],
@@ -518,6 +529,8 @@ def test_multi_query_retrieval_filters_irrelevant_history_papers():
 def test_retrieval_returns_empty_when_strict_filter_removes_every_paper():
     retriever = ArxivRAGRetriever(query_count=5)
     retriever.arxiv = Mock()
+    retriever.semantic_scholar = None
+    retriever.springer = None
     retriever.arxiv.search_papers.return_value = [
         _paper(
             "2103.05280v1",
@@ -552,6 +565,8 @@ def test_targeted_corrective_retrieval_can_skip_initial_entity_filter():
         top_k=2,
     )
     retriever.arxiv = Mock()
+    retriever.semantic_scholar = None
+    retriever.springer = None
     retriever.arxiv.search_papers.return_value = [comparator_paper]
     query_plan = SearchQueryPlan(
         queries=("Grad-CAM medical image classification",),
@@ -574,6 +589,70 @@ def test_targeted_corrective_retrieval_can_skip_initial_entity_filter():
 
     assert len(documents) == 1
     assert documents[0].metadata["source_id"] == ("arXiv:2401.00001v1")
+
+
+def test_retrieval_tries_original_goal_in_semantic_scholar_before_rewritten_queries():
+    direct_paper = _paper(
+        "s2:direct-paper",
+        "Direct goal result",
+        "Evidence about lightweight security monitoring at 5G MEC sites.",
+    )
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.semantic_scholar = Mock()
+    retriever.semantic_scholar.search_papers.return_value = [direct_paper]
+    retriever.springer = None
+    retriever.arxiv = Mock()
+    retriever.arxiv.search_papers.return_value = []
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
+        documents = retriever.retrieve_original_goal("lightweight security monitoring 5G MEC")
+
+    retriever.semantic_scholar.search_papers.assert_called_once_with(query="lightweight security monitoring 5G MEC")
+    retriever.arxiv.search_papers.assert_called_once()
+    assert documents[0].metadata["source_id"] == "s2:direct-paper"
+
+
+def test_retrieval_stops_arxiv_batch_after_rate_limit():
+    retriever = ArxivRAGRetriever(query_count=3, top_k=1)
+    retriever.semantic_scholar = Mock()
+    retriever.semantic_scholar.search_papers.side_effect = [[], [], [], []]
+    retriever.springer = None
+    retriever.arxiv = Mock()
+    retriever.arxiv.search_papers.return_value = []
+    retriever.arxiv.last_error_status = 429
+    query_plan = SearchQueryPlan(
+        queries=("rewritten one", "rewritten two", "rewritten three"),
+        required_terms=(),
+    )
+
+    with patch("app.rag_retriever.InMemoryVectorStore"):
+        retriever.retrieve("original goal", query_plan)
+
+    assert retriever.arxiv.search_papers.call_count == 1
+
+
+def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():
+    retriever = ArxivRAGRetriever(query_count=3, top_k=1)
+    retriever.semantic_scholar = Mock()
+    retriever.semantic_scholar.search_papers.return_value = []
+    retriever.semantic_scholar.last_error_status = 429
+    retriever.springer = None
+    retriever.arxiv = Mock()
+    retriever.arxiv.search_papers.return_value = []
+    query_plan = SearchQueryPlan(
+        queries=("rewritten one", "rewritten two", "rewritten three"),
+        required_terms=(),
+    )
+
+    with patch("app.rag_retriever.InMemoryVectorStore"):
+        retriever.retrieve("original goal", query_plan)
+
+    # The remaining rewritten queries are skipped after the first rate-limit signal.
+    assert retriever.semantic_scholar.search_papers.call_count == 1
 
 
 def test_semantic_scholar_fallback_fuses_and_reranks_results():

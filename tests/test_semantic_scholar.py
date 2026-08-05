@@ -85,3 +85,4 @@ def test_search_retries_rate_limit_then_returns_empty_list():
     assert results == []
     assert mock_get.call_count == 3
     assert [call.args[0] for call in mock_sleep.call_args_list] == [2.0, 4.0]
+    assert tool.last_error_status == 429
