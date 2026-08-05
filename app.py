@@ -5,15 +5,22 @@ import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
+
 import gradio as gr
 from numpy.ma import count
 
 from app.agents import SupervisorAgent
-
-# Import the existing app components
 from app.config import config
 from app.models import ContextMemory, ResearchGoal
-from app.run_store import delete_run, get_reports_dir, history_html, list_runs, report_file_url, save_run, write_report
+from app.run_store import (
+    delete_run,
+    get_reports_dir,
+    history_html,
+    list_runs,
+    report_file_url,
+    save_run,
+    write_report,
+)
 from app.utils import (
     classify_llm_error,
     fetch_lmstudio_models,
