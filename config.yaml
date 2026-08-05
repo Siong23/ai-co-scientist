@@ -63,3 +63,10 @@ rag:
 semantic_scholar:
   enabled: true
   results_per_query: 6
+
+# Springer Nature API fallback (Open Access & Meta API).
+# Set SPRINGER_API_KEY (or SPRINGER_OPEN_ACCESS_API_KEY / SPRINGER_META_API_KEY) in .env to enable.
+springer:
+  enabled: true
+  results_per_query: 6
+

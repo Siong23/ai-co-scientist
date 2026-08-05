@@ -9,7 +9,6 @@ from app.agents import (
     ReflectionAgent,
     SupervisorAgent,
     call_llm_for_generation,
-    call_llm_for_reflection,
     combine_hypotheses,
     run_pairwise_debate,
 )
@@ -20,6 +19,7 @@ from app.agents_modules.proximity import ProximityAgent as ModularProximityAgent
 from app.agents_modules.ranking import RankingAgent as ModularRankingAgent
 from app.agents_modules.reflection import ReflectionAgent as ModularReflectionAgent
 from app.agents_modules.supervisor import SupervisorAgent as ModularSupervisorAgent
+from app.agents_modules.reflection_helpers import call_llm_for_reflection
 
 
 def test_agents_are_reexported_from_individual_modules():
@@ -41,7 +41,6 @@ def test_agents_are_reexported_from_individual_modules():
 def test_agent_helpers_are_implemented_outside_the_compatibility_facade():
     helper_functions = (
         call_llm_for_generation,
-        call_llm_for_reflection,
         run_pairwise_debate,
         combine_hypotheses,
     )

@@ -257,7 +257,7 @@ Your refined contribution:
                         )
                     except Exception as exc:
                         _legacy.logger.error(
-                            "Semantic Scholar fallback failed: %s",
+                            "Supplementary search fallback failed: %s",
                             _legacy.redact_secrets(str(exc)),
                         )
                         fallback_documents = []
@@ -276,7 +276,7 @@ Your refined contribution:
                 error = (
                     "Retrieved evidence is insufficient after "
                     f"{corrective_round} corrective retrieval "
-                    "round(s) and Semantic Scholar fallback. "
+                    "round(s) and supplementary-search fallback. "
                     "Missing explicit requirements: "
                     + "; ".join(missing_descriptions)
                     + ". Hypothesis generation was not executed."

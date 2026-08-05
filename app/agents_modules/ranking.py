@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import random
-from typing import List
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Iterable, List
 
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ._compat import _legacy
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
 
 class RankingAgent:
-    def run_tournament(self, hypotheses: List[Hypothesis], context: ContextMemory, research_goal: ResearchGoal) -> None:
-        """Runs a pairwise tournament to rank hypotheses, using research_goal settings."""
+    def run_tournament(
+        self,
+        hypotheses: List[Hypothesis],
+        context: ContextMemory,
+        research_goal: ResearchGoal,
+        new_hypotheses: Iterable[Hypothesis] | None = None,
+    ) -> None:
+        """Rank active hypotheses, optionally comparing only newly introduced ones."""
         # Use k_factor from research_goal
         k_factor = research_goal.elo_k_factor
 
@@ -28,11 +34,28 @@ class RankingAgent:
 
         random.shuffle(active_hypotheses)  # Shuffle only active ones
 
-        # Simple round-robin: each active hypothesis debates every other active one once
+        new_hypothesis_ids = (
+            {hypothesis.hypothesis_id for hypothesis in new_hypotheses}
+            if new_hypotheses is not None
+            else None
+        )
+
+        # Compare every pair for the first tournament. In later tournaments,
+        # only compare pairs containing a newly generated or evolved hypothesis:
+        # old-vs-old outcomes are already represented in their Elo scores.
         pairs = []
         for i in range(len(active_hypotheses)):
             for j in range(i + 1, len(active_hypotheses)):
-                pairs.append((active_hypotheses[i], active_hypotheses[j]))
+                h_a, h_b = active_hypotheses[i], active_hypotheses[j]
+                if new_hypothesis_ids is None or (
+                    h_a.hypothesis_id in new_hypothesis_ids
+                    or h_b.hypothesis_id in new_hypothesis_ids
+                ):
+                    pairs.append((h_a, h_b))
+
+        if not pairs:
+            _legacy.logger.info("No new hypotheses require ranking comparisons.")
+            return
 
         _legacy.logger.info(f"Running tournament with {len(pairs)} pairs.")
 

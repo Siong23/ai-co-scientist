@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import app.utils as utils
 from app.agents import call_llm_for_generation, call_llm_for_reflection
-
+from app.models import Hypothesis, ResearchGoal, ContextMemory
 
 def _completion(content: str):
     completion = MagicMock()
@@ -168,11 +168,15 @@ def test_401_propagates_as_error_hypothesis():
 
 def test_reflection_error_returns_not_reviewed():
     # call_llm is imported into app.agents' namespace, so patch it there.
+    hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-id-1")
+    research_goal = ResearchGoal(description="test goal", constraints="")
+    context = ContextMemory()
+    
     with patch("app.agents.call_llm", return_value="Error: API call failed"):
-        review = call_llm_for_reflection("some hypothesis")
-
-    assert review["novelty_review"] == "Not reviewed"
-    assert review["feasibility_review"] == "Not reviewed"
+        review = call_llm_for_reflection(hypothesis, research_goal, context)
+    
+    assert review["novelty_review"] == "UNREVIEWED"
+    assert review["feasibility_review"] == "UNREVIEWED"
     assert review["references"] == []
 
 
@@ -186,7 +190,10 @@ def test_reflection_passes_selected_model_to_llm_boundary():
         }
     )
     with patch("app.agents.call_llm", return_value=payload) as mock_call:
-        review = call_llm_for_reflection("some hypothesis", model="selected-local-model")
+        hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-id-1")
+        research_goal = ResearchGoal(description="test goal", constraints="")
+        context = ContextMemory()
+        review = call_llm_for_reflection(hypothesis, research_goal, context, model="selected-local-model")
 
     assert review["novelty_review"] == "HIGH"
     assert mock_call.call_args.kwargs["model"] == "selected-local-model"
