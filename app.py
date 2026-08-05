@@ -1015,11 +1015,11 @@ def create_gradio_interface():
         # Example inputs
         gr.Examples(
             examples=[
-                ["Develop new methods for increasing the efficiency of solar panels"],
-                ["Create novel approaches to treat Alzheimer's disease"],
-                ["Design sustainable materials for construction"],
-                ["Improve machine learning model interpretability"],
-                ["Develop new quantum computing algorithms"],
+                ["Develop ultra-lightweight IoT protocols to replace heavy 5G TCP/IP overhead"],
+                ["Create dynamic post-quantum encryption for live 5G network slices"],
+                ["Design AI systems to switch phone signals from towers to satellites"],
+                ["Improve 5G battery life by optimizing device wake-up sensors"],
+                ["Automate tower log analysis to deploy instant software fixes"],
             ],
             inputs=[research_goal_input],
             label="Example Research Goals",
