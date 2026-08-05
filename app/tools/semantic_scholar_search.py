@@ -21,6 +21,7 @@ class SemanticScholarSearchTool:
 
     def __init__(self, max_results: int = 10) -> None:
         self.max_results = max_results
+        self.last_error_status: int | None = None
         api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
         self._headers = {"x-api-key": api_key} if api_key else {}
 
@@ -34,6 +35,7 @@ class SemanticScholarSearchTool:
         query = query.strip()
         if not query:
             return []
+        self.last_error_status = None
 
         limit = max_results if max_results is not None else self.max_results
         backoff_seconds = 2.0
@@ -47,6 +49,7 @@ class SemanticScholarSearchTool:
                     timeout=_DEFAULT_TIMEOUT,
                 )
                 if response.status_code == 429:
+                    self.last_error_status = response.status_code
                     if attempt < _MAX_ATTEMPTS:
                         logger.warning(
                             "Semantic Scholar rate-limited query %r; retrying after %.1f seconds (attempt %d/%d).",
@@ -75,6 +78,7 @@ class SemanticScholarSearchTool:
                 )
                 return papers
             except Exception as exc:
+                self.last_error_status = getattr(getattr(exc, "response", None), "status_code", None)
                 logger.error(
                     "Semantic Scholar search failed for query %r: %s",
                     query,

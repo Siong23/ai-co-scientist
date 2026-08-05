@@ -4,8 +4,19 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import arxiv
+import requests
 
 logger = logging.getLogger(__name__)
+
+_REQUEST_TIMEOUT_SECONDS = 15
+
+
+class _TimeoutSession(requests.Session):
+    """Session that bounds arXiv requests, whose client otherwise has no timeout."""
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", _REQUEST_TIMEOUT_SECONDS)
+        return super().request(*args, **kwargs)
 
 
 class ArxivSearchTool:
@@ -13,7 +24,11 @@ class ArxivSearchTool:
 
     def __init__(self, max_results: int = 10):
         self.max_results = max_results
-        self.client = arxiv.Client()
+        # arxiv.Client fetches whole pages independently of Search.max_results.
+        # Keep its page size aligned with the number of papers we actually use.
+        self.client = arxiv.Client(page_size=max_results, num_retries=0)
+        self.client._session = _TimeoutSession()
+        self.last_error_status: int | None = None
 
     def search_papers(
         self,
@@ -36,6 +51,7 @@ class ArxivSearchTool:
         """
         if max_results is None:
             max_results = self.max_results
+        self.last_error_status = None
 
         # Build search query with category filter if provided
         search_query = query
@@ -101,6 +117,7 @@ class ArxivSearchTool:
             return papers
 
         except Exception as e:
+            self.last_error_status = getattr(e, "status", None)
             logger.error(f"ArXiv search failed for query '{query}': {e}", exc_info=True)
             return []
 

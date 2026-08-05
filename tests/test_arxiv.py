@@ -16,6 +16,12 @@ def test_known_fields_map_to_categories():
     assert len(get_categories_for_field("physics")) > 0
 
 
+def test_client_page_size_matches_requested_result_limit():
+    tool = ArxivSearchTool(max_results=6)
+
+    assert tool.client.page_size == 6
+
+
 # --- Live arXiv API ---
 
 
