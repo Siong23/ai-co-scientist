@@ -46,6 +46,11 @@ class GenerationAgent:
             query_plan,
         )
 
+    def _retrieve_original_scientific_sources(self, research_goal: ResearchGoal):
+        """Run the first retrieval stage with the user's unmodified goal."""
+
+        return self.rag_retriever.retrieve_original_goal(research_goal.description)
+
     @staticmethod
     def _merge_retrieved_documents(*document_groups):
         """Merge retrieval rounds while deduplicating arXiv versions."""
@@ -150,6 +155,12 @@ Your refined contribution:
 
         num_to_generate = research_goal.num_hypotheses
         gen_temp = research_goal.generation_temperature
+        try:
+            candidate_documents = self._retrieve_original_scientific_sources(research_goal)
+        except Exception as exc:
+            _legacy.logger.error("Original-goal retrieval failed: %s", exc, exc_info=True)
+            candidate_documents = []
+
         query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
             research_goal.description,
             model=research_goal.llm_model,
@@ -169,18 +180,14 @@ Your refined contribution:
             query_plan.exploration_directions,
         )
 
-        try:
-            candidate_documents = self._retrieve_scientific_sources(
-                research_goal,
-                query_plan,
-            )
-        except Exception as exc:
-            _legacy.logger.error(
-                "RAG retrieval failed: %s",
-                exc,
-                exc_info=True,
-            )
-            return [], [f"RAG retrieval failed: {exc}"]
+        expanded_retrieval_attempted = False
+        if not candidate_documents:
+            try:
+                candidate_documents = self._retrieve_scientific_sources(research_goal, query_plan)
+                expanded_retrieval_attempted = True
+            except Exception as exc:
+                _legacy.logger.error("Expanded RAG retrieval failed: %s", exc, exc_info=True)
+                return [], [f"Expanded RAG retrieval failed: {exc}"]
 
         retrieved_documents = []
         coverage = None
@@ -227,6 +234,17 @@ Your refined contribution:
 
             if coverage.sufficient:
                 break
+
+            if not expanded_retrieval_attempted:
+                _legacy.logger.info("Original-goal retrieval was insufficient; starting expanded-query retrieval.")
+                try:
+                    expanded_documents = self._retrieve_scientific_sources(research_goal, query_plan)
+                except Exception as exc:
+                    _legacy.logger.error("Expanded RAG retrieval failed: %s", exc, exc_info=True)
+                    return [], [f"Expanded RAG retrieval failed: {exc}"]
+                expanded_retrieval_attempted = True
+                candidate_documents = self._merge_retrieved_documents(candidate_documents, expanded_documents)
+                continue
 
             if corrective_round >= (self.rag_retriever.corrective_retrieval_rounds):
                 if not fallback_attempted:

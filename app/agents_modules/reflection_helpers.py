@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from typing import Dict
 
+from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..utils import logger
 from .generation_helpers import _call_llm
-from ..models import ContextMemory, Hypothesis, ResearchGoal
+
 
 def call_llm_for_reflection(
     hypothesis: Hypothesis,

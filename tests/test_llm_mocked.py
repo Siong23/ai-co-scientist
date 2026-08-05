@@ -10,7 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import app.utils as utils
 from app.agents import call_llm_for_generation, call_llm_for_reflection
-from app.models import Hypothesis, ResearchGoal, ContextMemory
+from app.models import ContextMemory, Hypothesis, ResearchGoal
+
 
 def _completion(content: str):
     completion = MagicMock()

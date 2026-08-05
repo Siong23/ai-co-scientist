@@ -36,7 +36,6 @@ from .agents_modules.ranking_helpers import (
 )
 from .agents_modules.reflection import ReflectionAgent
 from .agents_modules.reflection_helpers import call_llm_for_reflection
-
 from .agents_modules.supervisor import SupervisorAgent
 from .models import ContextMemory, Hypothesis, ResearchGoal
 from .rag_retriever import (
