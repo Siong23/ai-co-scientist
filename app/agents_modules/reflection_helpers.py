@@ -9,6 +9,7 @@ from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..utils import logger
 from .generation_helpers import _call_llm
 
+
 def call_llm_for_reflection(
     hypothesis: Hypothesis,
     research_goal: ResearchGoal | None = None,

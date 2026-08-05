@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import gradio as gr
-from numpy.ma import count
+from numpy.ma import count  # noqa: F401
 
 from app.agents import SupervisorAgent
 from app.config import config

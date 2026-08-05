@@ -18,7 +18,7 @@ from app.agents_modules.meta_review import MetaReviewAgent as ModularMetaReviewA
 from app.agents_modules.proximity import ProximityAgent as ModularProximityAgent
 from app.agents_modules.ranking import RankingAgent as ModularRankingAgent
 from app.agents_modules.reflection import ReflectionAgent as ModularReflectionAgent
-from app.agents_modules.reflection_helpers import call_llm_for_reflection
+from app.agents_modules.reflection_helpers import call_llm_for_reflection  # noqa: F401
 from app.agents_modules.supervisor import SupervisorAgent as ModularSupervisorAgent
 
 
