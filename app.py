@@ -804,10 +804,9 @@ def create_gradio_interface():
     # Get deployment status
     status_text, status_color = get_deployment_status()
 
-    with gr.Blocks(
-        title="Open AI Co-Scientist - Hypothesis Evolution System",
-        theme=gr.themes.Soft(),
-        css="""
+    # Define custom theme and CSS for launch()
+    theme = gr.themes.Soft()
+    css = """
         .status-box {
             padding: 10px;
             border-radius: 8px;
@@ -837,8 +836,9 @@ def create_gradio_interface():
             background-color: #064e3b !important; /* Soft deep emerald instead of blinding light green */
             border-color: #28a745 !important;
         }
-        """,
-    ) as demo:
+        """
+
+    with gr.Blocks(title="Open AI Co-Scientist - Hypothesis Evolution System") as demo:
         # Header
         gr.Markdown("# 🔬 Open AI Co-Scientist - Hypothesis Evolution System")
         gr.Markdown("Generate, review, rank, and evolve research hypotheses using AI agents.")
@@ -1045,13 +1045,13 @@ def create_gradio_interface():
             """
         )
 
-    return demo
+    return demo, theme, css
 
 
 if __name__ == "__main__":
     # Create and launch the Gradio app
     logger.info("Using LM Studio API at %s", get_lmstudio_base_url())
-    demo = create_gradio_interface()
+    demo, theme, css = create_gradio_interface()
 
     reports_dir = get_reports_dir()
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1061,4 +1061,6 @@ if __name__ == "__main__":
         share=False,
         show_error=True,
         allowed_paths=[str(reports_dir.resolve())],
+        theme=theme,
+        css=css,
     )
