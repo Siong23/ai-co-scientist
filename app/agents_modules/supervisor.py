@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Dict
+
 from ..models import ContextMemory, ResearchGoal
 from ._compat import _legacy
 from .evolution import EvolutionAgent
@@ -55,7 +56,12 @@ class SupervisorAgent:
         # 3. Ranking (Tournament 1)
         _legacy.logger.info("Step 3: Ranking 1")
         start = len(context.tournament_results)
-        self.ranking_agent.run_tournament(active_hypos, context, research_goal)  # Pass research_goal
+        self.ranking_agent.run_tournament(
+            active_hypos,
+            context,
+            research_goal,
+            new_hypotheses=new_hypotheses,
+        )
         ranking1_results = context.tournament_results[start:]
         cycle_details["steps"]["ranking1"] = {
             "hypotheses": [h.to_dict() for h in active_hypos],
@@ -80,7 +86,12 @@ class SupervisorAgent:
         # 5. Ranking (Tournament 2 - includes evolved)
         _legacy.logger.info("Step 5: Ranking 2")
         start = len(context.tournament_results)
-        self.ranking_agent.run_tournament(active_hypos, context, research_goal)  # Pass research_goal
+        self.ranking_agent.run_tournament(
+            active_hypos,
+            context,
+            research_goal,
+            new_hypotheses=evolved_hypotheses,
+        )
         ranking2_results = context.tournament_results[start:]
         cycle_details["steps"]["ranking2"] = {
             "hypotheses": [h.to_dict() for h in active_hypos],

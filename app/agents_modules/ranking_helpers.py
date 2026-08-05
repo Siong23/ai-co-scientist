@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import math
+
 # import random
 import re
+
 # import logging
 from typing import Dict, List
-from ..models import Hypothesis, ResearchGoal, PairwiseDecision, ReflectionReport
+
+from ..models import Hypothesis, PairwiseDecision, ReflectionReport, ResearchGoal
 from ..utils import logger
 from .generation_helpers import _call_llm
 
 # logger=logging.getLogger(__name__)
+
+# Ranking uses a faster, dedicated local model so repeated pairwise decisions do
+# not inherit the much larger generation model's latency.
+RANKING_LLM_MODEL = "qwen/qwen3.6-35b-a3b"
 
 def clean_markdown(text):
     if not text:
@@ -293,7 +300,7 @@ def generate_debate_argument(
     return _call_llm(
         prompt,
         temperature=0.3,
-        model=research_goal.llm_model,
+        model=RANKING_LLM_MODEL,
     )
 
 def judge_debate(
@@ -375,8 +382,55 @@ def judge_debate(
     return _call_llm(
         prompt,
         temperature=0.2,
-        model=research_goal.llm_model,
+        model=RANKING_LLM_MODEL,
     )
+
+
+def judge_hypotheses(
+    hypo_a: Hypothesis,
+    hypo_b: Hypothesis,
+    review_a: str,
+    review_b: str,
+    research_goal: ResearchGoal,
+) -> str:
+    """Make one structured ranking decision without a multi-call debate."""
+    prompt = f"""
+    You are ranking two scientific hypotheses for the following research goal:
+    {research_goal.description}
+
+    Evaluation criteria: {research_goal.preferences}
+    Idea attributes: {research_goal.idea_attributes}
+
+    Hypothesis A:
+    {hypo_a.text}
+
+    Reflection report for A:
+    {review_a}
+
+    Hypothesis B:
+    {hypo_b.text}
+
+    Reflection report for B:
+    {review_b}
+
+    Compare novelty, feasibility, scientific plausibility, evidence quality,
+    expected research value, and alignment with the research goal. Finish
+    EXACTLY in this format:
+
+    Decision:
+    A/B/TIE/ABSTAIN
+
+    Short Justification:
+    One or two sentences.
+
+    Decisive Criteria:
+    - Criterion 1
+    - Criterion 2
+
+    Confidence:
+    A decimal number between 0 and 1.
+    """
+    return _call_llm(prompt, temperature=0.2, model=RANKING_LLM_MODEL)
 
 def parse_short_justification(response: str) -> str:
 
@@ -392,7 +446,7 @@ def parse_short_justification(response: str) -> str:
     return ""
 
 def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: ResearchGoal) -> PairwiseDecision:
-    """Compares two hypotheses based on novelty and feasibility scores."""
+    """Compare two hypotheses with one structured LLM adjudication."""
 
     reviewA = format_reflection_report(
         hypoA.reflection_report
@@ -412,70 +466,13 @@ def run_pairwise_debate(hypoA: Hypothesis, hypoB: Hypothesis, research_goal: Res
         research_goal,
     )
 
-    debateA = generate_debate_argument(
+    response = judge_hypotheses(
         hypoA,
         hypoB,
         reviewA,
         reviewB,
         research_goal,
     )
-
-    debateB = generate_debate_argument(
-        hypoB,
-        hypoA,
-        reviewB,
-        reviewA,
-        research_goal,
-    )
-
-    # First judgment
-    response1 = judge_debate(
-        hypoA,
-        hypoB,
-        debateA,
-        debateB,
-        research_goal,
-    )
-
-    try:
-        winner1_index = parse_pairwise_result(response1)
-    except ValueError:
-        winner1_index = "ABSTAIN"
-
-    # Second judgment with hypotheses swapped
-    response2 = judge_debate(
-        hypoB,
-        hypoA,
-        debateB,
-        debateA,
-        research_goal,
-    )
-
-    try:
-        winner2_index = parse_pairwise_result(response2)
-    except ValueError:
-        winner2_index = "ABSTAIN"
-
-    if winner1_index == "A" and winner2_index == "A":
-        # A wins both orderings
-        # winner = hypoA
-        response = response1
-
-    elif winner1_index == "B" and winner2_index == "B":
-        # B wins both orderings
-        # winner = hypoB
-        response = response2
-
-    else:
-        logger.warning("Possible position bias detected. Running tie-breaker.")
-
-        response = judge_debate(
-            hypoA,
-            hypoB,
-            debateA,
-            debateB,
-            research_goal,
-        )
 
     try:
         outcome = parse_pairwise_result(response)
