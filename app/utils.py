@@ -54,9 +54,10 @@ def get_lmstudio_model(model: Optional[str] = None) -> str:
 def redact_secrets(text: str) -> str:
     """Remove provider credentials from logs and user-facing errors."""
     redacted = str(text)
-    api_key = os.getenv("LMSTUDIO_API_KEY")
-    if api_key:
-        redacted = redacted.replace(api_key, "***REDACTED***")
+    for variable in ("LMSTUDIO_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INST_TOKEN"):
+        secret = os.getenv(variable)
+        if secret:
+            redacted = redacted.replace(secret, "***REDACTED***")
     return redacted
 
 

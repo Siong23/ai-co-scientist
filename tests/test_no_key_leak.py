@@ -53,3 +53,15 @@ def test_key_absent_from_error_message_shown_to_user(monkeypatch):
     # The raw exception text is propagated into the user-facing error today; if a
     # provider ever echoes the key, it must not reach the user or the logs.
     assert FAKE_KEY not in response
+
+
+def test_elsevier_credentials_are_redacted(monkeypatch):
+    api_key = "ELSEVIER-FAKE-KEY-MUST-NEVER-BE-LOGGED"
+    institution_token = "ELSEVIER-FAKE-INSTITUTION-TOKEN-MUST-NEVER-BE-LOGGED"
+    monkeypatch.setenv("ELSEVIER_API_KEY", api_key)
+    monkeypatch.setenv("ELSEVIER_INST_TOKEN", institution_token)
+
+    redacted = utils.redact_secrets(f"key={api_key} token={institution_token}")
+
+    assert api_key not in redacted
+    assert institution_token not in redacted
