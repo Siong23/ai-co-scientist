@@ -72,6 +72,10 @@ springer:
   enabled: true
   results_per_query: 6
 
+elsevier:
+  enabled: true
+  results_per_query: 6
+
 tavily:
   enabled: true
   results_per_query: 6

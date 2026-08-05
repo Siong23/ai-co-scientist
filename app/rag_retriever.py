@@ -11,6 +11,7 @@ from langchain_core.vectorstores import InMemoryVectorStore
 
 from .config import config
 from .tools.arxiv_search import ArxivSearchTool
+from .tools.elsevier_search import ElsevierSearchTool
 from .tools.semantic_scholar_search import SemanticScholarSearchTool
 from .tools.springer_search import SpringerSearchTool
 from .tools.tavily_search import TavilySearchTool
@@ -148,6 +149,11 @@ class ArxivRAGRetriever:
         self.springer = (
             SpringerSearchTool(max_results=springer_results) if springer_config.get("enabled", True) else None
         )
+        elsevier_config = config.get("elsevier", {})
+        elsevier_results = int(elsevier_config.get("results_per_query", self.results_per_query))
+        self.elsevier = (
+            ElsevierSearchTool(max_results=elsevier_results) if elsevier_config.get("enabled", True) else None
+        )
         tavily_config = config.get("tavily", {})
         tavily_results = int(tavily_config.get("results_per_query", self.results_per_query))
         self.tavily = TavilySearchTool(max_results=tavily_results) if tavily_config.get("enabled", True) else None
@@ -157,6 +163,7 @@ class ArxivRAGRetriever:
         return (
             ("Semantic Scholar", self.semantic_scholar),
             ("Springer Nature", self.springer if self.springer is not None and self.springer.is_configured else None),
+            ("Elsevier Scopus", self.elsevier if self.elsevier is not None and self.elsevier.is_configured else None),
             ("Tavily", self.tavily if self.tavily is not None and self.tavily.is_configured else None),
         )
 
@@ -344,7 +351,7 @@ class ArxivRAGRetriever:
         arxiv_id = str(paper["arxiv_id"])
         source_id = (
             arxiv_id
-            if any(arxiv_id.startswith(p) for p in ("s2:", "springer:", "tavily:", "doi:"))
+            if any(arxiv_id.startswith(p) for p in ("s2:", "springer:", "elsevier:", "tavily:", "doi:"))
             else f"arXiv:{arxiv_id}"
         )
 
