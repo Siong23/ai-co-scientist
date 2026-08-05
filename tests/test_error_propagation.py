@@ -135,6 +135,11 @@ def test_generate_happy_path_returns_no_errors():
             "_retrieve_scientific_sources",
             return_value=[_document()],
         ),
+        patch.object(
+            GenerationAgent,
+            "_retrieve_original_scientific_sources",
+            return_value=[],
+        ),
         patch(
             "app.agents.call_llm_for_relevance_filter",
             return_value=(["arXiv:1234.5678"], None),
@@ -172,6 +177,11 @@ def test_generate_uses_selected_research_goal_model():
             GenerationAgent,
             "_retrieve_scientific_sources",
             return_value=[_document()],
+        ),
+        patch.object(
+            GenerationAgent,
+            "_retrieve_original_scientific_sources",
+            return_value=[],
         ),
         patch(
             "app.agents.call_llm_for_relevance_filter",
