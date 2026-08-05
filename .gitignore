@@ -10,3 +10,4 @@ results
 .audit/
 .loop/
 .cache/
+.vscode/
