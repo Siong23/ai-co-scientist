@@ -465,7 +465,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
             for i, hypo in enumerate(hypotheses):
                 html += f"""
-                <div style="border-left: 3px solid #28a745; padding-left: 10px; margin: 10px 0;">
+                <div style="border-left: 3px solid #28a745; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>#{i + 1}: {hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
                     <p style="white-space: pre-line;">{hypo.get("text", "No description")}</p>
                     {format_evidence_sources_html(hypo, generation_sources)}
@@ -477,7 +477,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             html += f"<p><strong>Reviewed {len(hypotheses)} hypotheses:</strong></p>"
             for hypo in hypotheses:
                 html += f"""
-                <div style="border-left: 3px solid #17a2b8; padding-left: 10px; margin: 10px 0;">
+                <div style="border-left: 3px solid #17a2b8; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>{hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
                     <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                        <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
@@ -576,7 +576,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             html += f"<p><strong>Evolved {len(hypotheses)} new hypotheses by combining top performers:</strong></p>"
             for hypo in hypotheses:
                 html += f"""
-                <div style="border-left: 3px solid #ffc107; padding-left: 10px; margin: 10px 0;">
+                <div style="border-left: 3px solid #ffc107; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>{hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
                     <p>{hypo.get("text", "No description")}</p>
                     {format_evidence_sources_html(hypo, generation_sources)}
@@ -653,7 +653,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 html += "<h5>Top Ranked Hypotheses:</h5>"
                 for i, hypo in enumerate(top_hypos):
                     html += f"""
-                    <div style="border-left: 3px solid #28a745; padding-left: 10px; margin: 10px 0;">
+                    <div style="border-left: 3px solid #28a745; padding: 10px; margin: 10px 0; border-radius: 15px;">
                         <h6>#{i + 1}: {hypo.get("title", "Untitled")}</h6>
                         <p><strong>ID:</strong> {hypo.get("id", "Unknown")} | 
                            <strong>Elo Score:</strong> {hypo.get("elo_score", 0):.2f}</p>
