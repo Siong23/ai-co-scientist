@@ -918,21 +918,50 @@ def create_gradio_interface():
 
             with gr.Column(scale=1):
                 # Instructions
-                gr.Markdown("""
-                ### 📖 Instructions
+                # gr.Markdown("""
+                # ### 📖 Instructions
 
-                1. **Enter Research Goal**: Describe what you want to research.
-                2. **Adjust Settings** (optional): Customize model and parameters.
-                3. **Click "Run Cycle"**: The system will set your goal and immediately generate, review, rank, and evolve hypotheses in one step.
+                # 1. **Enter Research Goal**: Describe what you want to research.
+                # 2. **Adjust Settings** (optional): Customize model and parameters.
+                # 3. **Click "Run Cycle"**: The system will set your goal and immediately generate, review, rank, and evolve hypotheses in one step.
 
-                ### 💡 Tips
-                - Start LM Studio's local server before running a cycle
-                - Load a model in LM Studio, then select it in Advanced Settings
-                - Higher generation temperature = more creative ideas
-                - Lower reflection temperature = more analytical reviews
-                - Each cycle builds on previous results
+                # ### 💡 Tips
+                # - Start LM Studio's local server before running a cycle
+                # - Load a model in LM Studio, then select it in Advanced Settings
+                # - Higher generation temperature = more creative ideas
+                # - Lower reflection temperature = more analytical reviews
+                # - Each cycle builds on previous results
 
-                **Note:** Runtime depends on your local model size and hardware.
+                # **Note:** Runtime depends on your local model size and hardware.
+                # """)
+                gr.HTML("""
+                <div style="
+                    border: 1px solid #e2e8f0; 
+                    padding: 20px;
+                    border-radius: 8px; 
+                    background-color: #f8fafc; 
+                    color: #334155;
+                ">
+                    <h4 style="margin: 0 0 10px 0; color: #0f172a; font-size: 1.1em;">📖 Instructions</h4>
+                    <ol style="margin: 0 0 15px 0; padding-left: 20px; line-height: 1.5;">
+                        <li style="margin-bottom: 6px;"><strong>Enter Research Goal</strong>: Describe what you want to research.</li>
+                        <li style="margin-bottom: 6px;"><strong>Adjust Settings</strong> (optional): Customize model and parameters.</li>
+                        <li style="margin-bottom: 0;"><strong>Click "Run Cycle"</strong>: The system will set your goal and immediately generate, review, rank, and evolve hypotheses in one step.</li>
+                    </ol>
+                    
+                    <h4 style="margin: 15px 0 10px 0; color: #0f172a; font-size: 1.1em;">💡 Tips</h4>
+                    <ul style="margin: 0 0 15px 0; padding-left: 20px; line-height: 1.5;">
+                        <li style="margin-bottom: 6px;">Start LM Studio's local server before running a cycle.</li>
+                        <li style="margin-bottom: 6px;">Load a model in LM Studio, then select it in Advanced Settings.</li>
+                        <li style="margin-bottom: 6px;">Higher generation temperature = more creative ideas.</li>
+                        <li style="margin-bottom: 6px;">Lower reflection temperature = more analytical reviews.</li>
+                        <li style="margin-bottom: 0;">Each cycle builds on previous results.</li>
+                    </ul>
+                    
+                    <p style="margin: 15px 0 0 0; font-size: 0.95em; color: #64748b;">
+                        <strong>Note:</strong> Runtime depends on your local model size and hardware.
+                    </p>
+                </div>
                 """)
 
         with gr.Tabs():
