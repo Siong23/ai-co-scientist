@@ -215,10 +215,82 @@ def render_report(run: Dict[str, Any]) -> str:
         html_parts.append("<p>No final hypotheses were available for this run.</p>")
 
     html_parts.append("</section><section><h2>Cycle Steps</h2>")
+    # for step_name, step_data in steps.items():
+    #     hypotheses = step_data.get("hypotheses", []) if isinstance(step_data, dict) else []
+    #     html_parts.append(f"<h3>{_escape(step_name)}</h3>")
+    #     html_parts.append(f"<p>{len(hypotheses)} hypotheses</p>")
+    #     if step_name == "meta_review":
+    #         html_parts.append(f"<pre>{_escape(json.dumps(step_data, indent=2, sort_keys=True))}</pre>")
     for step_name, step_data in steps.items():
-        hypotheses = step_data.get("hypotheses", []) if isinstance(step_data, dict) else []
+        hypotheses = (
+            step_data.get("hypotheses", [])
+            if isinstance(step_data, dict)
+            else []
+        )
         html_parts.append(f"<h3>{_escape(step_name)}</h3>")
         html_parts.append(f"<p>{len(hypotheses)} hypotheses</p>")
+
+        # ----------------------------
+        # Ranking results
+        # ----------------------------
+        if step_name.startswith("ranking"):
+            tournament = step_data.get("tournament_results", [])
+            if tournament:
+                html_parts.append("""
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Comparison</th>
+                            <th>Outcome</th>
+                            <th>Confidence</th>
+                            <th>Criteria</th>
+                            <th>Reasoning</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                """)
+                for result in tournament:
+                    confidence = f"{result.get('confidence',0)*100:.0f}%"
+                    # confidence = f"{result.get('confidence', 0) * 100:.1f}%"
+                    criteria = ", ".join(result.get("criteria", []))
+                    title_lookup = {
+                        h["id"]: h["title"]
+                        for h in hypotheses
+                    }
+                    title_a = title_lookup.get(
+                        result.get("hypothesis_a"),
+                        result.get("hypothesis_a")
+                    )
+                    title_b = title_lookup.get(
+                        result.get("hypothesis_b"),
+                        result.get("hypothesis_b")
+                    )
+                    html_parts.append(f"""
+                    <tr>
+                        <td>
+                            {_escape(title_a)} (ID: <b>{result.get("hypothesis_a")}</b>)
+                            vs
+                            {_escape(title_b)} (ID: <b>{result.get("hypothesis_b")}</b>)
+                        </td>
+
+                        <td style="text-align: center;">
+                            {result.get("outcome")}
+                        </td>
+
+                        <td style="text-align: center;">
+                            {confidence}
+                        </td>
+
+                        <td>
+                            {_escape(criteria)}
+                        </td>
+
+                        <td>
+                            {_escape(result.get("reasoning",""))}
+                        </td>
+                    </tr>
+                    """)
+                html_parts.append("</tbody></table>")
         if step_name == "meta_review":
             html_parts.append(f"<pre>{_escape(json.dumps(step_data, indent=2, sort_keys=True))}</pre>")
 
@@ -298,17 +370,33 @@ def _final_hypotheses(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+# def _hypothesis_block(index: int, hypothesis: Dict[str, Any]) -> str:
+#     comments = hypothesis.get("review_comments") or []
+#     comments_html = "".join(f"<li>{_escape(comment)}</li>" for comment in comments)
+#     return (
+#         '<div class="hypothesis">'
+#         f"<h3>{index}. {_escape(hypothesis.get('title'), 'Untitled')}</h3>"
+#         f"<p><strong>ID:</strong> {_escape(hypothesis.get('id'))} | "
+#         f"<strong>Elo:</strong> {_escape(hypothesis.get('elo_score'))}</p>"
+#         f"<p>{_escape(hypothesis.get('text'))}</p>"
+#         f"<p><strong>Novelty:</strong> {_escape(hypothesis.get('novelty_review'))} | "
+#         f"<strong>Feasibility:</strong> {_escape(hypothesis.get('feasibility_review'))}</p>"
+#         f"<ul>{comments_html}</ul>"
+#         "</div>"
+#     )
 def _hypothesis_block(index: int, hypothesis: Dict[str, Any]) -> str:
     comments = hypothesis.get("review_comments") or []
     comments_html = "".join(f"<li>{_escape(comment)}</li>" for comment in comments)
     return (
         '<div class="hypothesis">'
-        f"<h3>{index}. {_escape(hypothesis.get('title'), 'Untitled')}</h3>"
-        f"<p><strong>ID:</strong> {_escape(hypothesis.get('id'))} | "
-        f"<strong>Elo:</strong> {_escape(hypothesis.get('elo_score'))}</p>"
+        f"<h3>Rank #{index}</h3>"
+        f"<p><strong>Title:</strong> {_escape(hypothesis.get('title'),'Untitled')}</p>"
+        f"<p><strong>ID:</strong> {_escape(hypothesis.get('id'))}</p>"
+        f"<p><strong>Elo Score:</strong> {_escape(hypothesis.get('elo_score'))}</p>"
+        f"<p><strong>Novelty:</strong> {_escape(hypothesis.get('novelty_review'))}</p>"
+        f"<p><strong>Feasibility:</strong> {_escape(hypothesis.get('feasibility_review'))}</p>"
         f"<p>{_escape(hypothesis.get('text'))}</p>"
-        f"<p><strong>Novelty:</strong> {_escape(hypothesis.get('novelty_review'))} | "
-        f"<strong>Feasibility:</strong> {_escape(hypothesis.get('feasibility_review'))}</p>"
+        "<strong>Reviewer Comments</strong>"
         f"<ul>{comments_html}</ul>"
         "</div>"
     )
