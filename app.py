@@ -1015,11 +1015,11 @@ def create_gradio_interface():
         # Example inputs
         gr.Examples(
             examples=[
-                ["Develop ultra-lightweight IoT protocols to replace heavy 5G TCP/IP overhead"],
-                ["Create dynamic post-quantum encryption for live 5G network slices"],
-                ["Design AI systems to switch phone signals from towers to satellites"],
+                ["Develop a closed-loop multi-agent AI framework to dynamically allocate 5G slice bandwidth during traffic spikes"],
+                ["Create an orchestrator that injects post-quantum encryption into live 5G slices"],
+                ["Develop a real-time anomaly detector for Open-RAN architectures that spots and blocks malicious, rogue network apps"],
                 ["Improve 5G battery life by optimizing device wake-up sensors"],
-                ["Automate tower log analysis to deploy instant software fixes"],
+                ["Automate the root-cause diagnosis of 5G tower failures by deploying AI agents to read logs and execute patches"],
             ],
             inputs=[research_goal_input],
             label="Example Research Goals",
