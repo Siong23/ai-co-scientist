@@ -155,6 +155,18 @@ def set_research_goal(
         return error_msg, ""
 
 
+def format_execution_time(seconds: float) -> str:
+    """Format execution time as X min Y sec."""
+
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+
+    if minutes > 0:
+        return f"{minutes} mins {seconds} sec"
+
+    return f"{seconds} sec"
+
+
 def execute_cycle(
     research_goal: ResearchGoal,
     context: ContextMemory,
@@ -185,9 +197,12 @@ def execute_cycle(
 
         # Log execution time
         total_time = time.perf_counter() - start_time
-        cycle_details["execution_time"] = total_time
+        formatted_time = format_execution_time(total_time)
 
-        logger.info(f"Cycle execution time: {total_time:.2f} seconds")
+        cycle_details["execution_time"] = total_time
+        cycle_details["execution_time_formatted"] = formatted_time
+
+        logger.info(f"Cycle execution time: {formatted_time}")
 
         # Log all steps and hypotheses
         steps = cycle_details.get("steps", {})
@@ -212,16 +227,16 @@ def execute_cycle(
             categories = sorted({classify_llm_error(e) for e in errors})
             cause = "; ".join(categories)
             if produced_any:
-                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\n\n{to_bold('Execution Time:')} {total_time:.2f} seconds.\n{to_bold('Log:')} {log_file}"
+                status_msg = f"⚠️ Cycle {iteration} completed with errors ({cause}).\n\n{to_bold('Execution Time:')} {formatted_time}.\n{to_bold('Log:')} {log_file}"
             else:
                 status_msg = (
-                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n\n{to_bold('Execution Time:')} {total_time:.2f} seconds.\n"
+                    f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n\n{to_bold('Execution Time:')} {formatted_time}.\n"
                     f"See the results panel for details. {to_bold('Log:')} {log_file}"
                 )
         else:
             status_msg = (
                 f"✅ Cycle {iteration} completed successfully!\n\n"
-                f"{to_bold('Execution Time:')} {total_time:.2f} seconds\n"
+                f"{to_bold('Execution Time:')} {formatted_time}\n"
                 f"{to_bold('Log:')} {log_file}"
             )
 
