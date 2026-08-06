@@ -290,11 +290,11 @@ def run_cycle() -> Tuple[str, str, str]:
 
 def format_timeout_duration(timeout_seconds: float) -> str:
     if timeout_seconds < 60:
-        return f"{timeout_seconds:g} seconds"
+        return f"{timeout_seconds:.2f} sec"
     minutes = timeout_seconds / 60
     if minutes.is_integer():
-        return f"{int(minutes)} minutes"
-    return f"{minutes:.1f} minutes"
+        return f"{int(minutes)} mins"
+    return f"{minutes:.2f} mins"
 
 
 def timeout_results_html(timeout_seconds: float) -> str:
@@ -1031,7 +1031,7 @@ def create_gradio_interface():
         gr.Examples(
             examples=[
                 ["Develop a closed-loop multi-agent AI framework to dynamically allocate 5G slice bandwidth during traffic spikes"],
-                ["Create an orchestrator that injects post-quantum encryption into live 5G slices"],
+                ["Create a machine learning orchestrator that injects post-quantum cryptographic keys into active 5G network slices without increasing latency"],
                 ["Develop a real-time anomaly detector for Open-RAN architectures that spots and blocks malicious, rogue network apps"],
                 ["Improve 5G battery life by optimizing device wake-up sensors"],
                 ["Automate the root-cause diagnosis of 5G tower failures by deploying AI agents to read logs and execute patches"],
