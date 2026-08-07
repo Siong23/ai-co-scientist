@@ -13,6 +13,7 @@ from app.agents import SupervisorAgent
 from app.config import config
 from app.models import ContextMemory, ResearchGoal
 from app.run_store import (
+    _escape,
     delete_run,
     get_reports_dir,
     history_html,
@@ -730,6 +731,8 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     )
 
         for i, hypo in enumerate(final_hypotheses[:10]):  # Show top 10
+            comments = hypo.get("review_comments") or []
+            comments_html = "".join(f"<li>{_escape(comment)}</li>" for comment in comments)
             rank_color = "#28a745" if i < 3 else "#17a2b8" if i < 6 else "#6c757d"
             html += f"""
             <div style="border-left: 4px solid {rank_color}; padding: 15px; margin: 10px 0; background-color: white; border-radius: 5px;">
@@ -739,6 +742,8 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
                 <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                    <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
+                        <p><strong>Reviewer Comments</strong></p>
+                        <ul>{comments_html}</ul>
                 {format_evidence_sources_html(hypo, generation_sources)}
             </div>
             """
