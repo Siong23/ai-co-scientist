@@ -23,7 +23,7 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
     try:
         cleaned_response = _strip_fenced_json(response)
         parsed_data = json.loads(cleaned_response)
-    except (json.JSONDecodeError, AttributeError) as exc:
+    except (json.JSONDecodeError, AttributeError):
         logger.warning("Error parsing LLM reflection response: %s", response, exc_info=True)
         return None
 
