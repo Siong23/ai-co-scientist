@@ -208,8 +208,9 @@ become evidence gates.
 Also return required_terms containing only indispensable named entities,
 locations, organisms, materials, diseases, technologies, or their close
 synonyms. Do not use generic words such as "history", "study", or "model" as
-required terms. A retrieved paper will be rejected unless its title or abstract
-contains at least one required term.
+required terms. Return an empty array when the goal has no indispensable named
+entity. When present, a retrieved paper will be rejected unless its title or
+abstract contains at least one required term.
 
 Return only valid JSON with this exact shape:
 {{
@@ -255,9 +256,6 @@ Research goal:
         )
         if len(normalized_queries) != query_count:
             raise ValueError(f"Expected exactly {query_count} unique search queries.")
-        if not normalized_terms:
-            raise ValueError("Expected at least one required entity term.")
-
         explicit_requirements: list[EvidenceAspect] = []
         seen_aspect_ids: set[str] = set()
         for raw_aspect in raw_requirements:

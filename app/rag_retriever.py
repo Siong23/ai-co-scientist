@@ -119,8 +119,8 @@ class ArxivRAGRetriever:
         rag_config = config.get("rag", {})
 
         self.query_count = query_count or int(rag_config.get("query_count", 5))
-        self.results_per_query = results_per_query or int(rag_config.get("results_per_query", 6))
-        self.top_k = top_k or int(rag_config.get("top_k", 4))
+        self.results_per_query = results_per_query or int(rag_config.get("results_per_query", 10))
+        self.top_k = top_k or int(rag_config.get("top_k", 10))
         self.minimum_relevant_sources = minimum_relevant_sources or int(rag_config.get("minimum_relevant_sources", 3))
         self.corrective_retrieval_rounds = (
             corrective_retrieval_rounds
@@ -134,7 +134,7 @@ class ArxivRAGRetriever:
         )
         self.top_k = max(self.top_k, self.minimum_relevant_sources)
         self.rrf_k = rrf_k or int(rag_config.get("rrf_k", 60))
-        self.max_abstract_chars = max_abstract_chars or int(rag_config.get("max_abstract_chars", 1800))
+        self.max_abstract_chars = max_abstract_chars or int(rag_config.get("max_abstract_chars", 4000))
 
         self.arxiv = ArxivSearchTool(max_results=self.results_per_query)
         semantic_scholar_config = config.get("semantic_scholar", {})

@@ -50,13 +50,13 @@ sentence_transformer_model: "all-MiniLM-L6-v2"
 
 rag:
   query_count: 5
-  results_per_query: 6
-  top_k: 4
+  results_per_query: 10
+  top_k: 10
   minimum_relevant_sources: 1
   corrective_retrieval_rounds: 2
   generation_debate_rounds: 3
   rrf_k: 60
-  max_abstract_chars: 1800
+  max_abstract_chars: 4000
 
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.

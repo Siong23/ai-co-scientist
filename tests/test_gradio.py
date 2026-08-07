@@ -157,10 +157,18 @@ def test_hypothesis_evidence_sources_are_clickable_and_validated(
                     {
                         "source_id": "arXiv:1111.1111v2",
                         "arxiv_id": "1111.1111v2",
+                        "title": "First arXiv source",
                     },
                     {
                         "source_id": "arXiv:hep-th/9901001",
                         "arxiv_id": "hep-th/9901001",
+                        "title": "Second arXiv source",
+                    },
+                    {
+                        "source_id": "s2:1e34a577580c659127152539f550bc02c8ca1644",
+                        "arxiv_id": "s2:1e34a577580c659127152539f550bc02c8ca1644",
+                        "title": "Semantic Scholar evidence",
+                        "arxiv_url": ("https://www.semanticscholar.org/paper/1e34a577580c659127152539f550bc02c8ca1644"),
                     },
                 ],
                 "hypotheses": [
@@ -171,6 +179,7 @@ def test_hypothesis_evidence_sources_are_clickable_and_validated(
                         "evidence_source_ids": [
                             "arXiv:1111.1111v2",
                             "arXiv:hep-th/9901001",
+                            "s2:1e34a577580c659127152539f550bc02c8ca1644",
                             "arXiv:9999.9999",
                         ],
                     }
@@ -184,8 +193,27 @@ def test_hypothesis_evidence_sources_are_clickable_and_validated(
     assert "Evidence Sources:" in html
     assert 'href="https://arxiv.org/abs/1111.1111v2"' in html
     assert 'href="https://arxiv.org/abs/hep-th/9901001"' in html
+    assert 'href="https://www.semanticscholar.org/paper/1e34a577580c659127152539f550bc02c8ca1644"' in html
+    assert "Semantic Scholar evidence" in html
+    assert "s2:1e34a577580c659127152539f550bc02c8ca1644" not in html
     assert "arXiv:9999.9999" not in html
     assert 'target="_blank" rel="noopener noreferrer"' in html
+
+
+def test_hypothesis_evidence_sources_omit_sources_without_a_useful_url(
+    gradio_app_module,
+):
+    html = gradio_app_module.format_evidence_sources_html(
+        {"evidence_source_ids": ["s2:missing-link"]},
+        [
+            {
+                "source_id": "s2:missing-link",
+                "title": "Untraceable source",
+            }
+        ],
+    )
+
+    assert html == "<p><strong>Evidence Sources:</strong> None recorded</p>"
 
 
 def test_advanced_settings_exposes_available_model_choices(gradio_app_module):
