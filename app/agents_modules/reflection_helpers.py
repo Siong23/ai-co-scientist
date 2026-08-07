@@ -3,11 +3,59 @@
 from __future__ import annotations
 
 import json
-from typing import Dict
+from typing import Dict, List
 
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..utils import logger
 from .generation_helpers import _call_llm
+
+
+def _strip_fenced_json(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    return cleaned.strip()
+
+
+def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> dict | None:
+    try:
+        cleaned_response = _strip_fenced_json(response)
+        parsed_data = json.loads(cleaned_response)
+    except (json.JSONDecodeError, AttributeError) as exc:
+        logger.warning("Error parsing LLM reflection response: %s", response, exc_info=True)
+        return None
+
+    novelty = str(parsed_data.get("novelty_review", "UNREVIEWED")).upper()
+    feasibility = str(parsed_data.get("feasibility_review", "UNREVIEWED")).upper()
+    if novelty not in ["HIGH", "MEDIUM", "LOW"] or feasibility not in ["HIGH", "MEDIUM", "LOW"]:
+        logger.warning(
+            "Invalid reflection review values received: novelty=%s, feasibility=%s",
+            novelty,
+            feasibility,
+        )
+        return None
+
+    review_data = {
+        "novelty_review": novelty,
+        "feasibility_review": feasibility,
+        "comment": str(parsed_data.get("comment", "No comment provided.")),
+        "references": [],
+    }
+
+    raw_refs = parsed_data.get("references", [])
+    if isinstance(raw_refs, list):
+        valid_source_ids = {
+            str(src.get("source_id")) for src in retrieved_sources if isinstance(src, dict) and "source_id" in src
+        }
+        review_data["references"] = [
+            ref for ref in raw_refs if isinstance(ref, str) and (ref in valid_source_ids or not valid_source_ids)
+        ]
+    else:
+        logger.warning("Invalid references format received: %s", raw_refs)
+
+    return review_data
 
 
 def call_llm_for_reflection(
@@ -68,53 +116,54 @@ def call_llm_for_reflection(
             "references": [],
         }
 
-    review_data = {
+    review_data = _parse_reflection_response(response, retrieved_sources)
+    if review_data is not None:
+        logger.info("Parsed reflection data: %s", review_data)
+        return review_data
+
+    logger.warning(
+        "Reflection review response did not validate; retrying with a format-only repair prompt."
+    )
+    schema_instruction = (
+        "Return ONLY valid JSON with this exact schema:\n"
+        "{\n"
+        '  "novelty_review": "HIGH | MEDIUM | LOW",\n'
+        '  "feasibility_review": "HIGH | MEDIUM | LOW",\n'
+        '  "comment": "Concise summary critique explaining the ratings and suggestions.",\n'
+        '  "references": ["exact Source ID from the provided list above"]\n'
+        "}"
+    )
+    repair_prompt = (
+        "The previous response did not satisfy the required JSON schema or contained invalid novelty/feasibility values. "
+        "Reformat the candidate response below to valid JSON only, preserving the original scientific meaning. "
+        "Do not add Markdown, commentary, or new information.\n\n"
+        f"{schema_instruction}\n\n"
+        f"Candidate response:\n{response}"
+    )
+    repaired_response = _call_llm(repair_prompt, temperature=0.0, model=model)
+    logger.info("LLM reflection repair response for hypothesis: %s", repaired_response)
+
+    if repaired_response.startswith("Error:"):
+        logger.error("LLM reflection repair call failed: %s", repaired_response)
+        return {
+            "novelty_review": "UNREVIEWED",
+            "feasibility_review": "UNREVIEWED",
+            "comment": f"LLM review failed during repair: {repaired_response}",
+            "references": [],
+        }
+
+    review_data = _parse_reflection_response(repaired_response, retrieved_sources)
+    if review_data is not None:
+        logger.info("Parsed reflection data after repair: %s", review_data)
+        return review_data
+
+    logger.error(
+        "Could not parse repaired LLM reflection response as valid review JSON: %s",
+        repaired_response,
+    )
+    return {
         "novelty_review": "UNREVIEWED",
         "feasibility_review": "UNREVIEWED",
-        "comment": "Could not parse LLM response.",
+        "comment": "Could not parse LLM response after format repair.",
         "references": [],
     }
-
-    try:
-        cleaned_response = response.strip()
-        if cleaned_response.startswith("```json"):
-            cleaned_response = cleaned_response[7:]
-        if cleaned_response.endswith("```"):
-            cleaned_response = cleaned_response[:-3]
-        cleaned_response = cleaned_response.strip()
-
-        parsed_data = json.loads(cleaned_response)
-
-        novelty = parsed_data.get("novelty_review", "UNREVIEWED").upper()
-        if novelty in ["HIGH", "MEDIUM", "LOW"]:
-            review_data["novelty_review"] = novelty
-        else:
-            logger.warning("Invalid novelty review value received: %s", novelty)
-
-        feasibility = parsed_data.get("feasibility_review", "UNREVIEWED").upper()
-        if feasibility in ["HIGH", "MEDIUM", "LOW"]:
-            review_data["feasibility_review"] = feasibility
-        else:
-            logger.warning("Invalid feasibility review value received: %s", feasibility)
-
-        review_data["comment"] = parsed_data.get("comment", "No comment provided.")
-        
-        # Hard validation: Filter model references against verified IDs in retrieved_sources
-        raw_refs = parsed_data.get("references", [])
-        if isinstance(raw_refs, list):
-            valid_source_ids = {
-                str(src.get("source_id")) for src in retrieved_sources if isinstance(src, dict) and "source_id" in src
-            }
-            # Only allow references that exist in the retrieved sources memory
-            review_data["references"] = [
-                ref for ref in raw_refs if isinstance(ref, str) and (ref in valid_source_ids or not valid_source_ids)
-            ]
-        else:
-            logger.warning("Invalid references format received: %s", raw_refs)
-
-    except (json.JSONDecodeError, AttributeError, KeyError) as exc:
-        logger.warning("Error parsing LLM reflection response: %s", response, exc_info=True)
-        review_data["comment"] = f"Could not parse LLM response: {exc}"
-
-    logger.info("Parsed reflection data: %s", review_data)
-    return review_data
