@@ -10,6 +10,7 @@ results
 .audit/
 .loop/
 .cache/
+/chroma_db/
 app/paper/*.pdf
 app/paper/*.part
 .vscode/

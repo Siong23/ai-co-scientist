@@ -72,7 +72,7 @@ rag:
 # retrieved into the generation prompt; failures fall back to abstract-only RAG.
 paper_library:
   enabled: true
-  persist_directory: ".cache/chroma"
+  persist_directory: "chroma_db"
   pdf_directory: "app/paper"
   collection_name: "research_papers"
   max_papers_per_run: 3

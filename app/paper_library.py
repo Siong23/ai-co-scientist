@@ -42,7 +42,7 @@ class ChromaPaperLibrary:
     ) -> None:
         library_config = config.get("paper_library", {})
         self.enabled = bool(library_config.get("enabled", True)) if enabled is None else enabled
-        self.persist_directory = Path(persist_directory or library_config.get("persist_directory", ".cache/chroma"))
+        self.persist_directory = Path(persist_directory or library_config.get("persist_directory", "chroma_db"))
         self.pdf_directory = Path(pdf_directory or library_config.get("pdf_directory", ".cache/papers"))
         self.collection_prefix = str(library_config.get("collection_name", "research_papers"))
         self.embedding_model = str(config.get("sentence_transformer_model", "default"))

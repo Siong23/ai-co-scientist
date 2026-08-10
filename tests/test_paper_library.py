@@ -44,10 +44,11 @@ def _library(tmp_path: Path) -> ChromaPaperLibrary:
     return library
 
 
-def test_default_pdf_directory_uses_paper_folder():
+def test_default_storage_directories_are_persistent_and_separate():
     library = ChromaPaperLibrary(embeddings=FakeEmbeddings(), enabled=False)
 
     assert library.pdf_directory == Path("app/paper")
+    assert library.persist_directory == Path("chroma_db")
 
 
 def test_indexes_pdf_chunks_in_persistent_chroma_and_reuses_cache(tmp_path, monkeypatch):
