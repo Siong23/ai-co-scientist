@@ -38,6 +38,7 @@ class SupervisorAgent:
         cycle_details["steps"]["generation"] = {
             "hypotheses": [h.to_dict() for h in new_hypotheses],
             "sources": list(context.last_retrieved_sources),
+            "audits": list(context.last_hypothesis_audits),
         }
 
         # Propagate LLM errors to top-level errors field for frontend display, so a

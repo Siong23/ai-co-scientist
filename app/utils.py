@@ -112,6 +112,8 @@ def classify_llm_error(error_text: str) -> str:
         or "missing explicit requirements" in text
     ):
         return "Insufficient retrieved evidence"
+    if "rejected by the novelty and grounding audit" in text:
+        return "Hypothesis quality gate rejected all candidates"
     return "LLM/API error"
 
 
@@ -134,7 +136,12 @@ def _format_lmstudio_error(exc: Exception, model: str) -> str:
     return f"Error: LM Studio call failed: {error}"
 
 
-def call_llm(prompt: str, temperature: float = 0.7, model: Optional[str] = None) -> str:
+def call_llm(
+    prompt: str,
+    temperature: float = 0.7,
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+) -> str:
     """Call the local LM Studio server through its OpenAI-compatible API."""
     selected_model = get_lmstudio_model(model)
     if not selected_model:
@@ -148,9 +155,13 @@ def call_llm(prompt: str, temperature: float = 0.7, model: Optional[str] = None)
             max_retries=0,
             timeout=config.get("llm_request_timeout_seconds", 180),
         )
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         completion = client.chat.completions.create(
             model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=temperature,
         )
         if not completion.choices:
