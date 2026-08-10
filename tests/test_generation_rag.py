@@ -50,6 +50,7 @@ def _paper(
 def _query_plan_payload(
     goal: str = "brief describe the malaysia history",
     requirements: list[dict] | None = None,
+    query_count: int = 8,
 ) -> str:
     if requirements is None:
         requirements = [
@@ -66,7 +67,10 @@ def _query_plan_payload(
                 "Malaysia independence history",
                 "Malaysia post-independence development",
                 "Malaya political economic history",
-            ],
+                "Malaysia social history",
+                "Malaysia economic development history",
+                "Malaysia political institutions history",
+            ][:query_count],
             "required_terms": ["Malaysia", "Malaya"],
             "explicit_requirements": requirements,
             "exploration_directions": ["Compare alternative historical interpretations."],
@@ -122,7 +126,7 @@ def _synthesis_payload(*source_ids: str) -> str:
 def test_query_rewriting_uses_selected_model_and_zero_temperature():
     with patch(
         "app.agents.call_llm",
-        return_value=_query_plan_payload(),
+        return_value=_query_plan_payload(query_count=5),
     ) as mock_call:
         plan, error = call_llm_for_search_queries(
             "brief describe the malaysia history",
@@ -375,7 +379,7 @@ def test_query_rewriting_failure_uses_original_candidates():
 def test_rag_defaults_keep_more_candidate_evidence():
     retriever = ArxivRAGRetriever()
 
-    assert retriever.results_per_query == 10
+    assert retriever.results_per_query == 20
     assert retriever.top_k == 10
     assert retriever.max_abstract_chars == 4000
 
@@ -800,7 +804,7 @@ def test_springer_fallback_fuses_evidence_for_generation():
 
 
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
-    agent = GenerationAgent(debate_rounds=0)
+    agent = GenerationAgent(minimum_relevant_sources=1, debate_rounds=0)
     query_plan = _query_plan_payload()
     paper = _paper(
         "2001.03488v1",
@@ -819,9 +823,16 @@ def test_generation_prompt_contains_retrieved_abstract_and_source_id():
         ]
     )
     agent.rag_retriever.arxiv = Mock()
+    agent.rag_retriever.semantic_scholar = None
+    agent.rag_retriever.springer = None
+    agent.rag_retriever.elsevier = None
+    agent.rag_retriever.tavily = None
     agent.rag_retriever.arxiv.search_papers.side_effect = [
         [paper],
         [paper],
+        [],
+        [],
+        [],
         [],
         [],
         [],

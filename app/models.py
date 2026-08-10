@@ -81,6 +81,7 @@ class ResearchGoal:
         idea_attributes: str = ("novelty, feasibility, correctness, utility, specificity, and originality"),
         constraints: Optional[Dict] = None,
         llm_model: Optional[str] = None,
+        query_rewrite_model: Optional[str] = None,
         num_hypotheses: Optional[int] = None,
         generation_temperature: Optional[float] = None,
         reflection_temperature: Optional[float] = None,
@@ -95,6 +96,11 @@ class ResearchGoal:
         self.llm_model = (
             llm_model if llm_model else config.get("llm_model", "google/gemini-flash-1.5")
         )  # Example default
+        self.query_rewrite_model = (
+            query_rewrite_model
+            if query_rewrite_model
+            else config.get("query_rewrite_model", self.llm_model)
+        )
         self.num_hypotheses = num_hypotheses if num_hypotheses is not None else config.get("num_hypotheses", 3)
         self.generation_temperature = (
             generation_temperature
@@ -146,6 +152,7 @@ class ResearchGoalRequest(BaseModel):
     constraints: Optional[Dict] = {}
     # Add optional fields for advanced settings
     llm_model: Optional[str] = None
+    query_rewrite_model: Optional[str] = None
     num_hypotheses: Optional[int] = None
     generation_temperature: Optional[float] = None
     reflection_temperature: Optional[float] = None

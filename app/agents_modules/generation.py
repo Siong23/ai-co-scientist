@@ -180,7 +180,7 @@ Your refined contribution:
 
         query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
             research_goal.description,
-            model=research_goal.llm_model,
+            model=getattr(research_goal, "query_rewrite_model", getattr(research_goal, "llm_model", None)),
             query_count=self.rag_retriever.query_count,
         )
         if (rewrite_error or query_plan is None) and not candidate_documents:
