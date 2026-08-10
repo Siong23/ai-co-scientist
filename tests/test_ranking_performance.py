@@ -1,18 +1,33 @@
-"""Offline performance and regression tests for the Ranking Agent.
+"""Offline performance and regression tests for the improved Ranking Agent.
 
 The tests evaluate:
+
 1. LLM call efficiency
-2. Execution time
-3. Number of pairwise comparisons
+2. Pairwise execution time
+3. New-hypothesis tournament comparison efficiency
 4. Ranking consistency
 5. A/B order consistency
-6. Elo consistency
+6. Elo reproducibility
 7. TIE and ABSTAIN handling
+8. Inactive hypothesis filtering
+9. Tournament result recording
+10. Structured ranking-decision information
 
-All LLM calls are mocked so the tests are deterministic and do not require
-an API connection.
+The improved Ranking Agent uses an LLM-based adjudication process for
+pairwise ranking. The dedicated ranking model is tested through a mocked
+LLM call, allowing the test suite to remain deterministic and independent
+of an external API connection.
+
+The improved tournament can prioritize comparisons involving newly
+introduced hypotheses instead of repeatedly performing unnecessary
+old-vs-old comparisons.
+
+The ranking system also supports structured outcomes including A, B, TIE,
+and ABSTAIN, with corresponding Elo update behavior.
 """
-# to run this test file: pytest tests/test_ranking_performance.py -v -s
+
+# To run this test file:
+# pytest tests/test_ranking_performance.py -v -s
 
 from copy import deepcopy
 from time import perf_counter
