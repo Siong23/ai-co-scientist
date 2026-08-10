@@ -29,6 +29,10 @@ from app.utils import classify_llm_error
             "Retrieved evidence is insufficient after 2 rounds.",
             "Insufficient retrieved evidence",
         ),
+        (
+            "All generated hypotheses were rejected by the novelty and grounding audit.",
+            "Hypothesis quality gate rejected all candidates",
+        ),
         ("Error: LM Studio call failed: malformed response", "LLM/API error"),
     ],
 )
