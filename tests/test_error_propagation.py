@@ -12,6 +12,14 @@ from app.agents import GenerationAgent, SupervisorAgent
 from app.models import ContextMemory, Hypothesis, ResearchGoal
 from app.utils import classify_llm_error
 
+
+@pytest.fixture(autouse=True)
+def _disable_live_original_goal_search(monkeypatch):
+    """Error propagation tests exercise the LLM boundary, not live retrieval."""
+
+    monkeypatch.setattr(GenerationAgent, "_retrieve_original_scientific_sources", lambda *_: [])
+
+
 # --- classifier unit tests (the four required categories + fallback) ---
 
 
@@ -161,7 +169,9 @@ def test_generate_happy_path_returns_no_errors():
     assert all(h.evidence_source_ids == ["arXiv:1234.5678"] for h in hypos)
     assert errors == []
 
+
 # --- full cycle propagates the cause to cycle_details["errors"] ---
+
 
 def test_generate_uses_selected_research_goal_model():
     payload = """
