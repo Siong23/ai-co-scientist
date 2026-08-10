@@ -96,6 +96,13 @@ def test_github_actions_use_node24_compatible_versions():
                 assert action not in node20_action_pins, f"{workflow_path}: {action}"
 
 
+def test_private_repo_cicd_does_not_wait_for_a_deploy_runner():
+    workflow = load_workflow("cicd.yml")
+
+    assert set(workflow["jobs"]) == {"ci"}
+    assert workflow["jobs"]["ci"]["runs-on"] == "ubuntu-latest"
+
+
 def test_upstream_sync_workflow_is_manual_and_dry_run_by_default():
     workflow = load_workflow("upstream-sync.yml")
 
