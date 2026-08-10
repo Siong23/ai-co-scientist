@@ -313,28 +313,36 @@ def format_evidence_sources_html(
     hypothesis: Dict,
     generation_sources: List[Dict],
 ) -> str:
-    """Render validated hypothesis source IDs as clickable arXiv links."""
+    """Render validated evidence as useful links to the original source."""
     import html as html_lib
 
-    available_source_ids = {
-        str(source.get("source_id") or f"arXiv:{source.get('arxiv_id')}")
-        for source in generation_sources
-        if source.get("source_id") or source.get("arxiv_id")
-    }
+    available_sources = {}
+    for source in generation_sources:
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("source_id") or f"arXiv:{source.get('arxiv_id')}")
+        if source_id:
+            available_sources[source_id] = source
     evidence_source_ids = hypothesis.get("evidence_source_ids", [])
     if not isinstance(evidence_source_ids, list):
         evidence_source_ids = []
 
     links = []
     for source_id in dict.fromkeys(evidence_source_ids):
-        if not isinstance(source_id, str) or source_id not in available_source_ids:
+        if not isinstance(source_id, str) or source_id not in available_sources:
             continue
-        arxiv_id = source_id.removeprefix("arXiv:")
-        href = f"https://arxiv.org/abs/{quote(arxiv_id, safe='/.-')}"
+        source = available_sources[source_id]
+        href = str(source.get("arxiv_url") or source.get("pdf_url") or "").strip()
+        if not href and source_id.startswith("arXiv:"):
+            arxiv_id = source_id.removeprefix("arXiv:")
+            href = f"https://arxiv.org/abs/{quote(arxiv_id, safe='/.-')}"
+        if not href.startswith(("https://", "http://")):
+            continue
+        label = str(source.get("title") or source_id)
         links.append(
             f'<a href="{html_lib.escape(href, quote=True)}" '
             'target="_blank" rel="noopener noreferrer">'
-            f"{html_lib.escape(source_id)}</a>"
+            f"{html_lib.escape(label)}</a>"
         )
 
     rendered_sources = ", ".join(links) if links else "None recorded"

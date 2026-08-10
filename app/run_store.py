@@ -76,6 +76,7 @@ def research_goal_to_dict(research_goal: Any) -> Dict[str, Any]:
             "description": getattr(research_goal, "description", ""),
             "constraints": getattr(research_goal, "constraints", {}),
             "llm_model": getattr(research_goal, "llm_model", None),
+            "query_rewrite_model": getattr(research_goal, "query_rewrite_model", None),
             "num_hypotheses": getattr(research_goal, "num_hypotheses", None),
             "generation_temperature": getattr(research_goal, "generation_temperature", None),
             "reflection_temperature": getattr(research_goal, "reflection_temperature", None),

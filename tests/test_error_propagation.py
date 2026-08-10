@@ -45,7 +45,10 @@ def _goal():
 
 QUERY_PLAN = """
 {
-  "queries": ["query 1", "query 2", "query 3", "query 4", "query 5"],
+  "queries": [
+    "query 1", "query 2", "query 3", "query 4",
+    "query 5", "query 6", "query 7", "query 8"
+  ],
   "required_terms": ["test"],
   "explicit_requirements": [
     {"id": "test_goal", "goal_quote": "test goal"}
@@ -167,7 +170,12 @@ def test_generate_uses_selected_research_goal_model():
       }
     ]
     """
-    goal = ResearchGoal("test goal", llm_model="chosen-local-model", num_hypotheses=1)
+    goal = ResearchGoal(
+        "test goal",
+        llm_model="chosen-local-model",
+        query_rewrite_model="rewrite-local-model",
+        num_hypotheses=1,
+    )
     with (
         patch(
             "app.agents.call_llm",
@@ -194,7 +202,124 @@ def test_generate_uses_selected_research_goal_model():
         ).generate_new_hypotheses(goal, ContextMemory())
 
     assert len(mock_call.call_args_list) == 4
-    assert all(call.kwargs["model"] == "chosen-local-model" for call in mock_call.call_args_list)
+    assert mock_call.call_args_list[0].kwargs["model"] == "rewrite-local-model"
+    assert all(call.kwargs["model"] == "chosen-local-model" for call in mock_call.call_args_list[1:])
+
+
+# --- full cycle propagates the cause to cycle_details["errors"] ---
+
+
+
+def test_generate_returns_errors_and_keeps_them_out_of_hypotheses():
+    with patch(
+        "app.agents.call_llm",
+        return_value="Error: LM Studio authentication failed.",
+    ):
+        hypos, errors = GenerationAgent(
+            minimum_relevant_sources=1,
+            debate_rounds=0,
+        ).generate_new_hypotheses(_goal(), ContextMemory())
+
+    assert hypos == []  # error markers must never enter the ranking flow
+    assert len(errors) == 1
+    assert classify_llm_error(errors[0]) == "Missing or invalid API key"
+
+
+def test_generate_happy_path_returns_no_errors():
+    payload = """
+    [
+      {
+        "title": "H1",
+        "hypothesis": "idea one",
+        "rationale": "reason one",
+        "feasibility": "method one",
+        "source_ids": ["arXiv:1234.5678"]
+      },
+      {
+        "title": "H2",
+        "hypothesis": "idea two",
+        "rationale": "reason two",
+        "feasibility": "method two",
+        "source_ids": ["1234.5678"]
+      }
+    ]
+    """
+    with (
+        patch(
+            "app.agents.call_llm",
+            side_effect=[QUERY_PLAN, COVERAGE, SYNTHESIS, payload],
+        ),
+        patch.object(
+            GenerationAgent,
+            "_retrieve_scientific_sources",
+            return_value=[_document()],
+        ),
+        patch.object(
+            GenerationAgent,
+            "_retrieve_original_scientific_sources",
+            return_value=[],
+        ),
+        patch(
+            "app.agents.call_llm_for_relevance_filter",
+            return_value=(["arXiv:1234.5678"], None),
+        ),
+    ):
+        hypos, errors = GenerationAgent(
+            minimum_relevant_sources=1,
+            debate_rounds=0,
+        ).generate_new_hypotheses(_goal(), ContextMemory())
+
+    assert [h.title for h in hypos] == ["H1", "H2"]
+    assert all(h.evidence_source_ids == ["arXiv:1234.5678"] for h in hypos)
+    assert errors == []
+
+
+def test_generate_uses_selected_research_goal_model():
+    payload = """
+    [
+      {
+        "title": "H1",
+        "hypothesis": "idea one",
+        "rationale": "reason one",
+        "feasibility": "method one",
+        "source_ids": ["arXiv:1234.5678"]
+      }
+    ]
+    """
+    goal = ResearchGoal(
+        "test goal",
+        llm_model="chosen-local-model",
+        query_rewrite_model="rewrite-local-model",
+        num_hypotheses=1,
+    )
+    with (
+        patch(
+            "app.agents.call_llm",
+            side_effect=[QUERY_PLAN, COVERAGE, SYNTHESIS, payload],
+        ) as mock_call,
+        patch.object(
+            GenerationAgent,
+            "_retrieve_scientific_sources",
+            return_value=[_document()],
+        ),
+        patch.object(
+            GenerationAgent,
+            "_retrieve_original_scientific_sources",
+            return_value=[],
+        ),
+        patch(
+            "app.agents.call_llm_for_relevance_filter",
+            return_value=(["arXiv:1234.5678"], None),
+        ),
+    ):
+        GenerationAgent(
+            minimum_relevant_sources=1,
+            debate_rounds=0,
+        ).generate_new_hypotheses(goal, ContextMemory())
+
+    assert len(mock_call.call_args_list) == 4
+    assert mock_call.call_args_list[0].kwargs["model"] == "rewrite-local-model"
+    assert all(call.kwargs["model"] == "chosen-local-model" for call in mock_call.call_args_list[1:])
 
 
 # --- full cycle propagates the cause to cycle_details["errors"] ---
@@ -266,3 +391,12 @@ def test_surfaced_error_never_contains_key(monkeypatch):
     for e in details["errors"]:
         assert fake_key not in e
     assert any(classify_llm_error(e) == "Model unavailable or delisted" for e in details["errors"])
+
+
+def test_research_goal_has_query_rewrite_model():
+    goal = ResearchGoal("test goal")
+    assert hasattr(goal, "query_rewrite_model")
+    assert goal.query_rewrite_model is not None
+
+    custom_goal = ResearchGoal("test goal", query_rewrite_model="custom-model")
+    assert custom_goal.query_rewrite_model == "custom-model"

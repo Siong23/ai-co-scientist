@@ -50,6 +50,7 @@ def _paper(
 def _query_plan_payload(
     goal: str = "brief describe the malaysia history",
     requirements: list[dict] | None = None,
+    query_count: int = 8,
 ) -> str:
     if requirements is None:
         requirements = [
@@ -66,7 +67,10 @@ def _query_plan_payload(
                 "Malaysia independence history",
                 "Malaysia post-independence development",
                 "Malaya political economic history",
-            ],
+                "Malaysia social history",
+                "Malaysia economic development history",
+                "Malaysia political institutions history",
+            ][:query_count],
             "required_terms": ["Malaysia", "Malaya"],
             "explicit_requirements": requirements,
             "exploration_directions": ["Compare alternative historical interpretations."],
@@ -122,7 +126,7 @@ def _synthesis_payload(*source_ids: str) -> str:
 def test_query_rewriting_uses_selected_model_and_zero_temperature():
     with patch(
         "app.agents.call_llm",
-        return_value=_query_plan_payload(),
+        return_value=_query_plan_payload(query_count=5),
     ) as mock_call:
         plan, error = call_llm_for_search_queries(
             "brief describe the malaysia history",
@@ -144,6 +148,29 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     normalized_planner_prompt = " ".join(planner_prompt.split())
     assert "goal_quote copied verbatim" in normalized_planner_prompt
     assert "must never become evidence gates" in normalized_planner_prompt
+
+
+def test_query_rewriting_allows_no_required_entity_terms():
+    payload = json.dumps(
+        {
+            "queries": ["one", "two", "three", "four", "five"],
+            "required_terms": [],
+            "explicit_requirements": [
+                {
+                    "id": "goal_scope",
+                    "goal_quote": "scientific creativity",
+                }
+            ],
+            "exploration_directions": [],
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=payload):
+        plan, error = call_llm_for_search_queries("Improve scientific creativity")
+
+    assert error is None
+    assert plan is not None
+    assert plan.required_terms == ()
 
 
 def test_query_rewriting_rejects_invalid_or_incomplete_json():
@@ -268,7 +295,7 @@ def test_query_rewriting_retries_a_composite_requirement_as_atomic_quotes():
     assert "Atomize long or composite goal quotes" in second_prompt
 
 
-def test_query_rewriting_failure_stops_before_retrieval():
+def test_query_rewriting_failure_stops_when_original_retrieval_is_empty():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
@@ -291,6 +318,70 @@ def test_query_rewriting_failure_stops_before_retrieval():
     assert hypotheses == []
     assert errors == ["Query rewriting failed: Error: LM Studio unavailable"]
     mock_retrieve.assert_not_called()
+
+
+def test_query_rewriting_failure_uses_original_candidates():
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        debate_rounds=0,
+    )
+    document = Mock()
+    document.page_content = "Source ID: arXiv:1234.5678\nAbstract: relevant evidence"
+    document.metadata = {
+        "source_id": "arXiv:1234.5678",
+        "arxiv_id": "1234.5678",
+        "title": "Relevant evidence",
+        "abstract": "Evidence for improving scientific creativity.",
+    }
+    generation_payload = json.dumps(
+        [
+            {
+                "title": "Fallback-grounded hypothesis",
+                "hypothesis": "A grounded relationship can be tested.",
+                "rationale": "The original evidence supports the premise.",
+                "feasibility": "Evaluate the relationship empirically.",
+                "source_ids": ["arXiv:1234.5678"],
+            }
+        ]
+    )
+
+    with (
+        patch.object(
+            GenerationAgent,
+            "_retrieve_original_scientific_sources",
+            return_value=[document],
+        ),
+        patch.object(agent.rag_retriever, "retrieve") as mock_retrieve,
+        patch(
+            "app.agents.call_llm",
+            side_effect=[
+                "Error: planner unavailable",
+                _relevance_payload("arXiv:1234.5678"),
+                _coverage_payload("arXiv:1234.5678"),
+                _synthesis_payload("arXiv:1234.5678"),
+                generation_payload,
+            ],
+        ) as mock_llm,
+    ):
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("Improve scientific creativity", num_hypotheses=1),
+            ContextMemory(),
+        )
+
+    assert errors == []
+    assert len(hypotheses) == 1
+    assert hypotheses[0].evidence_source_ids == ["arXiv:1234.5678"]
+    mock_retrieve.assert_not_called()
+    coverage_prompt = mock_llm.call_args_list[2].args[0]
+    assert "goal_scope: Improve scientific creativity" in coverage_prompt
+
+
+def test_rag_defaults_keep_more_candidate_evidence():
+    retriever = ArxivRAGRetriever()
+
+    assert retriever.results_per_query == 20
+    assert retriever.top_k == 10
+    assert retriever.max_abstract_chars == 4000
 
 
 def test_relevance_grader_keeps_only_known_directly_relevant_sources():
@@ -713,7 +804,7 @@ def test_springer_fallback_fuses_evidence_for_generation():
 
 
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
-    agent = GenerationAgent(debate_rounds=0)
+    agent = GenerationAgent(minimum_relevant_sources=1, debate_rounds=0)
     query_plan = _query_plan_payload()
     paper = _paper(
         "2001.03488v1",
@@ -732,9 +823,16 @@ def test_generation_prompt_contains_retrieved_abstract_and_source_id():
         ]
     )
     agent.rag_retriever.arxiv = Mock()
+    agent.rag_retriever.semantic_scholar = None
+    agent.rag_retriever.springer = None
+    agent.rag_retriever.elsevier = None
+    agent.rag_retriever.tavily = None
     agent.rag_retriever.arxiv.search_papers.side_effect = [
         [paper],
         [paper],
+        [],
+        [],
+        [],
         [],
         [],
         [],

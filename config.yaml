@@ -13,7 +13,8 @@ lmstudio_base_url: "http://100.117.90.5:1234/v1"
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
 # llm_model: "meta-llama/llama-3.2-3b-instruct:free"
 # llm_model: "deepseek-ai_deepseek-r1-0528-qwen3-8b"
-llm_model: "openai/gpt-oss-120b"
+llm_model: "qwen/qwen3.6-35b-a3b"
+query_rewrite_model: "qwen/qwen3.6-35b-a3b"
 
 # Number of hypotheses to generate
 num_hypotheses: 4
@@ -46,37 +47,39 @@ step_temperatures:
   reflection: 0.5
 
 # Shared embedding model used by proximity analysis and RAG retrieval.
-sentence_transformer_model: "all-MiniLM-L6-v2"
+# sentence_transformer_model: "all-MiniLM-L6-v2"
+use_lmstudio_embeddings: true
+sentence_transformer_model: "qwen/text-embedding-qwen3-embedding-8b"
 
 rag:
-  query_count: 5
-  results_per_query: 6
-  top_k: 4
-  minimum_relevant_sources: 1
+  query_count: 8
+  results_per_query: 20
+  top_k: 10
+  minimum_relevant_sources: 3
   corrective_retrieval_rounds: 2
   generation_debate_rounds: 3
   rrf_k: 60
-  max_abstract_chars: 1800
+  max_abstract_chars: 4000
 
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.
 # Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).
 semantic_scholar:
   enabled: true
-  results_per_query: 6
+  results_per_query: 10
 
 # Springer Nature academic search (Open Access & Meta API). It follows the same
 # retrieval sequence when its API key is configured.
 # Set SPRINGER_API_KEY (or SPRINGER_OPEN_ACCESS_API_KEY / SPRINGER_META_API_KEY) in .env to enable.
 springer:
   enabled: true
-  results_per_query: 6
+  results_per_query: 10
 
 elsevier:
   enabled: true
-  results_per_query: 6
+  results_per_query: 10
 
 tavily:
   enabled: true
-  results_per_query: 6
+  results_per_query: 10
 

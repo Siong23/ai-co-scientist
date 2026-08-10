@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..rag_retriever import (
     ArxivRAGRetriever,
+    EvidenceAspect,
     SearchQueryPlan,
     format_documents_for_prompt,
     serialize_documents,
@@ -50,6 +51,22 @@ class GenerationAgent:
         """Run the first retrieval stage with the user's unmodified goal."""
 
         return self.rag_retriever.retrieve_original_goal(research_goal.description)
+
+    @staticmethod
+    def _build_minimal_fallback_plan(research_goal: str) -> SearchQueryPlan:
+        """Keep usable original evidence when LLM query planning fails."""
+
+        normalized_goal = research_goal.strip()
+        return SearchQueryPlan(
+            queries=(normalized_goal,),
+            required_terms=(),
+            explicit_requirements=(
+                EvidenceAspect(
+                    aspect_id="goal_scope",
+                    description=normalized_goal,
+                ),
+            ),
+        )
 
     @staticmethod
     def _merge_retrieved_documents(*document_groups):
@@ -163,14 +180,21 @@ Your refined contribution:
 
         query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
             research_goal.description,
-            model=research_goal.llm_model,
+            model=getattr(research_goal, "query_rewrite_model", getattr(research_goal, "llm_model", None)),
             query_count=self.rag_retriever.query_count,
         )
-        if rewrite_error or query_plan is None:
+        if (rewrite_error or query_plan is None) and not candidate_documents:
             context.last_retrieved_sources = []
             error = rewrite_error or "Query rewriting failed."
             _legacy.logger.error(error)
             return [], [error]
+        if rewrite_error or query_plan is None:
+            _legacy.logger.warning(
+                "%s Continuing with %d original-goal candidate(s) and a minimal fallback plan.",
+                rewrite_error or "Query rewriting failed.",
+                len(candidate_documents),
+            )
+            query_plan = self._build_minimal_fallback_plan(research_goal.description)
 
         _legacy.logger.info(
             "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s exploration_directions=%s",
