@@ -10,4 +10,6 @@ results
 .audit/
 .loop/
 .cache/
+app/paper/*.pdf
+app/paper/*.part
 .vscode/

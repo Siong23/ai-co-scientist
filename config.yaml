@@ -73,7 +73,7 @@ rag:
 paper_library:
   enabled: true
   persist_directory: ".cache/chroma"
-  pdf_directory: ".cache/papers"
+  pdf_directory: "app/paper"
   collection_name: "research_papers"
   max_papers_per_run: 3
   max_pages_per_paper: 20
