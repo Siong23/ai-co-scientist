@@ -54,9 +54,10 @@ def get_lmstudio_model(model: Optional[str] = None) -> str:
 def redact_secrets(text: str) -> str:
     """Remove provider credentials from logs and user-facing errors."""
     redacted = str(text)
-    api_key = os.getenv("LMSTUDIO_API_KEY")
-    if api_key:
-        redacted = redacted.replace(api_key, "***REDACTED***")
+    for variable in ("LMSTUDIO_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INST_TOKEN"):
+        secret = os.getenv(variable)
+        if secret:
+            redacted = redacted.replace(secret, "***REDACTED***")
     return redacted
 
 
@@ -111,6 +112,8 @@ def classify_llm_error(error_text: str) -> str:
         or "missing explicit requirements" in text
     ):
         return "Insufficient retrieved evidence"
+    if "rejected by the novelty and grounding audit" in text:
+        return "Hypothesis quality gate rejected all candidates"
     return "LLM/API error"
 
 
@@ -133,7 +136,12 @@ def _format_lmstudio_error(exc: Exception, model: str) -> str:
     return f"Error: LM Studio call failed: {error}"
 
 
-def call_llm(prompt: str, temperature: float = 0.7, model: Optional[str] = None) -> str:
+def call_llm(
+    prompt: str,
+    temperature: float = 0.7,
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+) -> str:
     """Call the local LM Studio server through its OpenAI-compatible API."""
     selected_model = get_lmstudio_model(model)
     if not selected_model:
@@ -147,9 +155,13 @@ def call_llm(prompt: str, temperature: float = 0.7, model: Optional[str] = None)
             max_retries=0,
             timeout=config.get("llm_request_timeout_seconds", 180),
         )
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         completion = client.chat.completions.create(
             model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=temperature,
         )
         if not completion.choices:
@@ -207,21 +219,81 @@ def generate_visjs_data(adjacency_graph: Dict) -> Dict[str, list]:
 _sentence_transformer_model = None
 
 
+class LMStudioSentenceTransformer:
+    """SentenceTransformer-compatible interface backed by LM Studio /v1/embeddings API."""
+
+    def __init__(self, model_name: Optional[str] = None):
+        self.model_name = model_name or config.get("sentence_transformer_model", "qwen/text-embedding-qwen3-embedding-8b")
+
+    def encode(
+        self,
+        sentences,
+        convert_to_numpy: bool = True,
+        normalize_embeddings: bool = True,
+        show_progress_bar: bool = False,
+        convert_to_tensor: bool = False,
+    ):
+        is_single = isinstance(sentences, str)
+        input_texts = [sentences] if is_single else list(sentences)
+
+        client = OpenAI(
+            base_url=get_lmstudio_base_url(),
+            api_key=get_lmstudio_api_key(),
+            max_retries=0,
+            timeout=config.get("llm_request_timeout_seconds", 180),
+        )
+        response = client.embeddings.create(
+            model=self.model_name,
+            input=input_texts,
+        )
+        embeddings = [data.embedding for data in response.data]
+        np_embeddings = np.array(embeddings, dtype=np.float32)
+
+        if normalize_embeddings:
+            norms = np.linalg.norm(np_embeddings, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            np_embeddings = np_embeddings / norms
+
+        if is_single:
+            result = np_embeddings[0]
+            if convert_to_tensor:
+                try:
+                    import torch
+
+                    return torch.tensor(result)
+                except ImportError:
+                    return result
+            return result
+        else:
+            if convert_to_tensor:
+                try:
+                    import torch
+
+                    return torch.tensor(np_embeddings)
+                except ImportError:
+                    return np_embeddings
+            return np_embeddings
+
+
 def get_sentence_transformer_model():
     """Loads and returns a singleton instance of the sentence transformer model."""
     global _sentence_transformer_model
     if _sentence_transformer_model is None:
         model_name = config.get("sentence_transformer_model", "all-MiniLM-L6-v2")
-        try:
-            logger.info(f"Loading sentence transformer model: {model_name}...")
-            _sentence_transformer_model = SentenceTransformer(model_name)
-            logger.info("Sentence transformer model loaded successfully.")
-        except ImportError:
-            logger.error("Failed to import sentence_transformers. Please install it: pip install sentence-transformers")
-            raise
-        except Exception as e:
-            logger.error(f"Failed to load sentence transformer model '{model_name}': {e}")
-            raise  # Re-raise after logging
+        if config.get("use_lmstudio_embeddings", False):
+            logger.info(f"Using LM Studio API embeddings for model: {model_name}...")
+            _sentence_transformer_model = LMStudioSentenceTransformer(model_name)
+        else:
+            try:
+                logger.info(f"Loading sentence transformer model: {model_name}...")
+                _sentence_transformer_model = SentenceTransformer(model_name)
+                logger.info("Sentence transformer model loaded successfully.")
+            except ImportError:
+                logger.error("Failed to import sentence_transformers. Please install it: pip install sentence-transformers")
+                raise
+            except Exception as e:
+                logger.error(f"Failed to load sentence transformer model '{model_name}': {e}")
+                raise  # Re-raise after logging
     return _sentence_transformer_model
 
 

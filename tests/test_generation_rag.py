@@ -2,6 +2,7 @@ import json
 from unittest.mock import Mock, patch
 
 import pytest
+from langchain_core.documents import Document
 
 from app.agents import (
     EvidenceCoverage,
@@ -9,6 +10,7 @@ from app.agents import (
     LiteratureFinding,
     LiteratureSynthesis,
     call_llm_for_evidence_coverage,
+    call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
     call_llm_for_relevance_filter,
     call_llm_for_search_queries,
@@ -47,9 +49,14 @@ def _paper(
     }
 
 
+def test_production_generation_default_does_not_run_hypothesis_auditor():
+    assert GenerationAgent().audit_enabled is False
+
+
 def _query_plan_payload(
     goal: str = "brief describe the malaysia history",
     requirements: list[dict] | None = None,
+    query_count: int = 8,
 ) -> str:
     if requirements is None:
         requirements = [
@@ -66,10 +73,29 @@ def _query_plan_payload(
                 "Malaysia independence history",
                 "Malaysia post-independence development",
                 "Malaya political economic history",
-            ],
+                "Malaysia social history",
+                "Malaysia economic development history",
+                "Malaysia political institutions history",
+            ][:query_count],
             "required_terms": ["Malaysia", "Malaya"],
             "explicit_requirements": requirements,
             "exploration_directions": ["Compare alternative historical interpretations."],
+        }
+    )
+
+
+def _research_plan_payload(goal: str = "brief describe the malaysia history") -> str:
+    return json.dumps(
+        {
+            "research_goal": goal,
+            "research_type": "discovery and synthesis",
+            "key_entities": ["Malaysia", "Malaya"],
+            "constraints": [],
+            "sub_questions": ["What evidence describes Malaysia's history?"],
+            "evidence_requirements": ["Authoritative historical sources"],
+            "freshness_requirement": "No special freshness requirement",
+            "ambiguities": [],
+            "search_strategy": "Search primary and scholarly historical sources.",
         }
     )
 
@@ -122,7 +148,10 @@ def _synthesis_payload(*source_ids: str) -> str:
 def test_query_rewriting_uses_selected_model_and_zero_temperature():
     with patch(
         "app.agents.call_llm",
-        return_value=_query_plan_payload(),
+        side_effect=[
+            _research_plan_payload(),
+            _query_plan_payload(query_count=5),
+        ],
     ) as mock_call:
         plan, error = call_llm_for_search_queries(
             "brief describe the malaysia history",
@@ -136,14 +165,310 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["goal_scope"]
     assert [aspect.description for aspect in plan.explicit_requirements] == ["brief describe the malaysia history"]
     assert plan.exploration_directions == ("Compare alternative historical interpretations.",)
+    assert mock_call.call_count == 2
+    assert all(call.kwargs["temperature"] == 0.0 for call in mock_call.call_args_list)
+    assert all(call.kwargs["model"] == "chosen-model" for call in mock_call.call_args_list)
+    planner_prompt = mock_call.call_args_list[0].args[0]
+    normalized_planner_prompt = " ".join(planner_prompt.split())
+    assert "brief describe the malaysia history" in normalized_planner_prompt
+    planner_system_prompt = mock_call.call_args_list[0].kwargs["system_prompt"]
+    assert "Research Planning component" in planner_system_prompt
+    assert "Do not generate search queries" in planner_system_prompt
+
+    rewriter_prompt = " ".join(mock_call.call_args_list[1].args[0].split())
+    assert "STRUCTURED RESEARCH PLAN" in rewriter_prompt
+    assert "discovery and synthesis" in rewriter_prompt
+    rewriter_system_prompt = mock_call.call_args_list[1].kwargs["system_prompt"]
+    assert "Web Search Query Rewriter" in rewriter_system_prompt
+    assert "goal_quote copied verbatim" in rewriter_system_prompt
+    assert "must never become evidence gates" in " ".join(rewriter_system_prompt.split())
+
+
+def test_query_rewriter_accepts_structured_query_objects():
+    rewritten = json.loads(_query_plan_payload(query_count=5))
+    rewritten["queries"] = [
+        {
+            "query": query,
+            "purpose": "Find supporting evidence",
+            "sub_question": "What evidence addresses the goal?",
+            "preferred_sources": ["primary sources"],
+            "freshness": "any",
+        }
+        for query in rewritten["queries"]
+    ]
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_research_plan_payload(), json.dumps(rewritten)],
+    ):
+        plan, error = call_llm_for_search_queries(
+            "brief describe the malaysia history",
+            query_count=5,
+        )
+
+    assert error is None
+    assert plan is not None
+    assert plan.queries[0] == "Malaysia colonial history"
+    assert len(plan.queries) == 5
+
+
+def test_query_rewriter_uses_literature_oriented_evidence_needs():
+    goal = (
+        "Develop an AI-driven resource allocation framework to reduce latency "
+        "and improve throughput in dense 5G networks."
+    )
+    requirements = [
+        {
+            "id": "resource_allocation",
+            "goal_quote": "AI-driven resource allocation framework",
+            "evidence_need": "AI-driven resource allocation methods for dense 5G networks",
+        },
+        {
+            "id": "network_outcomes",
+            "goal_quote": "reduce latency and improve throughput",
+            "evidence_need": "latency and throughput outcomes in dense 5G networks",
+        },
+    ]
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            _research_plan_payload(goal),
+            _query_plan_payload(goal, requirements=requirements, query_count=5),
+        ],
+    ):
+        plan, error = call_llm_for_search_queries(goal, query_count=5)
+
+    assert error is None
+    assert plan is not None
+    assert [aspect.description for aspect in plan.explicit_requirements] == [
+        "AI-driven resource allocation methods for dense 5G networks",
+        "latency and throughput outcomes in dense 5G networks",
+    ]
+
+
+def _audit_payload(
+    final_hypothesis: dict | None,
+    *,
+    scores: dict | None = None,
+    unsupported_claims: list[str] | None = None,
+    unsupported_numbers: list[str] | None = None,
+    verdict: str = "accept",
+) -> str:
+    return json.dumps(
+        {
+            "audited_hypotheses": [
+                {
+                    "candidate_index": 0,
+                    "scores": scores
+                    or {
+                        "evidence_validity": 8,
+                        "claim_evidence_entailment": 8,
+                        "novelty_against_prior_art": 8,
+                        "cross_paper_synthesis": 8,
+                        "mechanistic_plausibility": 8,
+                        "operational_falsifiability": 8,
+                        "unsupported_specificity": 8,
+                    },
+                    "closest_prior_art": [
+                        {
+                            "source_id": "arXiv:1111.1111",
+                            "overlap": "Shared baseline.",
+                            "remaining_novelty": "New interaction.",
+                        }
+                    ],
+                    "unsupported_claims": unsupported_claims or [],
+                    "unsupported_numbers": unsupported_numbers or [],
+                    "verdict": verdict,
+                    "revision_instruction": "Keep only the supported novelty.",
+                    "final_hypothesis": final_hypothesis,
+                }
+            ]
+        }
+    )
+
+
+def test_hypothesis_auditor_revises_and_passes_a_grounded_candidate():
+    final_hypothesis = {
+        "title": "Audited hypothesis",
+        "hypothesis": "Method A will outperform the baseline under congestion.",
+        "rationale": "The cited source grounds the baseline limitation.",
+        "feasibility": "Compare Method A with the baseline and reject the claim if latency is not lower.",
+        "source_ids": ["1111.1111v2"],
+    }
+    with patch(
+        "app.agents.call_llm",
+        return_value=_audit_payload(
+            final_hypothesis,
+            scores={
+                "evidence_validity": 0.8,
+                "claim_evidence_entailment": 0.8,
+                "novelty_against_prior_art": 0.8,
+                "cross_paper_synthesis": 0.8,
+                "mechanistic_plausibility": 0.8,
+                "operational_falsifiability": 0.8,
+                "unsupported_specificity": 0.8,
+            },
+            unsupported_claims=["Unsupported wording in the original draft."],
+            unsupported_numbers=["10% in the original draft"],
+            verdict="revise",
+        ),
+    ) as mock_call:
+        audits, error = call_llm_for_hypothesis_audit(
+            "Improve network performance.",
+            [{"title": "Draft"}],
+            "Source ID: arXiv:1111.1111\nTitle: Prior work\nAbstract: Baseline limitation.",
+            {"arXiv:1111.1111"},
+            model="audit-model",
+            system_prompt="auditor system prompt",
+        )
+
+    assert error is None
+    assert audits is not None
+    assert audits[0]["passed"] is True
+    assert audits[0]["final_hypothesis"]["source_ids"] == ["arXiv:1111.1111"]
+    assert audits[0]["audit_report"]["weighted_score"] == 80.0
+    assert audits[0]["audit_report"]["draft_unsupported_claims"]
+    assert audits[0]["audit_report"]["unsupported_claims"] == []
     assert mock_call.call_args.kwargs == {
         "temperature": 0.0,
-        "model": "chosen-model",
+        "model": "audit-model",
+        "system_prompt": "auditor system prompt",
     }
-    planner_prompt = mock_call.call_args.args[0]
-    normalized_planner_prompt = " ".join(planner_prompt.split())
-    assert "goal_quote copied verbatim" in normalized_planner_prompt
-    assert "must never become evidence gates" in normalized_planner_prompt
+
+
+def test_hypothesis_auditor_warns_and_penalizes_numeric_precision_absent_from_evidence():
+    final_hypothesis = {
+        "title": "Invented precision",
+        "hypothesis": "The method will improve throughput by 10%.",
+        "rationale": "The source describes the method without that number.",
+        "feasibility": "Compare it with a baseline and measure throughput.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+    with patch("app.agents.call_llm", return_value=_audit_payload(final_hypothesis)):
+        audits, error = call_llm_for_hypothesis_audit(
+            "Improve network performance.",
+            [{"title": "Draft"}],
+            "Source ID: arXiv:1111.1111\nAbstract: The method improves throughput.",
+            {"arXiv:1111.1111"},
+        )
+
+    assert error is None
+    assert audits is not None
+    assert audits[0]["passed"] is True
+    assert audits[0]["audit_report"]["unsupported_numbers"] == ["10%"]
+    assert audits[0]["audit_report"]["scores"]["unsupported_specificity"] == 5.0
+    assert audits[0]["audit_report"]["warnings"]
+
+
+def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
+    source_id = "arXiv:1111.1111"
+    document = Document(
+        page_content=(
+            "Source ID: arXiv:1111.1111\nTitle: Prior work\nAbstract: Evidence about the method and baseline."
+        ),
+        metadata={
+            "source_id": source_id,
+            "arxiv_id": "1111.1111",
+            "title": "Prior work",
+            "abstract": "Evidence about the method and baseline.",
+        },
+    )
+    plan = SearchQueryPlan(
+        queries=("method baseline",),
+        required_terms=(),
+        explicit_requirements=(EvidenceAspect("method", "the requested method"),),
+    )
+    coverage = EvidenceCoverage(
+        aspect_source_ids={"method": (source_id,)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Covered.",
+    )
+    synthesis = LiteratureSynthesis(
+        established_findings=(LiteratureFinding("The baseline has a limitation.", (source_id,)),),
+        contradictions=(),
+        knowledge_gaps=("The new interaction is untested.",),
+        analytical_rationale="The gap supports a testable comparison.",
+    )
+    draft = {
+        "title": "Draft",
+        "hypothesis": "Draft claim.",
+        "rationale": "Draft rationale.",
+        "feasibility": "Draft method.",
+        "source_ids": [source_id],
+    }
+    final = {
+        "title": "Audited",
+        "hypothesis": "The method will outperform the baseline under congestion.",
+        "rationale": "Prior work grounds the baseline limitation; the improvement remains a hypothesis.",
+        "feasibility": "Compare against the baseline and reject the claim if latency is not lower.",
+        "source_ids": [source_id],
+    }
+    audit = {
+        "candidate_index": 0,
+        "passed": True,
+        "final_hypothesis": final,
+        "audit_report": {
+            "scores": {},
+            "weighted_score": 82.0,
+            "closest_prior_art": [],
+            "unsupported_claims": [],
+            "unsupported_numbers": [],
+            "revision_instruction": "Clarify novelty.",
+            "verdict": "PASS",
+            "hard_failures": [],
+        },
+    }
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        debate_rounds=0,
+        audit_enabled=True,
+    )
+    with (
+        patch("app.agents.call_llm_for_search_queries", return_value=(plan, None)),
+        patch.object(agent, "_retrieve_scientific_sources", return_value=[document]),
+        patch("app.agents.call_llm_for_relevance_filter", return_value=([source_id], None)),
+        patch("app.agents.call_llm_for_evidence_coverage", return_value=(coverage, None)),
+        patch("app.agents.call_llm_for_literature_synthesis", return_value=(synthesis, None)),
+        patch("app.agents.call_llm_for_generation", return_value=[draft]),
+        patch("app.agents.call_llm_for_hypothesis_audit", return_value=([audit], None)),
+    ):
+        context = ContextMemory()
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("Improve network performance.", num_hypotheses=1),
+            context,
+        )
+
+    assert errors == []
+    assert len(hypotheses) == 1
+    assert hypotheses[0].title == "Audited"
+    assert hypotheses[0].audit_verdict == "PASS"
+    assert hypotheses[0].audit_score == 82.0
+    assert context.last_hypothesis_audits == [audit["audit_report"]]
+
+
+def test_query_rewriting_allows_no_required_entity_terms():
+    payload = json.dumps(
+        {
+            "queries": ["one", "two", "three", "four", "five"],
+            "required_terms": [],
+            "explicit_requirements": [
+                {
+                    "id": "goal_scope",
+                    "goal_quote": "scientific creativity",
+                }
+            ],
+            "exploration_directions": [],
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=payload):
+        plan, error = call_llm_for_search_queries("Improve scientific creativity")
+
+    assert error is None
+    assert plan is not None
+    assert plan.required_terms == ()
 
 
 def test_query_rewriting_rejects_invalid_or_incomplete_json():
@@ -268,7 +593,7 @@ def test_query_rewriting_retries_a_composite_requirement_as_atomic_quotes():
     assert "Atomize long or composite goal quotes" in second_prompt
 
 
-def test_query_rewriting_failure_stops_before_retrieval():
+def test_query_rewriting_failure_stops_when_original_retrieval_is_empty():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
@@ -291,6 +616,70 @@ def test_query_rewriting_failure_stops_before_retrieval():
     assert hypotheses == []
     assert errors == ["Query rewriting failed: Error: LM Studio unavailable"]
     mock_retrieve.assert_not_called()
+
+
+def test_query_rewriting_failure_uses_original_candidates():
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        debate_rounds=0,
+    )
+    document = Mock()
+    document.page_content = "Source ID: arXiv:1234.5678\nAbstract: relevant evidence"
+    document.metadata = {
+        "source_id": "arXiv:1234.5678",
+        "arxiv_id": "1234.5678",
+        "title": "Relevant evidence",
+        "abstract": "Evidence for improving scientific creativity.",
+    }
+    generation_payload = json.dumps(
+        [
+            {
+                "title": "Fallback-grounded hypothesis",
+                "hypothesis": "A grounded relationship can be tested.",
+                "rationale": "The original evidence supports the premise.",
+                "feasibility": "Evaluate the relationship empirically.",
+                "source_ids": ["arXiv:1234.5678"],
+            }
+        ]
+    )
+
+    with (
+        patch.object(
+            GenerationAgent,
+            "_retrieve_original_scientific_sources",
+            return_value=[document],
+        ),
+        patch.object(agent.rag_retriever, "retrieve") as mock_retrieve,
+        patch(
+            "app.agents.call_llm",
+            side_effect=[
+                "Error: planner unavailable",
+                _relevance_payload("arXiv:1234.5678"),
+                _coverage_payload("arXiv:1234.5678"),
+                _synthesis_payload("arXiv:1234.5678"),
+                generation_payload,
+            ],
+        ) as mock_llm,
+    ):
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("Improve scientific creativity", num_hypotheses=1),
+            ContextMemory(),
+        )
+
+    assert errors == []
+    assert len(hypotheses) == 1
+    assert hypotheses[0].evidence_source_ids == ["arXiv:1234.5678"]
+    mock_retrieve.assert_not_called()
+    coverage_prompt = mock_llm.call_args_list[2].args[0]
+    assert "goal_scope: Improve scientific creativity" in coverage_prompt
+
+
+def test_rag_defaults_keep_more_candidate_evidence():
+    retriever = ArxivRAGRetriever()
+
+    assert retriever.results_per_query == 20
+    assert retriever.top_k == 10
+    assert retriever.max_abstract_chars == 4000
 
 
 def test_relevance_grader_keeps_only_known_directly_relevant_sources():
@@ -713,7 +1102,7 @@ def test_springer_fallback_fuses_evidence_for_generation():
 
 
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
-    agent = GenerationAgent(debate_rounds=0)
+    agent = GenerationAgent(minimum_relevant_sources=1, debate_rounds=0)
     query_plan = _query_plan_payload()
     paper = _paper(
         "2001.03488v1",
@@ -732,9 +1121,16 @@ def test_generation_prompt_contains_retrieved_abstract_and_source_id():
         ]
     )
     agent.rag_retriever.arxiv = Mock()
+    agent.rag_retriever.semantic_scholar = None
+    agent.rag_retriever.springer = None
+    agent.rag_retriever.elsevier = None
+    agent.rag_retriever.tavily = None
     agent.rag_retriever.arxiv.search_papers.side_effect = [
         [paper],
         [paper],
+        [],
+        [],
+        [],
         [],
         [],
         [],

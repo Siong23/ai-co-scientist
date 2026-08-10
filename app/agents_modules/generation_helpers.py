@@ -175,64 +175,57 @@ def call_llm_for_search_queries(
     research_goal: str,
     model: str | None = None,
     query_count: int = 5,
+    research_planner_prompt: str | None = None,
+    query_rewriter_prompt: str | None = None,
 ) -> tuple[SearchQueryPlan | None, str | None]:
-    """Create a goal-faithful plan with hard and optional search dimensions."""
+    """Plan the research first, then rewrite the plan into search queries."""
 
-    query_example = ", ".join(f'"query {index}"' for index in range(1, query_count + 1))
-    base_prompt = f"""
-You are a goal-faithful scientific search planner. Decompose the user's
-research goal before rewriting it into precise arXiv queries.
+    if research_planner_prompt is None or query_rewriter_prompt is None:
+        from .generation import (
+            QUERY_REWRITER_SYSTEM_PROMPT,
+            RESEARCH_PLANNER_SYSTEM_PROMPT,
+        )
 
-Generate exactly {query_count} distinct, concise search queries that cover
-the goal's explicit requirements and useful optional exploration directions.
-Remove request words such as "brief", "describe", and "explain". Preserve named
-entities and add useful scientific synonyms where appropriate.
+        research_planner_prompt = research_planner_prompt or RESEARCH_PLANNER_SYSTEM_PROMPT
+        query_rewriter_prompt = query_rewriter_prompt or QUERY_REWRITER_SYSTEM_PROMPT
 
-Return 1 to 5 explicit_requirements. Every requirement must include a
-goal_quote copied verbatim from the user's goal. The quote itself becomes the
-hard evidence requirement, so choose the shortest span that preserves the
-user's meaning. Do not add datasets, metrics, populations, failure modes,
-mechanisms, perturbations, or outcomes that the user did not request. Use short
-stable snake_case IDs. Generic instructions such as "generate testable
-hypotheses" are not evidence requirements.
+    def parse_json_object(response: str) -> dict:
+        cleaned_response = response.strip()
+        fenced_match = re.search(
+            r"```(?:json)?\s*(.*?)\s*```",
+            cleaned_response,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fenced_match:
+            cleaned_response = fenced_match.group(1).strip()
+        payload = json.loads(cleaned_response)
+        if not isinstance(payload, dict):
+            raise ValueError("Expected a JSON object.")
+        return payload
 
-Each goal_quote must contain at most 16 whitespace-separated words. Never put
-an entire comparison, question, or causal claim into one requirement. For a
-comparison goal, separately quote the focal method, comparator, domain, and
-requested outcomes when they are explicitly present.
-
-Return 0 to 5 exploration_directions. These may suggest useful search angles,
-synonyms, or neighboring literature, but they are optional and must never
-become evidence gates.
-
-Also return required_terms containing only indispensable named entities,
-locations, organisms, materials, diseases, technologies, or their close
-synonyms. Do not use generic words such as "history", "study", or "model" as
-required terms. A retrieved paper will be rejected unless its title or abstract
-contains at least one required term.
-
-Return only valid JSON with this exact shape:
-{{
-  "queries": [{query_example}],
-  "required_terms": ["entity", "synonym"],
-  "explicit_requirements": [
-    {{"id": "short_id", "goal_quote": "verbatim words from the user's goal"}}
-  ],
-  "exploration_directions": ["optional search direction"]
-}}
-
-Research goal:
-{research_goal}
-""".strip()
+    def parse_research_plan(response: str) -> dict:
+        payload = parse_json_object(response)
+        string_fields = (
+            "research_goal",
+            "research_type",
+            "freshness_requirement",
+            "search_strategy",
+        )
+        list_fields = (
+            "key_entities",
+            "constraints",
+            "sub_questions",
+            "evidence_requirements",
+            "ambiguities",
+        )
+        if any(not isinstance(payload.get(field), str) for field in string_fields) or any(
+            not isinstance(payload.get(field), list) for field in list_fields
+        ):
+            raise ValueError("Research Planner returned an incomplete plan schema.")
+        return payload
 
     def parse_response(response: str) -> SearchQueryPlan:
-        cleaned_response = response.strip()
-        if cleaned_response.startswith("```json"):
-            cleaned_response = cleaned_response[7:]
-        if cleaned_response.endswith("```"):
-            cleaned_response = cleaned_response[:-3]
-
-        payload = json.loads(cleaned_response.strip())
+        payload = parse_json_object(response)
         queries = payload.get("queries")
         required_terms = payload.get("required_terms")
         raw_requirements = payload.get("explicit_requirements")
@@ -247,39 +240,55 @@ Research goal:
                 "Expected 'queries', 'required_terms', 'explicit_requirements', and 'exploration_directions' arrays."
             )
 
-        normalized_queries = tuple(
-            dict.fromkeys(query.strip() for query in queries if isinstance(query, str) and query.strip())
-        )
+        query_texts = []
+        for query in queries:
+            if isinstance(query, str):
+                query_text = query.strip()
+            elif isinstance(query, dict):
+                query_text = str(query.get("query", "")).strip()
+            else:
+                query_text = ""
+            if query_text:
+                query_texts.append(query_text)
+        normalized_queries = tuple(dict.fromkeys(query_texts))
         normalized_terms = tuple(
             dict.fromkeys(term.strip() for term in required_terms if isinstance(term, str) and term.strip())
         )
         if len(normalized_queries) != query_count:
             raise ValueError(f"Expected exactly {query_count} unique search queries.")
-        if not normalized_terms:
-            raise ValueError("Expected at least one required entity term.")
-
         explicit_requirements: list[EvidenceAspect] = []
         seen_aspect_ids: set[str] = set()
+        seen_evidence_needs: set[str] = set()
         for raw_aspect in raw_requirements:
             if not isinstance(raw_aspect, dict):
                 continue
             aspect_id = str(raw_aspect.get("id", "")).strip()
             goal_quote = str(raw_aspect.get("goal_quote", "")).strip()
+            evidence_need = str(raw_aspect.get("evidence_need", "")).strip()
             normalized_goal = " ".join(research_goal.casefold().split())
             normalized_quote = " ".join(goal_quote.casefold().split())
+            normalized_evidence_need = " ".join(evidence_need.casefold().split())
             if (
                 not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", aspect_id)
                 or not normalized_quote
                 or normalized_quote not in normalized_goal
                 or len(goal_quote.split()) > 16
+                or (evidence_need and len(evidence_need.split()) > 24)
                 or aspect_id in seen_aspect_ids
+                or (normalized_evidence_need and normalized_evidence_need in seen_evidence_needs)
             ):
                 continue
             seen_aspect_ids.add(aspect_id)
+            if normalized_evidence_need:
+                seen_evidence_needs.add(normalized_evidence_need)
             explicit_requirements.append(
                 EvidenceAspect(
                     aspect_id=aspect_id,
-                    description=goal_quote,
+                    # The quote proves goal fidelity. The evidence need gives
+                    # the coverage grader a literature-oriented concept rather
+                    # than an imperative such as "develop a framework", which
+                    # no retrieved paper can literally satisfy.
+                    description=evidence_need or goal_quote,
                 )
             )
         if not 1 <= len(explicit_requirements) <= 5:
@@ -299,14 +308,104 @@ Research goal:
             exploration_directions=exploration_directions,
         )
 
+    planner_prompt = f"""
+USER RESEARCH GOAL
+{research_goal}
+""".strip()
+    planner_response = _call_llm(
+        planner_prompt,
+        temperature=0.0,
+        model=model,
+        system_prompt=research_planner_prompt,
+    )
+    if planner_response.startswith("Error:"):
+        return None, f"Query rewriting failed: {planner_response}"
+
+    # Preserve compatibility with callers that return the historical combined
+    # query-plan schema. Normal operation takes the two-stage path below.
+    try:
+        first_payload = parse_json_object(planner_response)
+    except (json.JSONDecodeError, ValueError):
+        first_payload = {}
+    legacy_query_response = (
+        planner_response
+        if {"queries", "required_terms", "explicit_requirements", "exploration_directions"}.issubset(first_payload)
+        else None
+    )
+
+    if legacy_query_response is None:
+        try:
+            research_plan = parse_research_plan(planner_response)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.error("Could not parse Research Planner response: %s", planner_response, exc_info=True)
+            return None, f"Query rewriting failed: Research planning failed: {exc}"
+
+        query_example = ",\n    ".join(
+            f'{{"query": "query {index}", "purpose": "...", '
+            '"sub_question": "...", "preferred_sources": [], "freshness": "..."}'
+            for index in range(1, query_count + 1)
+        )
+        rewriter_system_prompt = f"""
+{query_rewriter_prompt}
+
+Generate exactly {query_count} distinct queries. In addition to the fields in
+the Query Rewriter prompt, include the evidence-control fields below so the
+retrieval system can validate coverage without turning optional ideas into
+hard requirements.
+
+- required_terms: only indispensable named entities, locations, organisms,
+  materials, diseases, or technologies (and close synonyms).
+- explicit_requirements: 1 to 5 non-overlapping objects with a stable
+  snake_case id, a goal_quote copied verbatim from the original request, and
+  an evidence_need describing the literature evidence to retrieve. Each quote
+  must be at most 16 words and each evidence_need at most 24 words. Write the
+  evidence_need as a scientific topic or finding, never as a user action such
+  as "develop", "design", "write", or "generate". Do not require literature
+  to have already completed the user's proposed research. Atomize comparisons
+  into focal method, comparator, domain, and requested outcomes when those are
+  explicitly present, and do not emit overlapping or duplicate requirements.
+- exploration_directions: 0 to 5 optional search angles that must never become
+  evidence gates.
+
+Return only valid JSON with this extended shape:
+{{
+  "queries": [
+    {query_example}
+  ],
+  "required_terms": ["entity", "synonym"],
+  "explicit_requirements": [
+    {{
+      "id": "short_id",
+      "goal_quote": "verbatim words from the original request",
+      "evidence_need": "concise literature-oriented concept to substantiate"
+    }}
+  ],
+  "exploration_directions": ["optional search direction"]
+}}
+""".strip()
+
+        base_prompt = f"""
+ORIGINAL USER REQUEST
+{research_goal}
+
+STRUCTURED RESEARCH PLAN
+{json.dumps(research_plan, ensure_ascii=False, indent=2)}
+""".strip()
+    else:
+        base_prompt = planner_prompt
+        rewriter_system_prompt = query_rewriter_prompt
+
     correction = ""
     for attempt in range(2):
-        prompt = base_prompt + correction
-        response = _call_llm(
-            prompt,
-            temperature=0.0,
-            model=model,
-        )
+        if attempt == 0 and legacy_query_response is not None:
+            response = legacy_query_response
+        else:
+            response = _call_llm(
+                base_prompt + correction,
+                temperature=0.0,
+                model=model,
+                system_prompt=rewriter_system_prompt,
+            )
         if response.startswith("Error:"):
             return None, f"Query rewriting failed: {response}"
         try:
@@ -497,6 +596,237 @@ class EvidenceCoverage:
     @property
     def sufficient(self) -> bool:
         return not self.missing_aspect_ids
+
+
+AUDIT_SCORE_WEIGHTS = {
+    "evidence_validity": 15,
+    "claim_evidence_entailment": 20,
+    "novelty_against_prior_art": 20,
+    "cross_paper_synthesis": 15,
+    "mechanistic_plausibility": 10,
+    "operational_falsifiability": 10,
+    "unsupported_specificity": 10,
+}
+
+def _numeric_specificity_not_in_evidence(
+    final_hypothesis: dict,
+    retrieved_context: str,
+) -> list[str]:
+    """Find precise performance numbers absent from the retrieved evidence."""
+
+    final_text = " ".join(str(final_hypothesis.get(field, "")) for field in ("hypothesis", "rationale", "feasibility"))
+    patterns = re.findall(
+        r"(?<!\w)\d+(?:\.\d+)?\s*(?:%|ms|milliseconds?|seconds?|Mbps|Gbps|dB)(?!\w)",
+        final_text,
+        flags=re.IGNORECASE,
+    )
+    evidence_text = retrieved_context.casefold()
+    return list(dict.fromkeys(value.strip() for value in patterns if value.strip().casefold() not in evidence_text))
+
+
+def call_llm_for_hypothesis_audit(
+    research_goal: str,
+    hypotheses: list[dict],
+    retrieved_context: str,
+    available_source_ids: set[str],
+    model: str | None = None,
+    system_prompt: str | None = None,
+) -> tuple[list[dict] | None, str | None]:
+    """Audit, revise, and gate generated hypotheses against retrieved evidence."""
+
+    prompt = f"""
+RESEARCH GOAL
+{research_goal}
+
+CANDIDATE HYPOTHESES
+{json.dumps(hypotheses, ensure_ascii=False, indent=2)}
+
+VERIFIED RETRIEVED SOURCES
+{retrieved_context}
+
+Audit every candidate and return one result for every zero-based candidate
+index. Scores must evaluate the final_hypothesis after any revision, not the
+original draft. A rejected item may use null for final_hypothesis.
+""".strip()
+    response = _call_llm(
+        prompt,
+        temperature=0.0,
+        model=model,
+        system_prompt=system_prompt,
+    )
+    if response.startswith("Error:"):
+        return None, f"Hypothesis audit failed: {response}"
+
+    try:
+        fenced_match = re.search(
+            r"```(?:json)?\s*(.*?)\s*```",
+            response.strip(),
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        payload = json.loads(fenced_match.group(1) if fenced_match else response.strip())
+        raw_audits = payload.get("audited_hypotheses")
+        if not isinstance(raw_audits, list) or len(raw_audits) != len(hypotheses):
+            raise ValueError("Expected one audited_hypotheses item per candidate.")
+
+        audits_by_index: dict[int, dict] = {}
+        for raw_audit in raw_audits:
+            if not isinstance(raw_audit, dict):
+                raise ValueError("Every audit item must be an object.")
+            index = raw_audit.get("candidate_index")
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(hypotheses):
+                raise ValueError("Invalid candidate_index in hypothesis audit.")
+            if index in audits_by_index:
+                raise ValueError("Duplicate candidate_index in hypothesis audit.")
+
+            raw_scores = raw_audit.get("scores")
+            if not isinstance(raw_scores, dict):
+                raise ValueError("Hypothesis audit scores must be an object.")
+
+            scores: dict[str, float] = {}
+            for score_name in AUDIT_SCORE_WEIGHTS:
+                score = raw_scores.get(score_name)
+                if not isinstance(score, (int, float)) or isinstance(score, bool) or not 0 <= score <= 10:
+                    raise ValueError(f"Invalid audit score: {score_name}.")
+                scores[score_name] = float(score)
+            if scores and max(scores.values()) <= 1:
+                scores = {score_name: score * 10 for score_name, score in scores.items()}
+
+            final_hypothesis = raw_audit.get("final_hypothesis")
+            valid_final = None
+            valid_source_ids: list[str] = []
+            if isinstance(final_hypothesis, dict):
+                required_fields = ("title", "hypothesis", "rationale", "feasibility")
+                if all(
+                    isinstance(final_hypothesis.get(field), str) and final_hypothesis[field].strip()
+                    for field in required_fields
+                ) and isinstance(final_hypothesis.get("source_ids"), list):
+                    valid_source_ids = _resolve_retrieved_source_ids(
+                        final_hypothesis["source_ids"],
+                        available_source_ids,
+                    )
+                    if valid_source_ids:
+                        valid_final = {field: final_hypothesis[field].strip() for field in required_fields}
+                        valid_final["source_ids"] = valid_source_ids
+
+            draft_unsupported_claims = tuple(
+                dict.fromkeys(
+                    value.strip()
+                    for value in raw_audit.get(
+                        "draft_unsupported_claims",
+                        raw_audit.get("unsupported_claims", []),
+                    )
+                    if isinstance(value, str) and value.strip()
+                )
+            )
+            draft_unsupported_numbers = list(
+                dict.fromkeys(
+                    value.strip()
+                    for value in raw_audit.get(
+                        "draft_unsupported_numbers",
+                        raw_audit.get("unsupported_numbers", []),
+                    )
+                    if isinstance(value, str) and value.strip()
+                )
+            )
+            unsupported_claims = tuple(
+                dict.fromkeys(
+                    value.strip()
+                    for value in raw_audit.get("remaining_unsupported_claims", [])
+                    if isinstance(value, str) and value.strip()
+                )
+            )
+            unsupported_numbers = list(
+                dict.fromkeys(
+                    value.strip()
+                    for value in raw_audit.get("remaining_unsupported_numbers", [])
+                    if isinstance(value, str) and value.strip()
+                )
+            )
+            if valid_final is not None:
+                unsupported_numbers = list(
+                    dict.fromkeys(
+                        (
+                            *unsupported_numbers,
+                            *_numeric_specificity_not_in_evidence(
+                                valid_final,
+                                retrieved_context,
+                            ),
+                        )
+                    )
+                )
+
+            closest_prior_art = []
+            for item in raw_audit.get("closest_prior_art", []):
+                if not isinstance(item, dict):
+                    continue
+                resolved_id = _resolve_retrieved_source_id(
+                    str(item.get("source_id", "")),
+                    available_source_ids,
+                )
+                if resolved_id is None:
+                    continue
+                closest_prior_art.append(
+                    {
+                        "source_id": resolved_id,
+                        "overlap": str(item.get("overlap", "")).strip(),
+                        "remaining_novelty": str(item.get("remaining_novelty", "")).strip(),
+                    }
+                )
+
+            audit_warnings = []
+            if unsupported_numbers:
+                scores["unsupported_specificity"] = min(
+                    scores["unsupported_specificity"],
+                    5.0,
+                )
+                audit_warnings.append(
+                    "The final hypothesis contains numeric specificity not found verbatim in the evidence."
+                )
+
+            weighted_score = round(
+                sum(scores[name] * weight for name, weight in AUDIT_SCORE_WEIGHTS.items()) / 10,
+                1,
+            )
+            hard_failures = []
+            if valid_final is None:
+                hard_failures.append("No valid final hypothesis with retrieved citations.")
+            if scores["evidence_validity"] < 5:
+                hard_failures.append("Evidence validity score is below 5/10.")
+            if scores["claim_evidence_entailment"] < 5:
+                hard_failures.append("Claim-evidence entailment score is below 5/10.")
+            if scores["novelty_against_prior_art"] < 5:
+                hard_failures.append("Novelty score is below 5/10.")
+            if unsupported_claims:
+                hard_failures.append("The final hypothesis contains unsupported claims.")
+            if weighted_score < 70:
+                hard_failures.append("Weighted audit score is below 70/100.")
+            if str(raw_audit.get("verdict", "")).strip().casefold() == "reject":
+                hard_failures.append("The novelty auditor rejected the candidate.")
+
+            audit_report = {
+                "scores": scores,
+                "weighted_score": weighted_score,
+                "closest_prior_art": closest_prior_art,
+                "draft_unsupported_claims": list(draft_unsupported_claims),
+                "draft_unsupported_numbers": draft_unsupported_numbers,
+                "unsupported_claims": list(unsupported_claims),
+                "unsupported_numbers": unsupported_numbers,
+                "warnings": audit_warnings,
+                "revision_instruction": str(raw_audit.get("revision_instruction", "")).strip(),
+                "verdict": "REJECT" if hard_failures else "PASS",
+                "hard_failures": hard_failures,
+            }
+            audits_by_index[index] = {
+                "candidate_index": index,
+                "passed": not hard_failures,
+                "final_hypothesis": valid_final,
+                "audit_report": audit_report,
+            }
+
+        return [audits_by_index[index] for index in range(len(hypotheses))], None
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        logger.error("Could not parse hypothesis audit response: %s", response, exc_info=True)
+        return None, f"Hypothesis audit failed: {exc}"
 
 
 def call_llm_for_evidence_coverage(

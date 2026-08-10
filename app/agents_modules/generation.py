@@ -6,14 +6,166 @@ import json
 import re
 from typing import Dict, List, Tuple
 
+from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..rag_retriever import (
     ArxivRAGRetriever,
+    EvidenceAspect,
     SearchQueryPlan,
     format_documents_for_prompt,
     serialize_documents,
 )
 from ._compat import _legacy
+
+RESEARCH_PLANNER_SYSTEM_PROMPT = """You are the Research Planning component of a research-oriented RAG system.
+
+Your job is NOT to answer the user's question and NOT to generate web
+search queries yet.
+
+First, analyze the user's research goal and construct a concise research plan.
+
+Determine:
+
+1. What the user is ultimately trying to learn or decide.
+2. What information is required to satisfy that goal.
+3. Which sub-questions need to be investigated.
+4. Which claims require current/external evidence.
+5. Important entities, technologies, dates, constraints, or terminology.
+6. Whether the question requires comparison, causal analysis,
+   fact verification, discovery, or multi-hop research.
+7. What evidence would constitute a satisfactory answer.
+8. Any ambiguity that could materially affect the research.
+
+Do not provide the final answer.
+Do not generate search queries.
+Do not expose private chain-of-thought.
+
+Return only the following JSON:
+
+{
+  "research_goal": "...",
+  "research_type": "...",
+  "key_entities": [],
+  "constraints": [],
+  "sub_questions": [],
+  "evidence_requirements": [],
+  "freshness_requirement": "...",
+  "ambiguities": [],
+  "search_strategy": "..."
+}"""
+
+
+QUERY_REWRITER_SYSTEM_PROMPT = """You are the Web Search Query Rewriter in a research-oriented RAG system.
+
+You receive:
+
+1. The original user request.
+2. A structured research plan produced by the Research Planner.
+
+Your job is to generate high-quality web search queries that maximize
+the probability of retrieving evidence needed to satisfy the research goal.
+
+Do NOT answer the user's question.
+
+For each research sub-question:
+
+- Generate a focused search query.
+- Prefer specific entities and technical terminology over vague language.
+- Add date/version information when freshness matters.
+- Generate separate queries when different evidence types are required.
+- Avoid simply copying the user's original wording.
+- Avoid overly long natural-language questions when keyword-oriented
+  searches would retrieve better results.
+- Prefer primary or authoritative sources when appropriate.
+- Do not combine unrelated sub-questions into one query.
+
+Return JSON:
+
+{
+  "queries": [
+    {
+      "query": "...",
+      "purpose": "...",
+      "sub_question": "...",
+      "preferred_sources": [],
+      "freshness": "..."
+    }
+  ]
+}"""
+
+
+HYPOTHESIS_AUDITOR_SYSTEM_PROMPT = """You are the Hypothesis Critic and Novelty Auditor in a research-oriented RAG system.
+
+Your task is to make each generated hypothesis reliable before it leaves the
+Generation Agent. Compare every candidate directly with the supplied retrieved
+sources. Do not use outside knowledge and do not invent citations.
+
+For each candidate:
+
+1. Verify that every Source ID exists in the supplied evidence.
+2. Check whether the cited sources actually entail each established statement
+   in the rationale. A proposed relationship may remain an explicitly labeled
+   hypothesis, but it must not be presented as an established fact.
+3. Identify the closest retrieved prior art and determine whether the proposed
+   contribution substantially duplicates it.
+4. Judge whether the candidate synthesizes a genuine unresolved interaction
+   across papers instead of merely combining keywords.
+5. Require a clear, plausible intermediate mechanism from intervention to
+   predicted outcome.
+6. Require operational falsifiability: intervention, baseline, measurable
+   outcome, and a result that would reject the hypothesis.
+7. Remove unsupported precision. Exact percentages, thresholds, latencies, or
+   performance improvements must occur in the retrieved evidence; otherwise
+   replace them with non-fabricated measurable comparisons.
+
+Revise a repairable candidate before scoring it. Scores must describe the
+final revised version. Reject a candidate that cannot be repaired without
+unsupported evidence or whose core novelty is already present in prior art.
+Use a 0-to-10 scale for every score, where 10 is strongest. Do not use decimal
+fractions on a 0-to-1 scale. The draft_unsupported fields record problems found
+in the original candidate. The remaining_unsupported fields must describe only
+problems still present in final_hypothesis after revision; return empty arrays
+when the final version has fixed them.
+Do not expose private chain-of-thought; provide concise audit findings only.
+
+Return only valid JSON:
+
+{
+  "audited_hypotheses": [
+    {
+      "candidate_index": 0,
+      "scores": {
+        "evidence_validity": 0,
+        "claim_evidence_entailment": 0,
+        "novelty_against_prior_art": 0,
+        "cross_paper_synthesis": 0,
+        "mechanistic_plausibility": 0,
+        "operational_falsifiability": 0,
+        "unsupported_specificity": 0
+      },
+      "closest_prior_art": [
+        {
+          "source_id": "exact supplied Source ID",
+          "overlap": "concise overlap",
+          "remaining_novelty": "concise unresolved contribution"
+        }
+      ],
+      "draft_unsupported_claims": [],
+      "draft_unsupported_numbers": [],
+      "remaining_unsupported_claims": [],
+      "remaining_unsupported_numbers": [],
+      "verdict": "accept | revise | reject",
+      "revision_instruction": "concise explanation",
+      "final_hypothesis": {
+        "title": "...",
+        "hypothesis": "...",
+        "rationale": "...",
+        "feasibility": "include metric, baseline, and rejection criterion",
+        "source_ids": ["exact supplied Source ID"]
+      }
+    }
+  ]
+}"""
 
 
 class GenerationAgent:
@@ -24,6 +176,7 @@ class GenerationAgent:
         minimum_relevant_sources: int | None = None,
         corrective_retrieval_rounds: int | None = None,
         debate_rounds: int | None = None,
+        audit_enabled: bool | None = None,
     ) -> None:
         self.rag_retriever = ArxivRAGRetriever(
             minimum_relevant_sources=minimum_relevant_sources,
@@ -33,6 +186,12 @@ class GenerationAgent:
         self.debate_rounds = max(
             0,
             min(5, self.rag_retriever.generation_debate_rounds),
+        )
+        rag_config = config.get("rag", {})
+        self.audit_enabled = (
+            bool(rag_config.get("hypothesis_audit_enabled", False))
+            if audit_enabled is None and debate_rounds is None
+            else bool(audit_enabled)
         )
 
     def _retrieve_scientific_sources(
@@ -50,6 +209,22 @@ class GenerationAgent:
         """Run the first retrieval stage with the user's unmodified goal."""
 
         return self.rag_retriever.retrieve_original_goal(research_goal.description)
+
+    @staticmethod
+    def _build_minimal_fallback_plan(research_goal: str) -> SearchQueryPlan:
+        """Keep usable original evidence when LLM query planning fails."""
+
+        normalized_goal = research_goal.strip()
+        return SearchQueryPlan(
+            queries=(normalized_goal,),
+            required_terms=(),
+            explicit_requirements=(
+                EvidenceAspect(
+                    aspect_id="goal_scope",
+                    description=normalized_goal,
+                ),
+            ),
+        )
 
     @staticmethod
     def _merge_retrieved_documents(*document_groups):
@@ -155,22 +330,35 @@ Your refined contribution:
 
         num_to_generate = research_goal.num_hypotheses
         gen_temp = research_goal.generation_temperature
+        query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
+            research_goal.description,
+            model=getattr(research_goal, "query_rewrite_model", getattr(research_goal, "llm_model", None)),
+            query_count=self.rag_retriever.query_count,
+            research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
+            query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
+        )
+
+        # The structured research plan and rewritten queries are produced before
+        # any normal web/literature search. The original goal remains a useful
+        # fallback query when planning or rewriting is unavailable.
         try:
             candidate_documents = self._retrieve_original_scientific_sources(research_goal)
         except Exception as exc:
             _legacy.logger.error("Original-goal retrieval failed: %s", exc, exc_info=True)
             candidate_documents = []
 
-        query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
-            research_goal.description,
-            model=research_goal.llm_model,
-            query_count=self.rag_retriever.query_count,
-        )
-        if rewrite_error or query_plan is None:
+        if (rewrite_error or query_plan is None) and not candidate_documents:
             context.last_retrieved_sources = []
             error = rewrite_error or "Query rewriting failed."
             _legacy.logger.error(error)
             return [], [error]
+        if rewrite_error or query_plan is None:
+            _legacy.logger.warning(
+                "%s Continuing with %d original-goal candidate(s) and a minimal fallback plan.",
+                rewrite_error or "Query rewriting failed.",
+                len(candidate_documents),
+            )
+            query_plan = self._build_minimal_fallback_plan(research_goal.description)
 
         _legacy.logger.info(
             "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s exploration_directions=%s",
@@ -452,6 +640,41 @@ Your refined contribution:
             raw_output,
         )
 
+        context.last_hypothesis_audits = []
+        if self.audit_enabled and raw_output and not any(item.get("title") == "Error" for item in raw_output):
+            audits, audit_error = _legacy.call_llm_for_hypothesis_audit(
+                research_goal.description,
+                raw_output,
+                retrieved_context,
+                allowed_source_ids,
+                model=research_goal.llm_model,
+                system_prompt=HYPOTHESIS_AUDITOR_SYSTEM_PROMPT,
+            )
+            if audit_error or audits is None:
+                context.last_hypothesis_audits = []
+                error = audit_error or "Hypothesis audit failed."
+                _legacy.logger.error(error)
+                return [], [error]
+
+            context.last_hypothesis_audits = [audit["audit_report"] for audit in audits]
+            rejected_audits = [audit for audit in audits if not audit["passed"]]
+            for audit in rejected_audits:
+                _legacy.logger.warning(
+                    "Hypothesis candidate %d rejected by novelty audit: %s",
+                    audit["candidate_index"],
+                    audit["audit_report"]["hard_failures"],
+                )
+            raw_output = [
+                {
+                    **audit["final_hypothesis"],
+                    "_audit_report": audit["audit_report"],
+                }
+                for audit in audits
+                if audit["passed"] and audit["final_hypothesis"] is not None
+            ]
+            if not raw_output:
+                return [], ["All generated hypotheses were rejected by the novelty and grounding audit."]
+
         new_hypos: List[Hypothesis] = []
         errors: List[str] = []
 
@@ -500,6 +723,11 @@ Your refined contribution:
                 ),
             )
             hypothesis.evidence_source_ids = valid_source_ids
+            audit_report = idea.get("_audit_report")
+            if isinstance(audit_report, dict):
+                hypothesis.audit_report = audit_report
+                hypothesis.audit_score = audit_report.get("weighted_score")
+                hypothesis.audit_verdict = audit_report.get("verdict")
 
             _legacy.logger.info(
                 "Generated RAG-grounded hypothesis: %s",

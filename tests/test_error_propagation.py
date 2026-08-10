@@ -29,6 +29,10 @@ from app.utils import classify_llm_error
             "Retrieved evidence is insufficient after 2 rounds.",
             "Insufficient retrieved evidence",
         ),
+        (
+            "All generated hypotheses were rejected by the novelty and grounding audit.",
+            "Hypothesis quality gate rejected all candidates",
+        ),
         ("Error: LM Studio call failed: malformed response", "LLM/API error"),
     ],
 )
@@ -45,7 +49,10 @@ def _goal():
 
 QUERY_PLAN = """
 {
-  "queries": ["query 1", "query 2", "query 3", "query 4", "query 5"],
+  "queries": [
+    "query 1", "query 2", "query 3", "query 4",
+    "query 5", "query 6", "query 7", "query 8"
+  ],
   "required_terms": ["test"],
   "explicit_requirements": [
     {"id": "test_goal", "goal_quote": "test goal"}
@@ -154,6 +161,7 @@ def test_generate_happy_path_returns_no_errors():
     assert all(h.evidence_source_ids == ["arXiv:1234.5678"] for h in hypos)
     assert errors == []
 
+# --- full cycle propagates the cause to cycle_details["errors"] ---
 
 def test_generate_uses_selected_research_goal_model():
     payload = """
@@ -167,7 +175,12 @@ def test_generate_uses_selected_research_goal_model():
       }
     ]
     """
-    goal = ResearchGoal("test goal", llm_model="chosen-local-model", num_hypotheses=1)
+    goal = ResearchGoal(
+        "test goal",
+        llm_model="chosen-local-model",
+        query_rewrite_model="rewrite-local-model",
+        num_hypotheses=1,
+    )
     with (
         patch(
             "app.agents.call_llm",
@@ -194,7 +207,8 @@ def test_generate_uses_selected_research_goal_model():
         ).generate_new_hypotheses(goal, ContextMemory())
 
     assert len(mock_call.call_args_list) == 4
-    assert all(call.kwargs["model"] == "chosen-local-model" for call in mock_call.call_args_list)
+    assert mock_call.call_args_list[0].kwargs["model"] == "rewrite-local-model"
+    assert all(call.kwargs["model"] == "chosen-local-model" for call in mock_call.call_args_list[1:])
 
 
 # --- full cycle propagates the cause to cycle_details["errors"] ---
@@ -266,3 +280,12 @@ def test_surfaced_error_never_contains_key(monkeypatch):
     for e in details["errors"]:
         assert fake_key not in e
     assert any(classify_llm_error(e) == "Model unavailable or delisted" for e in details["errors"])
+
+
+def test_research_goal_has_query_rewrite_model():
+    goal = ResearchGoal("test goal")
+    assert hasattr(goal, "query_rewrite_model")
+    assert goal.query_rewrite_model is not None
+
+    custom_goal = ResearchGoal("test goal", query_rewrite_model="custom-model")
+    assert custom_goal.query_rewrite_model == "custom-model"
