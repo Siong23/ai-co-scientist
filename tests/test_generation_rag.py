@@ -915,6 +915,66 @@ def test_literature_synthesis_keeps_only_findings_with_retrieved_sources():
     assert synthesis.established_findings[0].source_ids == ("arXiv:2205.15480v2",)
 
 
+def test_literature_synthesis_repairs_malformed_json_once():
+    aspects = (EvidenceAspect("core_topic", "The user-stated core topic."),)
+    repaired = json.dumps(
+        {
+            "established_findings": [
+                {
+                    "claim": "Supported premise.",
+                    "source_ids": ["arXiv:2205.15480v2"],
+                    "evidence_refs": [],
+                }
+            ],
+            "contradictions": [],
+            "knowledge_gaps": ["A direct comparison remains unresolved."],
+            "analytical_rationale": "The supported premise motivates a comparison.",
+        }
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=['{"established_findings": [{"claim": "truncated', repaired],
+    ) as mock_llm:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Compare two methods.",
+            aspects,
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+            model="local-model",
+        )
+
+    assert synthesis_error is None
+    assert synthesis is not None
+    assert synthesis.established_findings[0].claim == "Supported premise."
+    assert mock_llm.call_count == 2
+    repair_call = mock_llm.call_args_list[1]
+    assert repair_call.kwargs == {"temperature": 0.0, "model": "local-model"}
+    assert "format" in repair_call.args[0].lower()
+    assert "add facts" in repair_call.args[0].lower()
+
+
+def test_literature_synthesis_reports_failed_format_repair():
+    aspects = (EvidenceAspect("core_topic", "The user-stated core topic."),)
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=["not json", "still not json"],
+    ) as mock_llm:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Compare two methods.",
+            aspects,
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+        )
+
+    assert synthesis is None
+    assert "after format repair" in synthesis_error
+    assert mock_llm.call_count == 2
+
+
 def test_reciprocal_rank_fusion_deduplicates_versions_and_rewards_recurrence():
     recurring_v1 = _paper(
         "2001.03488v1",

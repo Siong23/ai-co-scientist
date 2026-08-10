@@ -1448,14 +1448,67 @@ Retrieved sources:
     if response.startswith("Error:"):
         return None, f"Literature synthesis failed: {response}"
 
-    try:
-        cleaned_response = response.strip()
-        if cleaned_response.startswith("```json"):
-            cleaned_response = cleaned_response[7:]
-        if cleaned_response.endswith("```"):
-            cleaned_response = cleaned_response[:-3]
-        payload = json.loads(cleaned_response.strip())
+    def parse_payload(candidate_response: str) -> dict:
+        cleaned_response = candidate_response.strip()
+        fenced_match = re.search(
+            r"```(?:json)?\s*(.*?)\s*```",
+            cleaned_response,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fenced_match:
+            cleaned_response = fenced_match.group(1).strip()
+        object_start = cleaned_response.find("{")
+        if object_start < 0:
+            raise ValueError("No JSON object was found.")
+        payload, _ = json.JSONDecoder().raw_decode(cleaned_response[object_start:])
+        if not isinstance(payload, dict):
+            raise ValueError("Expected a JSON object.")
+        return payload
 
+    try:
+        payload = parse_payload(response)
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as first_error:
+        logger.warning(
+            "Literature synthesis output was malformed; requesting one format-only repair: %s",
+            first_error,
+        )
+        repair_prompt = f"""
+Reformat the literature-synthesis response below as one valid JSON object.
+Preserve its scientific meaning, exact source IDs, and exact chunk IDs. Do not
+add facts, citations, findings, gaps, or explanations. If the response was
+truncated, retain only complete findings and contradictions; shorten or close
+an incomplete rationale without inventing content.
+
+The object must contain these fields:
+- established_findings: array of objects with claim, source_ids, evidence_refs
+- contradictions: array of objects with claim, source_ids, evidence_refs
+- knowledge_gaps: array of strings
+- analytical_rationale: string
+
+Return JSON only, with no Markdown or commentary.
+
+Malformed response:
+{response}
+""".strip()
+        repaired_response = _call_llm(
+            repair_prompt,
+            temperature=0.0,
+            model=model,
+        )
+        if repaired_response.startswith("Error:"):
+            return None, f"Literature synthesis format repair failed: {repaired_response}"
+        try:
+            payload = parse_payload(repaired_response)
+            response = repaired_response
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+            logger.error(
+                "Could not parse repaired literature synthesis response: %s",
+                repaired_response,
+                exc_info=True,
+            )
+            return None, f"Literature synthesis failed after format repair: {exc}"
+
+    try:
         def validated_findings(field_name: str) -> tuple[LiteratureFinding, ...]:
             raw_findings = payload.get(field_name)
             if not isinstance(raw_findings, list):
