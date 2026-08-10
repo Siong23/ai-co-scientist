@@ -1,5 +1,7 @@
+import html as html_lib
 import logging
 import os
+import re
 import threading
 import time
 from copy import deepcopy
@@ -110,6 +112,30 @@ def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[s
 def to_bold(text):
     # Mapping for a-z and A-Z to Mathematical Bold Capital/Small letters
     return "".join(chr(ord(c) + 119743) if 'A' <= c <= 'Z' else chr(ord(c) + 119737) if 'a' <= c <= 'z' else c for c in text)
+
+
+def format_hypothesis_text_for_display(text: Any) -> str:
+    """Render hypothesis text with preserved line breaks and styled labels for HTML display."""
+    if text is None:
+        return "No description"
+
+    normalized = str(text).replace("\r\n", "\n")
+    normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+    escaped = html_lib.escape(normalized)
+
+    escaped = re.sub(
+        r"(?im)^(Combination of|Hypothesis 1|Hypothesis 2|Hypothesis)\s*:",
+        lambda match: f"<strong>{match.group(1)}:</strong>",
+        escaped,
+    )
+    escaped = re.sub(
+        r"(?im)^(Rationale|Feasibility)\s*:",
+        lambda match: f"<strong>• {match.group(1)}:</strong>",
+        escaped,
+    )
+
+    return escaped.replace("\n", "<br />\n")
+
 
 def set_research_goal(
     description: str,
@@ -476,7 +502,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 html += f"""
                 <div style="border-left: 3px solid #28a745; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>#{i + 1}: {hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
-                    <p style="white-space: pre-line;">{hypo.get("text", "No description")}</p>
+                    <p style="white-space: pre-line;">{format_hypothesis_text_for_display(hypo.get("text"))}</p>
                     {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
@@ -587,7 +613,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 html += f"""
                 <div style="border-left: 3px solid #ffc107; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>{hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
-                    <p>{hypo.get("text", "No description")}</p>
+                    <p style="white-space: pre-line;">{format_hypothesis_text_for_display(hypo.get("text"))}</p>
                     {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
@@ -666,7 +692,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         <h6>#{i + 1}: {hypo.get("title", "Untitled")}</h6>
                         <p><strong>ID:</strong> {hypo.get("id", "Unknown")} | 
                            <strong>Elo Score:</strong> {hypo.get("elo_score", 0):.2f}</p>
-                        <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
+                        <p style="white-space: pre-line;"><strong>Description:</strong> {format_hypothesis_text_for_display(hypo.get("text"))}</p>
                         <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                            <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
                         {format_evidence_sources_html(hypo, generation_sources)}
@@ -747,7 +773,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 <h4>#{i + 1}: {hypo.get("title", "Untitled")}</h4>
                 <p><strong>ID:</strong> {hypo.get("id", "Unknown")} | 
                    <strong>Elo Score:</strong> {hypo.get("elo_score", 0):.2f}</p>
-                <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
+                <p style="white-space: pre-line;"><strong>Description:</strong><br /> {format_hypothesis_text_for_display(hypo.get("text"))}</p>
                 <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                    <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
                         <p><strong>Reviewer Comments</strong></p>
