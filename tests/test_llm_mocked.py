@@ -198,3 +198,34 @@ def test_reflection_passes_selected_model_to_llm_boundary():
 
     assert review["novelty_review"] == "HIGH"
     assert mock_call.call_args.kwargs["model"] == "selected-local-model"
+
+
+def test_reflection_retries_invalid_review_values():
+    first_payload = json.dumps(
+        {
+            "novelty_review": "NOVEL",
+            "feasibility_review": "POSSIBLE",
+            "comment": "Invalid values.",
+            "references": [],
+        }
+    )
+    second_payload = json.dumps(
+        {
+            "novelty_review": "LOW",
+            "feasibility_review": "HIGH",
+            "comment": "Repaired review.",
+            "references": [],
+        }
+    )
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[first_payload, second_payload],
+    ) as mock_call:
+        hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-id-2")
+        research_goal = ResearchGoal(description="test goal", constraints="")
+        context = ContextMemory()
+        review = call_llm_for_reflection(hypothesis, research_goal, context)
+
+    assert review["novelty_review"] == "LOW"
+    assert review["feasibility_review"] == "HIGH"
+    assert mock_call.call_count == 2

@@ -13,6 +13,7 @@ from app.agents import SupervisorAgent
 from app.config import config
 from app.models import ContextMemory, ResearchGoal
 from app.run_store import (
+    _escape,
     delete_run,
     get_reports_dir,
     history_html,
@@ -738,6 +739,8 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     )
 
         for i, hypo in enumerate(final_hypotheses[:10]):  # Show top 10
+            comments = hypo.get("review_comments") or []
+            comments_html = "".join(f"<li>{_escape(comment)}</li>" for comment in comments)
             rank_color = "#28a745" if i < 3 else "#17a2b8" if i < 6 else "#6c757d"
             html += f"""
             <div style="border-left: 4px solid {rank_color}; padding: 15px; margin: 10px 0; background-color: white; border-radius: 5px;">
@@ -747,6 +750,8 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
                 <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                    <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
+                        <p><strong>Reviewer Comments</strong></p>
+                        <ul>{comments_html}</ul>
                 {format_evidence_sources_html(hypo, generation_sources)}
             </div>
             """
@@ -926,21 +931,50 @@ def create_gradio_interface():
 
             with gr.Column(scale=1):
                 # Instructions
-                gr.Markdown("""
-                ### 📖 Instructions
+                # gr.Markdown("""
+                # ### 📖 Instructions
 
-                1. **Enter Research Goal**: Describe what you want to research.
-                2. **Adjust Settings** (optional): Customize model and parameters.
-                3. **Click "Run Cycle"**: The system will set your goal and immediately generate, review, rank, and evolve hypotheses in one step.
+                # 1. **Enter Research Goal**: Describe what you want to research.
+                # 2. **Adjust Settings** (optional): Customize model and parameters.
+                # 3. **Click "Run Cycle"**: The system will set your goal and immediately generate, review, rank, and evolve hypotheses in one step.
 
-                ### 💡 Tips
-                - Start LM Studio's local server before running a cycle
-                - Load a model in LM Studio, then select it in Advanced Settings
-                - Higher generation temperature = more creative ideas
-                - Lower reflection temperature = more analytical reviews
-                - Each cycle builds on previous results
+                # ### 💡 Tips
+                # - Start LM Studio's local server before running a cycle
+                # - Load a model in LM Studio, then select it in Advanced Settings
+                # - Higher generation temperature = more creative ideas
+                # - Lower reflection temperature = more analytical reviews
+                # - Each cycle builds on previous results
 
-                **Note:** Runtime depends on your local model size and hardware.
+                # **Note:** Runtime depends on your local model size and hardware.
+                # """)
+                gr.HTML("""
+                <div style="
+                    border: 1px solid #e2e8f0; 
+                    padding: 20px;
+                    border-radius: 8px; 
+                    background-color: #f8fafc; 
+                    color: #334155;
+                ">
+                    <h4 style="margin: 0 0 10px 0; color: #0f172a; font-size: 1.1em;">📖 Instructions</h4>
+                    <ol style="margin: 0 0 15px 0; padding-left: 20px; line-height: 1.5;">
+                        <li style="margin-bottom: 6px;"><strong>Enter Research Goal</strong>: Describe what you want to research.</li>
+                        <li style="margin-bottom: 6px;"><strong>Adjust Settings</strong> (optional): Customize model and parameters.</li>
+                        <li style="margin-bottom: 0;"><strong>Click "Run Cycle"</strong>: The system will set your goal and immediately generate, review, rank, and evolve hypotheses in one step.</li>
+                    </ol>
+                    
+                    <h4 style="margin: 15px 0 10px 0; color: #0f172a; font-size: 1.1em;">💡 Tips</h4>
+                    <ul style="margin: 0 0 15px 0; padding-left: 20px; line-height: 1.5;">
+                        <li style="margin-bottom: 6px;">Start LM Studio's local server before running a cycle.</li>
+                        <li style="margin-bottom: 6px;">Load a model in LM Studio, then select it in Advanced Settings.</li>
+                        <li style="margin-bottom: 6px;">Higher generation temperature = more creative ideas.</li>
+                        <li style="margin-bottom: 6px;">Lower reflection temperature = more analytical reviews.</li>
+                        <li style="margin-bottom: 0;">Each cycle builds on previous results.</li>
+                    </ul>
+                    
+                    <p style="margin: 15px 0 0 0; font-size: 0.95em; color: #64748b;">
+                        <strong>Note:</strong> Runtime depends on your local model size and hardware.
+                    </p>
+                </div>
                 """)
 
         with gr.Tabs():
