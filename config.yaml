@@ -67,6 +67,29 @@ rag:
   rrf_k: 60
   max_abstract_chars: 4000
 
+# Relevant open-access papers are downloaded only after evidence coverage is
+# confirmed. Their bounded full-text chunks are persisted locally in Chroma and
+# retrieved into the generation prompt; failures fall back to abstract-only RAG.
+paper_library:
+  enabled: true
+  persist_directory: ".cache/chroma"
+  pdf_directory: ".cache/papers"
+  collection_name: "research_papers"
+  max_papers_per_run: 3
+  max_pages_per_paper: 20
+  max_chunks_per_paper: 24
+  chunk_size_chars: 2400
+  chunk_overlap_chars: 300
+  top_k_chunks: 6
+  max_prompt_chars: 12000
+  max_pdf_bytes: 25000000
+  download_timeout_seconds: 30
+  allowed_pdf_hosts:
+    - "arxiv.org"
+    - "www.arxiv.org"
+    - "export.arxiv.org"
+    - "pdfs.semanticscholar.org"
+
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.
 # Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).

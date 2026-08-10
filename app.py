@@ -813,6 +813,11 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
             str(source.get("pdf_url") or "#"),
             quote=True,
         )
+        if source.get("full_text_indexed"):
+            chunks_used = int(source.get("full_text_chunks_used") or 0)
+            library_status = f"Indexed in local ChromaDB; {chunks_used} relevant full-text chunk(s) used"
+        else:
+            library_status = "Abstract-only evidence"
         html += f"""
         <div style="border: 1px solid #e0e0e0; padding: 15px; margin: 10px 0; border-radius: 8px; background-color: #fafafa;">
             <h4>{title}</h4>
@@ -820,6 +825,7 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
             <p><strong>arXiv ID:</strong> {arxiv_id} |
                <strong>Published:</strong> {published}</p>
             <p><strong>Abstract:</strong> {abstract}...</p>
+            <p><strong>Local paper library:</strong> {library_status}</p>
             <p>
                 <a href="{arxiv_url}" target="_blank">📄 View on arXiv</a> |
                 <a href="{pdf_url}" target="_blank">📁 Download PDF</a>

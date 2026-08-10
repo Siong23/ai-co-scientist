@@ -12,3 +12,6 @@ arxiv==4.0.0  # arXiv API integration
 feedparser==6.0.12  # For arXiv RSS feeds
 python-dateutil==2.9.0.post0  # Date handling for literature search
 langchain-core==1.4.9
+chromadb==1.5.9  # Persistent local vector database for downloaded paper chunks
+langchain-chroma==1.1.0  # LangChain interface used by the persistent Chroma paper library
+pypdf==6.14.2  # Extract text from relevant open-access paper PDFs

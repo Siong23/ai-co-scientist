@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple
 
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
+from ..paper_library import ChromaPaperLibrary
 from ..rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
@@ -177,6 +178,7 @@ class GenerationAgent:
         corrective_retrieval_rounds: int | None = None,
         debate_rounds: int | None = None,
         audit_enabled: bool | None = None,
+        paper_library: ChromaPaperLibrary | None = None,
     ) -> None:
         self.rag_retriever = ArxivRAGRetriever(
             minimum_relevant_sources=minimum_relevant_sources,
@@ -193,6 +195,7 @@ class GenerationAgent:
             if audit_enabled is None and debate_rounds is None
             else bool(audit_enabled)
         )
+        self.paper_library = paper_library or ChromaPaperLibrary(embeddings=self.rag_retriever.embeddings)
 
     def _retrieve_scientific_sources(
         self,
@@ -209,6 +212,18 @@ class GenerationAgent:
         """Run the first retrieval stage with the user's unmodified goal."""
 
         return self.rag_retriever.retrieve_original_goal(research_goal.description)
+
+    def _enrich_with_full_text(self, documents, research_goal: ResearchGoal):
+        """Use relevant paper bodies when available without blocking generation."""
+
+        try:
+            return self.paper_library.enrich_documents(documents, research_goal.description)
+        except Exception as exc:
+            _legacy.logger.warning(
+                "Paper download/vector indexing failed; continuing with abstracts: %s",
+                _legacy.redact_secrets(str(exc)),
+            )
+            return list(documents)
 
     @staticmethod
     def _build_minimal_fallback_plan(research_goal: str) -> SearchQueryPlan:
@@ -554,6 +569,7 @@ Your refined contribution:
             context.last_retrieved_sources = []
             return [], [error]
 
+        retrieved_documents = self._enrich_with_full_text(retrieved_documents, research_goal)
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         coverage_map = "\n".join(

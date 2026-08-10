@@ -413,6 +413,8 @@ def serialize_documents(
             "arxiv_url": document.metadata.get("arxiv_url"),
             "pdf_url": document.metadata.get("pdf_url"),
             "rrf_score": document.metadata.get("rrf_score"),
+            "full_text_indexed": document.metadata.get("full_text_indexed", False),
+            "full_text_chunks_used": document.metadata.get("full_text_chunks_used", 0),
         }
         for document in documents
     ]

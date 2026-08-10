@@ -125,6 +125,8 @@ def test_references_render_only_sources_used_for_generation(
                         "abstract": "Directly relevant evidence.",
                         "arxiv_url": ("https://arxiv.org/abs/1234.5678"),
                         "pdf_url": ("https://arxiv.org/pdf/1234.5678"),
+                        "full_text_indexed": True,
+                        "full_text_chunks_used": 3,
                     }
                 ]
             }
@@ -135,6 +137,7 @@ def test_references_render_only_sources_used_for_generation(
 
     assert "Retrieved Evidence Used for Generation" in html
     assert "Selected evidence" in html
+    assert "Indexed in local ChromaDB; 3 relevant full-text chunk(s) used" in html
     assert "Space VLBI" not in html
 
 
