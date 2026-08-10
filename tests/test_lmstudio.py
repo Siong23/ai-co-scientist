@@ -84,6 +84,25 @@ def test_call_llm_uses_local_openai_compatible_api(monkeypatch):
     )
 
 
+def test_call_llm_sends_an_explicit_system_prompt():
+    with patch.object(utils, "OpenAI") as mock_openai:
+        mock_openai.return_value.chat.completions.create.return_value = _completion()
+        call_llm(
+            "user request",
+            model="selected-model",
+            system_prompt="planner instructions",
+        )
+
+    mock_openai.return_value.chat.completions.create.assert_called_once_with(
+        model="selected-model",
+        messages=[
+            {"role": "system", "content": "planner instructions"},
+            {"role": "user", "content": "user request"},
+        ],
+        temperature=0.7,
+    )
+
+
 def test_missing_model_short_circuits_without_network(monkeypatch):
     monkeypatch.delenv("LMSTUDIO_MODEL", raising=False)
     monkeypatch.setitem(utils.config, "llm_model", "")

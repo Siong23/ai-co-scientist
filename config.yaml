@@ -21,7 +21,7 @@ num_hypotheses: 4
 
 # Per-provider request timeout. Keeps slow free endpoints from consuming the
 # whole Gradio cycle budget before fallback can try another model.
-llm_request_timeout_seconds: 180
+llm_request_timeout_seconds: 600
 
 # Elo K-factor
 elo_k_factor: 32
@@ -57,7 +57,13 @@ rag:
   top_k: 10
   minimum_relevant_sources: 3
   corrective_retrieval_rounds: 2
-  generation_debate_rounds: 3
+  # The post-generation Novelty Auditor now performs one targeted critique per
+  # hypothesis. Keep the older generic debate disabled to avoid three extra
+  # large-model calls that repeat the same review work.
+  generation_debate_rounds: 0
+  # Disabled after rollback: malformed or truncated audit JSON must not block
+  # otherwise valid RAG-grounded hypothesis generation.
+  hypothesis_audit_enabled: false
   rrf_k: 60
   max_abstract_chars: 4000
 

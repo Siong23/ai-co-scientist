@@ -34,7 +34,9 @@ class Hypothesis:
     #     self.evidence_source_ids: List[str] = []
     #     self.evidence_sources: List[Dict] = []  # Store the actual source documents
 
-    def __init__(self, hypothesis_id: Optional[str] = None, title: Optional[str] = None, text: Optional[str] = None, **kwargs):
+    def __init__(
+        self, hypothesis_id: Optional[str] = None, title: Optional[str] = None, text: Optional[str] = None, **kwargs
+    ):
         # Preserve backwards-compatibility with callers using positional args or old keywords
         self.hypothesis_id = hypothesis_id or kwargs.get("hypothesis_id") or ""
         # If title missing but text provided, use a truncated text as a fallback title
@@ -52,6 +54,9 @@ class Hypothesis:
         self.reflection_report = None  # keep same shape as before
         self.evidence_source_ids: List[str] = []
         self.evidence_sources: List[Dict] = []
+        self.audit_score: Optional[float] = None
+        self.audit_verdict: Optional[str] = None
+        self.audit_report: Dict = {}
 
     def to_dict(self) -> dict:
         return {
@@ -67,6 +72,9 @@ class Hypothesis:
             "parent_ids": self.parent_ids,  # Include parent IDs
             "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs
             "evidence_sources": self.evidence_sources,  # Include the actual source documents
+            "audit_score": self.audit_score,
+            "audit_verdict": self.audit_verdict,
+            "audit_report": self.audit_report,
             "reflection_report": self.reflection_report.dict() if self.reflection_report else None,
         }
 
@@ -97,9 +105,7 @@ class ResearchGoal:
             llm_model if llm_model else config.get("llm_model", "google/gemini-flash-1.5")
         )  # Example default
         self.query_rewrite_model = (
-            query_rewrite_model
-            if query_rewrite_model
-            else config.get("query_rewrite_model", self.llm_model)
+            query_rewrite_model if query_rewrite_model else config.get("query_rewrite_model", self.llm_model)
         )
         self.num_hypotheses = num_hypotheses if num_hypotheses is not None else config.get("num_hypotheses", 3)
         self.generation_temperature = (
@@ -128,6 +134,8 @@ class ContextMemory:
         self.iteration_number: int = 0
         # Sources retrieved before generation in the latest cycle.
         self.last_retrieved_sources: List[Dict] = []
+        # Quality-gate reports for every generated candidate, including rejects.
+        self.last_hypothesis_audits: List[Dict] = []
 
     def add_hypothesis(self, hypothesis: Hypothesis):
         self.hypotheses[hypothesis.hypothesis_id] = hypothesis
@@ -185,7 +193,7 @@ class PairwiseDecision(BaseModel):
     hypothesis_a_id: str
     hypothesis_b_id: str
 
-    outcome: Literal["A","B","TIE","ABSTAIN"]
+    outcome: Literal["A", "B", "TIE", "ABSTAIN"]
 
     scores_a: Dict[str, float] = {}
     scores_b: Dict[str, float] = {}
@@ -200,13 +208,7 @@ class PairwiseDecision(BaseModel):
 class ClaimAssessment(BaseModel):
     claim: str
 
-    status: Literal[
-        "SUPPORTED",
-        "CONTRADICTED",
-        "MIXED",
-        "NOT_FOUND",
-        "UNVERIFIED"
-    ]
+    status: Literal["SUPPORTED", "CONTRADICTED", "MIXED", "NOT_FOUND", "UNVERIFIED"]
 
     supporting_evidence: List[Dict] = []
     contradictory_evidence: List[Dict] = []

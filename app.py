@@ -106,10 +106,14 @@ def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[s
     message = f"Deleted saved run {selected_run_id}." if deleted else f"Saved run {selected_run_id} was not found."
     return message, history_html(), gr.update(choices=history_run_choices(), value=None)
 
+
 # Create a small helper function to turn plain text into bold text
 def to_bold(text):
     # Mapping for a-z and A-Z to Mathematical Bold Capital/Small letters
-    return "".join(chr(ord(c) + 119743) if 'A' <= c <= 'Z' else chr(ord(c) + 119737) if 'a' <= c <= 'z' else c for c in text)
+    return "".join(
+        chr(ord(c) + 119743) if "A" <= c <= "Z" else chr(ord(c) + 119737) if "a" <= c <= "z" else c for c in text
+    )
+
 
 def set_research_goal(
     description: str,
@@ -473,14 +477,31 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             hypotheses = step_data.get("hypotheses", [])
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
             for i, hypo in enumerate(hypotheses):
+                audit = hypo.get("audit_report", {})
+                audit_html = ""
+                if isinstance(audit, dict) and audit:
+                    score = audit.get("weighted_score", "N/A")
+                    verdict = html_lib.escape(str(audit.get("verdict", "UNREVIEWED")))
+                    prior_art = audit.get("closest_prior_art", [])
+                    prior_art_ids = ", ".join(
+                        html_lib.escape(str(item.get("source_id", "")))
+                        for item in prior_art
+                        if isinstance(item, dict) and item.get("source_id")
+                    )
+                    audit_html = (
+                        "<p><strong>Generation quality gate:</strong> "
+                        f"{verdict} · {score}/100"
+                        + (f" · Closest prior art: {prior_art_ids}" if prior_art_ids else "")
+                        + "</p>"
+                    )
                 html += f"""
                 <div style="border-left: 3px solid #28a745; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>#{i + 1}: {hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
                     <p style="white-space: pre-line;">{hypo.get("text", "No description")}</p>
+                    {audit_html}
                     {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
-
         elif step_name in ["reflection", "reflection_evolved"]:
             hypotheses = step_data.get("hypotheses", [])
             html += f"<p><strong>Reviewed {len(hypotheses)} hypotheses:</strong></p>"
@@ -498,41 +519,28 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         elif step_name.startswith("ranking"):
             hypotheses = step_data.get("hypotheses", [])
             tournament_results = step_data.get("tournament_results", [])
-            title_map = {
-                h.get("id"): h.get("title", "Untitled")
-                for h in hypotheses
-            }
+            title_map = {h.get("id"): h.get("title", "Untitled") for h in hypotheses}
             if hypotheses:
-                sorted_hypotheses = sorted(
-                    hypotheses,
-                    key=lambda h: h.get("elo_score", 0),
-                    reverse=True
-                )
+                sorted_hypotheses = sorted(hypotheses, key=lambda h: h.get("elo_score", 0), reverse=True)
                 html += f"<p><strong>Ranking results ({len(hypotheses)} hypotheses):</strong></p>"
                 html += "<ol>"
                 for hypo in sorted_hypotheses:
                     html += f"""
                     <li style="margin:5px 0;">
-                        <strong>{hypo.get("title","Untitled")}</strong>
-                        (ID: {hypo.get("id","Unknown")})
-                        - Elo: {hypo.get("elo_score",0):.2f}
+                        <strong>{hypo.get("title", "Untitled")}</strong>
+                        (ID: {hypo.get("id", "Unknown")})
+                        - Elo: {hypo.get("elo_score", 0):.2f}
                         {format_evidence_sources_html(hypo, generation_sources)}
                     </li>
                     """
                 html += "</ol>"
             if tournament_results:
                 html += "<h4>⚔️ Tournament Debate Results</h4>"
-                count = 0 # initialize match counter
+                count = 0  # initialize match counter
                 for match in tournament_results:
-                    count += 1 # increment for each match counter
-                    title_a = title_map.get(
-                        match["hypothesis_a"],
-                        match["hypothesis_a"]
-                    )
-                    title_b = title_map.get(
-                        match["hypothesis_b"],
-                        match["hypothesis_b"]
-                    )
+                    count += 1  # increment for each match counter
+                    title_a = title_map.get(match["hypothesis_a"], match["hypothesis_a"])
+                    title_b = title_map.get(match["hypothesis_b"], match["hypothesis_b"])
                     if match["outcome"] == "A":
                         winner = title_a
                     elif match["outcome"] == "B":
@@ -565,20 +573,19 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     {winner}</p>
 
                     <p><b>🎯 Confidence</b><br>
-                    {match.get("confidence",0)*100:.0f}%</p>
+                    {match.get("confidence", 0) * 100:.0f}%</p>
 
                     <p><b>💡 Why it won</b><br>
-                    {match.get("reasoning","No reason provided.")}</p>
+                    {match.get("reasoning", "No reason provided.")}</p>
 
                     <p><b>📌 Decisive Criteria</b></p>
 
                     <ul>
-                        {''.join(f"<li>{c}</li>" for c in match.get("criteria", []))}
+                        {"".join(f"<li>{c}</li>" for c in match.get("criteria", []))}
                     </ul>
 
                     </div>
                     """
-                
 
         elif step_name == "evolution":
             hypotheses = step_data.get("hypotheses", [])
@@ -1072,11 +1079,19 @@ def create_gradio_interface():
         # Example inputs
         gr.Examples(
             examples=[
-                ["Develop a closed-loop multi-agent AI framework to dynamically allocate 5G slice bandwidth during traffic spikes"],
-                ["Create a machine learning orchestrator that injects post-quantum cryptographic keys into active 5G network slices without increasing latency"],
-                ["Develop a real-time anomaly detector for Open-RAN architectures that spots and blocks malicious, rogue network apps"],
+                [
+                    "Develop a closed-loop multi-agent AI framework to dynamically allocate 5G slice bandwidth during traffic spikes"
+                ],
+                [
+                    "Create a machine learning orchestrator that injects post-quantum cryptographic keys into active 5G network slices without increasing latency"
+                ],
+                [
+                    "Develop a real-time anomaly detector for Open-RAN architectures that spots and blocks malicious, rogue network apps"
+                ],
                 ["Improve 5G battery life by optimizing device wake-up sensors"],
-                ["Automate the root-cause diagnosis of 5G tower failures by deploying AI agents to read logs and execute patches"],
+                [
+                    "Automate the root-cause diagnosis of 5G tower failures by deploying AI agents to read logs and execute patches"
+                ],
             ],
             inputs=[research_goal_input],
             label="Example Research Goals",
