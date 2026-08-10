@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 
+from ..config import config
+from ..models import EvidenceClaim
 from ..rag_retriever import EvidenceAspect, SearchQueryPlan
 from ..utils import logger
 
@@ -112,9 +114,11 @@ def call_llm_for_generation(
     )
     schema_instruction = (
         "Return only valid JSON with no Markdown or commentary. On success, "
-        f"return an array containing exactly {num_hypotheses} objects. "
-        "Every object must contain exactly these five keys: 'title', "
-        "'hypothesis', 'rationale', 'feasibility', and 'source_ids'. The "
+        f"return an array containing at most {num_hypotheses} objects. Returning fewer is valid "
+        "when only fewer candidates are scientifically supportable. "
+        "Every object must contain 'title', 'hypothesis', 'rationale', "
+        "'feasibility', and 'source_ids'. It may also contain an "
+        "'evidence_refs' array of exact chunk IDs from the retrieved context. The "
         "first four values must be strings and 'source_ids' must be an array "
         "of exact Source ID strings from the retrieved context. If the "
         "retrieved context is insufficient or not directly relevant, return "
@@ -510,20 +514,19 @@ def call_llm_for_relevance_filter(
     model: str | None = None,
     explicit_requirements: tuple[EvidenceAspect, ...] = (),
 ) -> tuple[list[str] | None, str | None]:
-    """Suggest sources that directly support the goal without gating coverage."""
+    """Select papers relevant enough to justify bounded PDF acquisition."""
 
     aspect_text = "\n".join(f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements)
     prompt = f"""
-You are a strict relevance grader for scientific literature retrieval.
+You are a high-recall candidate-paper filter for scientific literature retrieval.
 
-Keep a retrieved source when it directly and substantively supports at least
-one explicit requirement below. A source does not need to cover the entire research
-goal by itself; the next stage checks collective coverage. Keyword overlap, a
-shared country or entity name, or an incidental use of words such as "history"
-is not enough. Exclude lexical collisions, analogies, and papers about a
-different domain. Return every directly relevant source, not only the single
-best match. Never include an irrelevant source merely to increase the number
-of selected sources. If uncertain, exclude it.
+Keep a retrieved source when its title and abstract make it plausibly useful
+for at least one explicit requirement below. This gate decides whether a PDF
+is worth acquiring; it does not certify a detailed factual claim. A source does
+not need to cover the entire research goal by itself. Remove clearly irrelevant
+lexical collisions, analogies, and papers about a different domain. Preserve
+high recall for candidates that may contain useful Methods, Results,
+Discussion, or Limitations evidence in their full text.
 
 Explicit requirements copied from the user's goal:
 {aspect_text or "- general_goal: the core scientific subject of the goal"}
@@ -569,7 +572,7 @@ Retrieved sources:
         )
 
         logger.info(
-            "Evidence relevance grader selected %d/%d sources: %s",
+            "Abstract candidate-paper filter selected %d/%d sources: %s",
             len(selected_ids),
             len(available_source_ids),
             selected_ids,
@@ -592,6 +595,8 @@ class EvidenceCoverage:
     missing_aspect_ids: tuple[str, ...]
     gap_queries: tuple[str, ...]
     reason: str
+    aspect_evidence_refs: dict[str, tuple[dict, ...]] = field(default_factory=dict)
+    stage: str = "discovery"
 
     @property
     def sufficient(self) -> bool:
@@ -608,20 +613,109 @@ AUDIT_SCORE_WEIGHTS = {
     "unsupported_specificity": 10,
 }
 
+_QUANTITATIVE_PATTERN = re.compile(
+    r"(?<![\w.])(?:[<>]=?|[≤≥~≈]\s*)?\d[\d,]*(?:\.\d+)?\s*"
+    r"(?:%|percent(?:age)?|µs|μs|us|microseconds?|ms|milliseconds?|s|seconds?|"
+    r"minutes?|hours?|kbps|mbps|gbps|tbps|hz|khz|mhz|ghz|dbm?|watts?|w|joules?|j|"
+    r"ttis?|intervals?|epochs?|iterations?|seeds?|runs?|repetitions?|users?|samples?|"
+    r"packets?|frames?|prbs?|resource blocks?|accuracy|f1(?:[- ]score)?|auc|"
+    r"fairness index|spectral efficiency|bits?/s/Hz)(?!\w)",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_quantitative_value(value: str) -> str:
+    return re.sub(r"[\s,]+", "", value).casefold()
+
+
+def _is_experimental_design_parameter(field_name: str, text: str, match: re.Match) -> bool:
+    """Allow explicitly proposed experiment sizes, not predicted outcomes."""
+
+    if field_name != "feasibility":
+        return False
+    window = text[max(0, match.start() - 80) : min(len(text), match.end() + 80)].casefold()
+    design_markers = (
+        "run ",
+        "evaluate ",
+        "simulate ",
+        "collect ",
+        "repeat ",
+        "use ",
+        "across ",
+        "for the experiment",
+        "design parameter",
+        "non-inferiority margin",
+    )
+    outcome_markers = (
+        "will improve",
+        "will reduce",
+        "will achieve",
+        "remains stable",
+        "outperform by",
+        "increase by",
+        "decrease by",
+    )
+    return any(marker in window for marker in design_markers) and not any(
+        marker in window for marker in outcome_markers
+    )
+
+
+def classify_numeric_specificity(
+    final_hypothesis: dict,
+    retrieved_context: str,
+    user_text: str = "",
+) -> list[dict[str, str]]:
+    """Classify quantitative specificity before the LLM audit verdict is trusted."""
+
+    normalized_evidence = _normalize_quantitative_value(retrieved_context)
+    normalized_user_text = _normalize_quantitative_value(user_text)
+    classifications: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for field_name in ("hypothesis", "rationale", "feasibility"):
+        text = str(final_hypothesis.get(field_name, ""))
+        for match in _QUANTITATIVE_PATTERN.finditer(text):
+            value = match.group(0).strip()
+            key = (field_name, value.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            if _normalize_quantitative_value(value) in normalized_evidence:
+                classification = "evidence_derived"
+            elif normalized_user_text and _normalize_quantitative_value(value) in normalized_user_text:
+                classification = "user_provided"
+            elif _is_experimental_design_parameter(field_name, text, match):
+                window = text[max(0, match.start() - 80) : match.end() + 80].casefold()
+                classification = (
+                    "derived_research_margin"
+                    if "margin" in window
+                    else "experimental_design_parameter"
+                )
+            else:
+                classification = "unsupported"
+            classifications.append(
+                {
+                    "value": value,
+                    "field": field_name,
+                    "classification": classification,
+                }
+            )
+    return classifications
+
+
 def _numeric_specificity_not_in_evidence(
     final_hypothesis: dict,
     retrieved_context: str,
+    user_text: str = "",
 ) -> list[str]:
-    """Find precise performance numbers absent from the retrieved evidence."""
+    """Return unsupported quantitative claims, excluding design parameters."""
 
-    final_text = " ".join(str(final_hypothesis.get(field, "")) for field in ("hypothesis", "rationale", "feasibility"))
-    patterns = re.findall(
-        r"(?<!\w)\d+(?:\.\d+)?\s*(?:%|ms|milliseconds?|seconds?|Mbps|Gbps|dB)(?!\w)",
-        final_text,
-        flags=re.IGNORECASE,
+    return list(
+        dict.fromkeys(
+            item["value"]
+            for item in classify_numeric_specificity(final_hypothesis, retrieved_context, user_text)
+            if item["classification"] == "unsupported"
+        )
     )
-    evidence_text = retrieved_context.casefold()
-    return list(dict.fromkeys(value.strip() for value in patterns if value.strip().casefold() not in evidence_text))
 
 
 def call_llm_for_hypothesis_audit(
@@ -631,6 +725,8 @@ def call_llm_for_hypothesis_audit(
     available_source_ids: set[str],
     model: str | None = None,
     system_prompt: str | None = None,
+    available_evidence_ref_ids: set[str] | None = None,
+    available_evidence_refs: dict[str, dict] | None = None,
 ) -> tuple[list[dict] | None, str | None]:
     """Audit, revise, and gate generated hypotheses against retrieved evidence."""
 
@@ -657,13 +753,46 @@ original draft. A rejected item may use null for final_hypothesis.
     if response.startswith("Error:"):
         return None, f"Hypothesis audit failed: {response}"
 
-    try:
+    def parse_payload(candidate_response: str) -> dict:
         fenced_match = re.search(
             r"```(?:json)?\s*(.*?)\s*```",
-            response.strip(),
+            candidate_response.strip(),
             flags=re.DOTALL | re.IGNORECASE,
         )
-        payload = json.loads(fenced_match.group(1) if fenced_match else response.strip())
+        payload = json.loads(fenced_match.group(1) if fenced_match else candidate_response.strip())
+        if not isinstance(payload, dict):
+            raise ValueError("Expected a JSON object.")
+        return payload
+
+    try:
+        payload = parse_payload(response)
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as first_error:
+        logger.warning(
+            "Hypothesis audit output was malformed; requesting one format-only repair: %s",
+            first_error,
+        )
+        repair_prompt = (
+            "Reformat the audit response below as valid JSON matching the original requested schema. "
+            "Preserve all scientific content, verdicts, scores, source IDs, unsupported claims, and "
+            "unsupported numbers exactly. Do not add or remove scientific conclusions. Return JSON only.\n\n"
+            f"Candidate audit response:\n{response}"
+        )
+        repaired_response = _call_llm(
+            repair_prompt,
+            temperature=0.0,
+            model=model,
+            system_prompt=system_prompt,
+        )
+        if repaired_response.startswith("Error:"):
+            return None, f"Hypothesis audit failed: {repaired_response}"
+        try:
+            payload = parse_payload(repaired_response)
+            response = repaired_response
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+            logger.error("Could not parse repaired hypothesis audit response: %s", repaired_response)
+            return None, f"Hypothesis audit failed after format repair: {exc}"
+
+    try:
         raw_audits = payload.get("audited_hypotheses")
         if not isinstance(raw_audits, list) or len(raw_audits) != len(hypotheses):
             raise ValueError("Expected one audited_hypotheses item per candidate.")
@@ -691,6 +820,77 @@ original draft. A rejected item may use null for final_hypothesis.
             if scores and max(scores.values()) <= 1:
                 scores = {score_name: score * 10 for score_name, score in scores.items()}
 
+            known_evidence_ref_ids = (
+                set(available_evidence_refs)
+                if available_evidence_refs is not None
+                else available_evidence_ref_ids
+            )
+            claim_assessments: list[dict] = []
+            raw_claim_assessments = raw_audit.get("claim_assessments", [])
+            if isinstance(raw_claim_assessments, list):
+                for claim_index, raw_claim in enumerate(raw_claim_assessments):
+                    if not isinstance(raw_claim, dict):
+                        continue
+                    claim = str(raw_claim.get("claim", "")).strip()
+                    status = str(raw_claim.get("support_status", "")).strip().casefold()
+                    if not claim or status not in {
+                        "entailed",
+                        "partially_supported",
+                        "unsupported",
+                        "contradicted",
+                    }:
+                        continue
+                    raw_chunk_ids = raw_claim.get("chunk_ids", [])
+                    chunk_ids = [
+                        str(chunk_id).strip()
+                        for chunk_id in raw_chunk_ids
+                        if isinstance(chunk_id, str)
+                        and str(chunk_id).strip()
+                        and (
+                            known_evidence_ref_ids is None
+                            or str(chunk_id).strip() in known_evidence_ref_ids
+                        )
+                    ] if isinstance(raw_chunk_ids, list) else []
+                    chunk_ids = list(dict.fromkeys(chunk_ids))
+                    raw_spans = raw_claim.get("evidence_spans", [])
+                    evidence_spans = [
+                        span.strip()
+                        for span in raw_spans
+                        if isinstance(span, str)
+                        and span.strip()
+                        and span.strip().casefold() in retrieved_context.casefold()
+                    ] if isinstance(raw_spans, list) else []
+                    source_id = _resolve_retrieved_source_id(
+                        str(raw_claim.get("source_id", "")),
+                        available_source_ids,
+                    )
+                    provenance = (
+                        available_evidence_refs.get(chunk_ids[0], {})
+                        if available_evidence_refs and chunk_ids
+                        else {}
+                    )
+                    if source_id is None and provenance:
+                        source_id = str(provenance.get("source_id", "")) or None
+                    if status in {"entailed", "partially_supported"} and not chunk_ids:
+                        status = "unsupported"
+                    assessment = EvidenceClaim(
+                        claim_id=str(raw_claim.get("claim_id") or f"claim_{claim_index + 1}"),
+                        claim=claim,
+                        support_status=status,
+                        source_id=source_id,
+                        chunk_ids=chunk_ids,
+                        evidence_spans=evidence_spans,
+                        section=str(provenance.get("section")) if provenance.get("section") else None,
+                        page=int(provenance["page"]) if provenance.get("page") is not None else None,
+                        evidence_type=(
+                            str(provenance.get("evidence_type"))
+                            if provenance.get("evidence_type") in {"full_text", "abstract_only"}
+                            else None
+                        ),
+                        reason=str(raw_claim.get("reason", "")).strip(),
+                    )
+                    claim_assessments.append(assessment.model_dump())
+
             final_hypothesis = raw_audit.get("final_hypothesis")
             valid_final = None
             valid_source_ids: list[str] = []
@@ -707,6 +907,17 @@ original draft. A rejected item may use null for final_hypothesis.
                     if valid_source_ids:
                         valid_final = {field: final_hypothesis[field].strip() for field in required_fields}
                         valid_final["source_ids"] = valid_source_ids
+                        raw_evidence_refs = final_hypothesis.get("evidence_refs", [])
+                        valid_final["evidence_refs"] = [
+                            str(value).strip()
+                            for value in raw_evidence_refs
+                            if isinstance(value, str)
+                            and str(value).strip()
+                            and (
+                                known_evidence_ref_ids is None
+                                or str(value).strip() in known_evidence_ref_ids
+                            )
+                        ] if isinstance(raw_evidence_refs, list) else []
 
             draft_unsupported_claims = tuple(
                 dict.fromkeys(
@@ -742,7 +953,10 @@ original draft. A rejected item may use null for final_hypothesis.
                     if isinstance(value, str) and value.strip()
                 )
             )
-            if valid_final is not None:
+            numeric_grounding_enabled = bool(
+                config.get("validation", {}).get("numeric_grounding_enabled", True)
+            )
+            if valid_final is not None and numeric_grounding_enabled:
                 unsupported_numbers = list(
                     dict.fromkeys(
                         (
@@ -750,6 +964,7 @@ original draft. A rejected item may use null for final_hypothesis.
                             *_numeric_specificity_not_in_evidence(
                                 valid_final,
                                 retrieved_context,
+                                research_goal,
                             ),
                         )
                     )
@@ -774,6 +989,11 @@ original draft. A rejected item may use null for final_hypothesis.
                 )
 
             audit_warnings = []
+            numeric_classifications = (
+                classify_numeric_specificity(valid_final, retrieved_context, research_goal)
+                if valid_final is not None and numeric_grounding_enabled
+                else []
+            )
             if unsupported_numbers:
                 scores["unsupported_specificity"] = min(
                     scores["unsupported_specificity"],
@@ -790,6 +1010,17 @@ original draft. A rejected item may use null for final_hypothesis.
             hard_failures = []
             if valid_final is None:
                 hard_failures.append("No valid final hypothesis with retrieved citations.")
+            elif known_evidence_ref_ids is not None and not valid_final.get("evidence_refs"):
+                hard_failures.append("No valid chunk-level evidence references.")
+            if known_evidence_ref_ids is not None and not claim_assessments:
+                hard_failures.append("No atomic claim assessments were provided.")
+            non_entailed_claims = [
+                assessment
+                for assessment in claim_assessments
+                if assessment["support_status"] != "entailed"
+            ]
+            if non_entailed_claims:
+                hard_failures.append("One or more final factual claims are not entailed by their evidence chunks.")
             if scores["evidence_validity"] < 5:
                 hard_failures.append("Evidence validity score is below 5/10.")
             if scores["claim_evidence_entailment"] < 5:
@@ -798,6 +1029,8 @@ original draft. A rejected item may use null for final_hypothesis.
                 hard_failures.append("Novelty score is below 5/10.")
             if unsupported_claims:
                 hard_failures.append("The final hypothesis contains unsupported claims.")
+            if unsupported_numbers:
+                hard_failures.append("The final hypothesis contains unsupported quantitative claims.")
             if weighted_score < 70:
                 hard_failures.append("Weighted audit score is below 70/100.")
             if str(raw_audit.get("verdict", "")).strip().casefold() == "reject":
@@ -811,6 +1044,8 @@ original draft. A rejected item may use null for final_hypothesis.
                 "draft_unsupported_numbers": draft_unsupported_numbers,
                 "unsupported_claims": list(unsupported_claims),
                 "unsupported_numbers": unsupported_numbers,
+                "numeric_classifications": numeric_classifications,
+                "claim_assessments": claim_assessments,
                 "warnings": audit_warnings,
                 "revision_instruction": str(raw_audit.get("revision_instruction", "")).strip(),
                 "verdict": "REJECT" if hard_failures else "PASS",
@@ -837,11 +1072,16 @@ def call_llm_for_evidence_coverage(
     model: str | None = None,
     max_gap_queries: int = 5,
 ) -> tuple[EvidenceCoverage | None, str | None]:
-    """Check collective evidence coverage and propose corrective searches."""
+    """Check abstract/metadata discovery coverage before any PDF acquisition."""
 
     aspect_text = "\n".join(f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements)
     prompt = f"""
-You are an evidence-coverage auditor for scientific hypothesis generation.
+You are the discovery-coverage auditor for scientific literature retrieval.
+
+This stage sees title, abstract, and metadata only. It decides whether the
+candidate paper pool broadly covers the research goal and whether search needs
+expansion. It does not certify detailed factual claims, methods, numerical
+results, limitations, or claim entailment.
 
 For each explicit requirement, identify exact retrieved Source IDs whose title
 and abstract substantively support that requirement. Do not infer support from
@@ -935,7 +1175,7 @@ Retrieved sources:
             reason=reason,
         )
         logger.info(
-            "Evidence coverage sufficient=%s missing=%s map=%s reason=%s",
+            "Discovery coverage sufficient=%s missing=%s map=%s reason=%s",
             coverage.sufficient,
             coverage.missing_aspect_ids,
             coverage.aspect_source_ids,
@@ -951,12 +1191,172 @@ Retrieved sources:
         return None, f"Evidence coverage grading failed: {exc}"
 
 
+def build_evidence_queries(
+    research_goal: str,
+    explicit_requirements: tuple[EvidenceAspect, ...],
+    *,
+    max_queries: int | None = None,
+) -> tuple[str, ...]:
+    """Build focused full-text queries without another large planning call."""
+
+    if max_queries is None:
+        max_queries = max(
+            1,
+            int(config.get("evidence_retrieval", {}).get("max_queries", 8)),
+        )
+    queries = [research_goal.strip()]
+    suffixes = (
+        "method mechanism implementation",
+        "experimental results metrics baseline comparison",
+        "limitations failure cases assumptions",
+    )
+    for requirement in explicit_requirements:
+        for suffix in suffixes:
+            queries.append(f"{requirement.description} {suffix}".strip())
+    return tuple(dict.fromkeys(query for query in queries if query))[:max_queries]
+
+
+def call_llm_for_full_text_evidence_coverage(
+    research_goal: str,
+    explicit_requirements: tuple[EvidenceAspect, ...],
+    retrieved_context: str,
+    available_evidence_refs: dict[str, dict],
+    model: str | None = None,
+    max_gap_queries: int = 5,
+) -> tuple[EvidenceCoverage | None, str | None]:
+    """Validate requirements against exact retrieved passages after indexing."""
+
+    aspect_text = "\n".join(
+        f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements
+    )
+    prompt = f"""
+You are the full-text evidence-coverage gate for scientific hypothesis generation.
+
+This stage runs after candidate papers were filtered by title/abstract and after
+accessible PDFs were parsed and searched. For every explicit requirement,
+identify the exact evidence chunks that directly establish useful methods,
+results, comparisons, assumptions, or limitations. Paper relevance alone is
+not evidence. Do not treat shared vocabulary as entailment.
+
+Abstract evidence has evidence_type=abstract_only. It may support only what its
+text explicitly states and must not be used to infer absent methods,
+limitations, experimental settings, or detailed results. Prefer full_text
+chunks when both evidence modes are present.
+
+Return only valid JSON:
+{{
+  "aspect_coverage": [
+    {{
+      "aspect_id": "exact aspect ID",
+      "evidence_refs": [
+        {{"source_id": "exact Source ID", "chunk_id": "exact chunk ID"}}
+      ]
+    }}
+  ],
+  "gap_queries": ["focused missing-evidence query"],
+  "reason": "brief passage-level coverage assessment"
+}}
+
+Research goal:
+{research_goal}
+
+Explicit requirements:
+{aspect_text}
+
+Retrieved evidence:
+{retrieved_context}
+""".strip()
+    response = _call_llm(prompt, temperature=0.0, model=model)
+    if response.startswith("Error:"):
+        return None, f"Full-text evidence coverage failed: {response}"
+
+    try:
+        fenced_match = re.search(
+            r"```(?:json)?\s*(.*?)\s*```",
+            response.strip(),
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        payload = json.loads(fenced_match.group(1) if fenced_match else response.strip())
+        raw_coverage = payload.get("aspect_coverage")
+        raw_gap_queries = payload.get("gap_queries")
+        if not isinstance(raw_coverage, list) or not isinstance(raw_gap_queries, list):
+            raise ValueError("Expected 'aspect_coverage' and 'gap_queries' arrays.")
+
+        known_aspect_ids = {aspect.aspect_id for aspect in explicit_requirements}
+        aspect_evidence_refs: dict[str, tuple[dict, ...]] = {
+            aspect_id: () for aspect_id in known_aspect_ids
+        }
+        aspect_source_ids: dict[str, tuple[str, ...]] = {
+            aspect_id: () for aspect_id in known_aspect_ids
+        }
+        for item in raw_coverage:
+            if not isinstance(item, dict):
+                continue
+            aspect_id = str(item.get("aspect_id", "")).strip()
+            raw_refs = item.get("evidence_refs")
+            if aspect_id not in known_aspect_ids or not isinstance(raw_refs, list):
+                continue
+            valid_refs: list[dict] = []
+            for raw_ref in raw_refs:
+                if not isinstance(raw_ref, dict):
+                    continue
+                chunk_id = str(raw_ref.get("chunk_id", "")).strip()
+                source_id = str(raw_ref.get("source_id", "")).strip()
+                known_ref = available_evidence_refs.get(chunk_id)
+                if known_ref is None or str(known_ref.get("source_id", "")) != source_id:
+                    continue
+                valid_refs.append(dict(known_ref))
+            deduplicated = {
+                str(ref["chunk_id"]): ref for ref in valid_refs if ref.get("chunk_id")
+            }
+            ordered_refs = tuple(deduplicated.values())
+            aspect_evidence_refs[aspect_id] = ordered_refs
+            aspect_source_ids[aspect_id] = tuple(
+                dict.fromkeys(str(ref["source_id"]) for ref in ordered_refs)
+            )
+
+        missing_aspect_ids = tuple(
+            aspect.aspect_id
+            for aspect in explicit_requirements
+            if not aspect_evidence_refs[aspect.aspect_id]
+        )
+        gap_queries = tuple(
+            dict.fromkeys(
+                query.strip()
+                for query in raw_gap_queries
+                if isinstance(query, str) and query.strip()
+            )
+        )[:max_gap_queries]
+        coverage = EvidenceCoverage(
+            aspect_source_ids=aspect_source_ids,
+            missing_aspect_ids=missing_aspect_ids,
+            gap_queries=gap_queries,
+            reason=str(payload.get("reason", "")).strip(),
+            aspect_evidence_refs=aspect_evidence_refs,
+            stage="full_text",
+        )
+        logger.info(
+            "Full-text evidence coverage sufficient=%s missing=%s refs=%s",
+            coverage.sufficient,
+            coverage.missing_aspect_ids,
+            {
+                aspect_id: [ref.get("chunk_id") for ref in refs]
+                for aspect_id, refs in coverage.aspect_evidence_refs.items()
+            },
+        )
+        return coverage, None
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        logger.error("Could not parse full-text evidence coverage response: %s", response, exc_info=True)
+        return None, f"Full-text evidence coverage failed: {exc}"
+
+
 @dataclass(frozen=True)
 class LiteratureFinding:
     """One source-grounded claim in the literature synthesis."""
 
     claim: str
     source_ids: tuple[str, ...]
+    evidence_refs: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -976,6 +1376,7 @@ def call_llm_for_literature_synthesis(
     retrieved_context: str,
     available_source_ids: set[str],
     model: str | None = None,
+    available_evidence_refs: dict[str, dict] | None = None,
 ) -> tuple[LiteratureSynthesis | None, str | None]:
     """Build a citation-validated literature review before generation."""
 
@@ -993,6 +1394,11 @@ knowledge gaps. Do not treat the research goal or optional exploration
 directions as evidence. Do not introduce facts, datasets, metrics, mechanisms,
 or results absent from the retrieved text.
 
+When full-text Results, Discussion, or Limitations evidence qualifies a claim
+made in an abstract, preserve that qualification. Detailed full-text evidence
+takes precedence over a stronger abstract-only interpretation. Never discard a
+limitation merely because the abstract states a positive headline result.
+
 The analytical rationale may connect established findings into promising
 research directions, but it must clearly distinguish established evidence from
 new inference. Optional exploration directions may guide analysis but are not
@@ -1001,10 +1407,22 @@ requirements and need not be present in the literature.
 Return only valid JSON:
 {{
   "established_findings": [
-    {{"claim": "source-supported finding", "source_ids": ["exact Source ID"]}}
+    {{
+      "claim": "source-supported finding",
+      "source_ids": ["exact Source ID"],
+      "evidence_refs": [
+        {{"source_id": "exact Source ID", "chunk_id": "exact chunk ID"}}
+      ]
+    }}
   ],
   "contradictions": [
-    {{"claim": "source-supported contradiction", "source_ids": ["exact Source ID"]}}
+    {{
+      "claim": "source-supported contradiction",
+      "source_ids": ["exact Source ID"],
+      "evidence_refs": [
+        {{"source_id": "exact Source ID", "chunk_id": "exact chunk ID"}}
+      ]
+    }}
   ],
   "knowledge_gaps": ["unresolved question supported by the review"],
   "analytical_rationale": "how the established findings motivate new, testable directions"
@@ -1054,11 +1472,39 @@ Retrieved sources:
                     raw_source_ids,
                     available_source_ids,
                 )
-                if valid_source_ids:
+                evidence_refs: list[dict] = []
+                raw_evidence_refs = raw_finding.get("evidence_refs", [])
+                if isinstance(raw_evidence_refs, list) and available_evidence_refs:
+                    for raw_ref in raw_evidence_refs:
+                        if not isinstance(raw_ref, dict):
+                            continue
+                        chunk_id = str(raw_ref.get("chunk_id", "")).strip()
+                        source_id = str(raw_ref.get("source_id", "")).strip()
+                        known_ref = available_evidence_refs.get(chunk_id)
+                        if known_ref is None or str(known_ref.get("source_id", "")) != source_id:
+                            continue
+                        evidence_refs.append(dict(known_ref))
+                if not evidence_refs and available_evidence_refs:
+                    for source_id in valid_source_ids:
+                        abstract_ref = available_evidence_refs.get(f"abstract:{source_id}")
+                        if abstract_ref is not None:
+                            evidence_refs.append(dict(abstract_ref))
+                evidence_refs = list(
+                    {str(ref["chunk_id"]): ref for ref in evidence_refs}.values()
+                )
+                if evidence_refs:
+                    valid_source_ids = list(
+                        dict.fromkeys(str(ref["source_id"]) for ref in evidence_refs)
+                    )
+                # Once chunk provenance is available, paper-level citations by
+                # themselves are not sufficient for an established finding.
+                provenance_valid = not available_evidence_refs or bool(evidence_refs)
+                if valid_source_ids and provenance_valid:
                     findings.append(
                         LiteratureFinding(
                             claim=claim,
                             source_ids=tuple(valid_source_ids),
+                            evidence_refs=tuple(evidence_refs),
                         )
                     )
             return tuple(findings)
@@ -1102,12 +1548,13 @@ def format_literature_synthesis(
 ) -> str:
     """Format the structured review for hypothesis generation prompts."""
 
-    findings = "\n".join(
-        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}" for finding in synthesis.established_findings
-    )
-    contradictions = "\n".join(
-        f"- {finding.claim} Sources: {', '.join(finding.source_ids)}" for finding in synthesis.contradictions
-    )
+    def format_finding(finding: LiteratureFinding) -> str:
+        chunk_ids = [str(ref.get("chunk_id")) for ref in finding.evidence_refs if ref.get("chunk_id")]
+        provenance = f" Evidence chunks: {', '.join(chunk_ids)}" if chunk_ids else ""
+        return f"- {finding.claim} Sources: {', '.join(finding.source_ids)}{provenance}"
+
+    findings = "\n".join(format_finding(finding) for finding in synthesis.established_findings)
+    contradictions = "\n".join(format_finding(finding) for finding in synthesis.contradictions)
     gaps = "\n".join(f"- {gap}" for gap in synthesis.knowledge_gaps)
     return (
         f"Established findings:\n{findings}\n\n"

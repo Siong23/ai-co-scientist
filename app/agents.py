@@ -16,8 +16,10 @@ from .agents_modules.generation_helpers import (
     _parse_generation_response,  # noqa: F401
     _resolve_retrieved_source_id,  # noqa: F401
     _resolve_retrieved_source_ids,  # noqa: F401
+    build_evidence_queries,
     call_llm_for_debate_refinement,
     call_llm_for_evidence_coverage,
+    call_llm_for_full_text_evidence_coverage,
     call_llm_for_generation,
     call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
@@ -75,6 +77,7 @@ __all__ = [
     "call_llm",
     "call_llm_for_debate_refinement",
     "call_llm_for_evidence_coverage",
+    "call_llm_for_full_text_evidence_coverage",
     "call_llm_for_generation",
     "call_llm_for_hypothesis_audit",
     "call_llm_for_literature_synthesis",
@@ -82,6 +85,7 @@ __all__ = [
     "call_llm_for_reflection",
     "call_llm_for_search_queries",
     "combine_hypotheses",
+    "build_evidence_queries",
     "format_documents_for_prompt",
     "format_literature_synthesis",
     "format_references",

@@ -16,4 +16,5 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
     new_hypothesis = Hypothesis(new_id, combined_title, combined_text)
     new_hypothesis.parent_ids = [hypoA.hypothesis_id, hypoB.hypothesis_id]
     new_hypothesis.evidence_source_ids = list(dict.fromkeys(hypoA.evidence_source_ids + hypoB.evidence_source_ids))
+    new_hypothesis.evidence_refs = list(dict.fromkeys(hypoA.evidence_refs + hypoB.evidence_refs))
     return new_hypothesis

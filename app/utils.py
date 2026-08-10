@@ -112,7 +112,10 @@ def classify_llm_error(error_text: str) -> str:
         or "missing explicit requirements" in text
     ):
         return "Insufficient retrieved evidence"
-    if "rejected by the novelty and grounding audit" in text:
+    if (
+        "rejected by the novelty and grounding audit" in text
+        or "rejected or left unverified by the grounding audit" in text
+    ):
         return "Hypothesis quality gate rejected all candidates"
     return "LLM/API error"
 

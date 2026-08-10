@@ -107,6 +107,10 @@ For each candidate:
 2. Check whether the cited sources actually entail each established statement
    in the rationale. A proposed relationship may remain an explicitly labeled
    hypothesis, but it must not be presented as an established fact.
+   Decompose the rationale into atomic factual claims. Match the semantic
+   subject, component, metric, setting, and relationship against exact evidence
+   chunks. A number attached to a different component is unsupported even when
+   the same number occurs elsewhere in the evidence.
 3. Identify the closest retrieved prior art and determine whether the proposed
    contribution substantially duplicates it.
 4. Judge whether the candidate synthesizes a genuine unresolved interaction
@@ -144,6 +148,17 @@ Return only valid JSON:
         "operational_falsifiability": 0,
         "unsupported_specificity": 0
       },
+      "claim_assessments": [
+        {
+          "claim_id": "claim_1",
+          "claim": "one atomic established factual statement from the final rationale",
+          "source_id": "exact supplied Source ID",
+          "chunk_ids": ["exact supplied chunk ID"],
+          "evidence_spans": ["short exact span copied from the supplied evidence"],
+          "support_status": "entailed | partially_supported | unsupported | contradicted",
+          "reason": "brief subject/metric/setting comparison"
+        }
+      ],
       "closest_prior_art": [
         {
           "source_id": "exact supplied Source ID",
@@ -162,7 +177,8 @@ Return only valid JSON:
         "hypothesis": "...",
         "rationale": "...",
         "feasibility": "include metric, baseline, and rejection criterion",
-        "source_ids": ["exact supplied Source ID"]
+        "source_ids": ["exact supplied Source ID"],
+        "evidence_refs": ["exact supplied chunk ID"]
       }
     }
   ]
@@ -213,17 +229,62 @@ class GenerationAgent:
 
         return self.rag_retriever.retrieve_original_goal(research_goal.description)
 
-    def _enrich_with_full_text(self, documents, research_goal: ResearchGoal):
+    def _enrich_with_full_text(
+        self,
+        documents,
+        research_goal: ResearchGoal,
+        query_plan: SearchQueryPlan | None = None,
+    ):
         """Use relevant paper bodies when available without blocking generation."""
 
         try:
-            return self.paper_library.enrich_documents(documents, research_goal.description)
+            evidence_queries = _legacy.build_evidence_queries(
+                research_goal.description,
+                query_plan.explicit_requirements if query_plan is not None else (),
+            )
+            return self.paper_library.enrich_documents(documents, evidence_queries)
         except Exception as exc:
             _legacy.logger.warning(
                 "Paper download/vector indexing failed; continuing with abstracts: %s",
                 _legacy.redact_secrets(str(exc)),
             )
             return list(documents)
+
+    @staticmethod
+    def _ensure_evidence_metadata(documents):
+        """Give abstract fallbacks explicit evidence identities and modes."""
+
+        normalized = []
+        for document in documents:
+            metadata = dict(document.metadata)
+            source_id = str(metadata.get("source_id", ""))
+            refs = metadata.get("evidence_refs")
+            if not isinstance(refs, list) or not refs:
+                refs = [
+                    {
+                        "source_id": source_id,
+                        "chunk_id": f"abstract:{source_id}",
+                        "section": "Abstract",
+                        "page": None,
+                        "evidence_type": "abstract_only",
+                    }
+                ]
+                metadata["evidence_refs"] = refs
+            metadata.setdefault("evidence_status", "abstract_only")
+            metadata.setdefault("evidence_mode", "abstract_only")
+            metadata.setdefault("full_text_indexed", False)
+            metadata.setdefault("full_text_chunks_used", 0)
+            normalized.append(type(document)(page_content=document.page_content, metadata=metadata))
+        return normalized
+
+    @staticmethod
+    def _available_evidence_refs(documents) -> dict[str, dict]:
+        refs: dict[str, dict] = {}
+        for document in documents:
+            for ref in document.metadata.get("evidence_refs", []):
+                if isinstance(ref, dict) and ref.get("chunk_id"):
+                    refs[str(ref["chunk_id"])] = dict(ref)
+        return refs
 
     @staticmethod
     def _build_minimal_fallback_plan(research_goal: str) -> SearchQueryPlan:
@@ -393,6 +454,7 @@ Your refined contribution:
                 return [], [f"Expanded RAG retrieval failed: {exc}"]
 
         retrieved_documents = []
+        shortlisted_documents = []
         coverage = None
         corrective_round = 0
         fallback_attempted = False
@@ -408,24 +470,35 @@ Your refined contribution:
             )
             if relevance_error or relevant_source_ids is None:
                 _legacy.logger.warning(
-                    "Evidence relevance grading was unavailable; coverage "
-                    "will still audit all %d candidate source(s): %s",
+                    "Abstract candidate filtering was unavailable; discovery coverage "
+                    "will conservatively inspect all %d candidate source(s): %s",
                     len(candidate_documents),
                     relevance_error or "no relevance result",
                 )
-                relevant_source_ids = []
+                shortlisted_documents = list(candidate_documents)
             else:
+                selected_ids = set(relevant_source_ids)
+                shortlisted_documents = [
+                    document
+                    for document in candidate_documents
+                    if str(document.metadata.get("source_id", "")) in selected_ids
+                ]
                 _legacy.logger.info(
-                    "RAG candidate count=%d relevance suggestions=%s",
+                    "Abstract candidate filter retained %d/%d sources: %s",
+                    len(shortlisted_documents),
                     len(candidate_documents),
                     relevant_source_ids,
                 )
 
+            discovery_context = format_documents_for_prompt(shortlisted_documents)
+            discovery_source_ids = {
+                str(document.metadata["source_id"]) for document in shortlisted_documents
+            }
             coverage, coverage_error = _legacy.call_llm_for_evidence_coverage(
                 research_goal.description,
                 query_plan.explicit_requirements,
-                candidate_context,
-                candidate_source_ids,
+                discovery_context,
+                discovery_source_ids,
                 model=research_goal.llm_model,
                 max_gap_queries=self.rag_retriever.query_count,
             )
@@ -554,14 +627,16 @@ Your refined contribution:
         coverage_source_ids = {
             source_id for source_ids in coverage.aspect_source_ids.values() for source_id in source_ids
         }
-        retrieved_documents = [
-            document for document in candidate_documents if str(document.metadata["source_id"]) in coverage_source_ids
+        coverage_documents = [
+            document
+            for document in shortlisted_documents
+            if str(document.metadata["source_id"]) in coverage_source_ids
         ]
         minimum_sources = self.rag_retriever.minimum_relevant_sources
-        if len(retrieved_documents) < minimum_sources:
+        if len(coverage_documents) < minimum_sources:
             error = (
-                f"RAG coverage auditing confirmed {len(retrieved_documents)} "
-                "supporting arXiv source(s), but at least "
+                f"Discovery coverage confirmed {len(coverage_documents)} "
+                "supporting source(s), but at least "
                 f"{minimum_sources} are required. Hypothesis generation "
                 "was not executed."
             )
@@ -569,11 +644,88 @@ Your refined contribution:
             context.last_retrieved_sources = []
             return [], [error]
 
-        retrieved_documents = self._enrich_with_full_text(retrieved_documents, research_goal)
-        context.last_retrieved_sources = serialize_documents(retrieved_documents)
+        # Put discovery-coverage sources first, then use the remaining relevant
+        # shortlist up to the configurable acquisition budget. Prompt size is
+        # independently bounded by passage retrieval.
+        prioritized_ids = [str(document.metadata["source_id"]) for document in coverage_documents]
+        prioritized_ids.extend(
+            str(document.metadata["source_id"])
+            for document in shortlisted_documents
+            if str(document.metadata["source_id"]) not in prioritized_ids
+        )
+        documents_by_id = {
+            str(document.metadata["source_id"]): document for document in shortlisted_documents
+        }
+        retrieved_documents = [documents_by_id[source_id] for source_id in prioritized_ids]
+        retrieved_documents = self._enrich_with_full_text(
+            retrieved_documents,
+            research_goal,
+            query_plan,
+        )
+        retrieved_documents = self._ensure_evidence_metadata(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
+        available_evidence_refs = self._available_evidence_refs(retrieved_documents)
+
+        has_full_text_evidence = any(
+            ref.get("evidence_type") == "full_text"
+            for ref in available_evidence_refs.values()
+        )
+        if has_full_text_evidence:
+            full_text_coverage, full_text_coverage_error = (
+                _legacy.call_llm_for_full_text_evidence_coverage(
+                    research_goal.description,
+                    query_plan.explicit_requirements,
+                    retrieved_context,
+                    available_evidence_refs,
+                    model=research_goal.llm_model,
+                    max_gap_queries=self.rag_retriever.query_count,
+                )
+            )
+            if full_text_coverage_error or full_text_coverage is None:
+                context.last_retrieved_sources = serialize_documents(retrieved_documents)
+                error = full_text_coverage_error or "Full-text evidence coverage failed."
+                _legacy.logger.error(error)
+                return [], [error]
+            if not full_text_coverage.sufficient:
+                missing_descriptions = [
+                    aspect.description
+                    for aspect in query_plan.explicit_requirements
+                    if aspect.aspect_id in full_text_coverage.missing_aspect_ids
+                ]
+                context.last_retrieved_sources = serialize_documents(retrieved_documents)
+                return [], [
+                    "Full-text evidence is insufficient for: "
+                    + "; ".join(missing_descriptions)
+                    + ". Hypothesis generation abstained."
+                ]
+            evidence_coverage = full_text_coverage
+        else:
+            abstract_refs = {
+                aspect_id: tuple(
+                    available_evidence_refs[f"abstract:{source_id}"]
+                    for source_id in source_ids
+                    if f"abstract:{source_id}" in available_evidence_refs
+                )
+                for aspect_id, source_ids in coverage.aspect_source_ids.items()
+            }
+            evidence_coverage = _legacy.EvidenceCoverage(
+                aspect_source_ids=coverage.aspect_source_ids,
+                missing_aspect_ids=coverage.missing_aspect_ids,
+                gap_queries=coverage.gap_queries,
+                reason="Abstract-only fallback: " + coverage.reason,
+                aspect_evidence_refs=abstract_refs,
+                stage="full_text_fallback",
+            )
+
+        context.last_retrieved_sources = serialize_documents(retrieved_documents)
         coverage_map = "\n".join(
-            (f"- {aspect.description}: " + ", ".join(coverage.aspect_source_ids[aspect.aspect_id]))
+            (
+                f"- {aspect.description}: "
+                + ", ".join(
+                    str(ref.get("chunk_id"))
+                    for ref in evidence_coverage.aspect_evidence_refs.get(aspect.aspect_id, ())
+                )
+            )
             for aspect in query_plan.explicit_requirements
         )
 
@@ -586,6 +738,7 @@ Your refined contribution:
             retrieved_context,
             allowed_source_ids,
             model=research_goal.llm_model,
+            available_evidence_refs=available_evidence_refs,
         )
         if synthesis_error or synthesis is None:
             context.last_retrieved_sources = []
@@ -625,7 +778,7 @@ Your refined contribution:
             "from established findings rather than presenting it as fact.\n"
             "If the evidence is insufficient or not directly relevant, "
             "do not generate hypotheses; return the specified error object.\n"
-            f"Otherwise, propose {num_to_generate} concise, novel, feasible, "
+            f"Otherwise, propose up to {num_to_generate} concise, novel, feasible, "
             "specific, and experimentally testable hypotheses.\n"
             "Use this output structure for every item:\n"
             "- title: a short descriptive name.\n"
@@ -635,12 +788,16 @@ Your refined contribution:
             "- feasibility: a concise practical method for testing the claim, "
             "including measurable outcomes where supported.\n"
             "- source_ids: the exact retrieved Source IDs supporting it.\n"
-            "Return exactly these five fields and no additional prose "
+            "- evidence_refs: exact chunk IDs supporting established rationale statements.\n"
+            "Return these six fields and no additional prose "
             "sections inside each item.\n"
             "Include only exact Source IDs present in the retrieved evidence. "
             "Do not invent Source IDs. Every hypothesis must cite the specific "
             "retrieved sources supporting it in source_ids; cite more than one "
             "source when the claim combines evidence from multiple papers.\n"
+            "Every evidence_refs value must be an exact chunk_id present in the "
+            "retrieved evidence. Abstract chunk IDs may support only statements "
+            "explicitly present in that abstract.\n"
         )
 
         raw_output = _legacy.call_llm_for_generation(
@@ -657,39 +814,96 @@ Your refined contribution:
         )
 
         context.last_hypothesis_audits = []
-        if self.audit_enabled and raw_output and not any(item.get("title") == "Error" for item in raw_output):
-            audits, audit_error = _legacy.call_llm_for_hypothesis_audit(
-                research_goal.description,
-                raw_output,
-                retrieved_context,
-                allowed_source_ids,
-                model=research_goal.llm_model,
-                system_prompt=HYPOTHESIS_AUDITOR_SYSTEM_PROMPT,
+        if self.audit_enabled and raw_output:
+            validation_config = config.get("validation", {})
+            audit_context_limit = max(
+                2000,
+                int(validation_config.get("audit_max_evidence_chars", 9000)),
             )
-            if audit_error or audits is None:
-                context.last_hypothesis_audits = []
-                error = audit_error or "Hypothesis audit failed."
-                _legacy.logger.error(error)
-                return [], [error]
-
-            context.last_hypothesis_audits = [audit["audit_report"] for audit in audits]
-            rejected_audits = [audit for audit in audits if not audit["passed"]]
-            for audit in rejected_audits:
-                _legacy.logger.warning(
-                    "Hypothesis candidate %d rejected by novelty audit: %s",
-                    audit["candidate_index"],
-                    audit["audit_report"]["hard_failures"],
-                )
-            raw_output = [
-                {
-                    **audit["final_hypothesis"],
-                    "_audit_report": audit["audit_report"],
-                }
-                for audit in audits
-                if audit["passed"] and audit["final_hypothesis"] is not None
+            accepted_output: list[dict] = [
+                candidate for candidate in raw_output if candidate.get("title") == "Error"
             ]
-            if not raw_output:
-                return [], ["All generated hypotheses were rejected by the novelty and grounding audit."]
+            verified_count = 0
+            saw_candidate = False
+            for candidate_index, candidate in enumerate(raw_output):
+                if candidate.get("title") == "Error":
+                    continue
+                saw_candidate = True
+                candidate_source_ids = _legacy._resolve_retrieved_source_ids(
+                    candidate.get("source_ids", []),
+                    allowed_source_ids,
+                )
+                candidate_documents = [
+                    document
+                    for document in retrieved_documents
+                    if str(document.metadata.get("source_id")) in candidate_source_ids
+                ] or retrieved_documents
+                candidate_context = format_documents_for_prompt(candidate_documents)
+                if len(candidate_context) > audit_context_limit:
+                    candidate_context = (
+                        candidate_context[:audit_context_limit]
+                        + "\n[Evidence context truncated at the configured audit limit.]"
+                    )
+                audits, audit_error = _legacy.call_llm_for_hypothesis_audit(
+                    research_goal.description,
+                    [candidate],
+                    candidate_context,
+                    allowed_source_ids,
+                    model=research_goal.llm_model,
+                    system_prompt=HYPOTHESIS_AUDITOR_SYSTEM_PROMPT,
+                    available_evidence_ref_ids=set(available_evidence_refs),
+                    available_evidence_refs=available_evidence_refs,
+                )
+                if audit_error or not audits:
+                    report = {
+                        "candidate_index": candidate_index,
+                        "scores": {},
+                        "weighted_score": None,
+                        "closest_prior_art": [],
+                        "unsupported_claims": [],
+                        "unsupported_numbers": [],
+                        "claim_assessments": [],
+                        "warnings": [audit_error or "Hypothesis audit failed."],
+                        "revision_instruction": "",
+                        "verdict": "UNVERIFIED",
+                        "hard_failures": ["Audit output could not be verified."],
+                    }
+                    context.last_hypothesis_audits.append(report)
+                    _legacy.logger.error(
+                        "Hypothesis candidate %d is UNVERIFIED: %s",
+                        candidate_index,
+                        audit_error or "missing audit result",
+                    )
+                    continue
+
+                audit = audits[0]
+                audit["candidate_index"] = candidate_index
+                audit["audit_report"]["candidate_index"] = candidate_index
+                context.last_hypothesis_audits.append(audit["audit_report"])
+                if not audit["passed"] or audit["final_hypothesis"] is None:
+                    _legacy.logger.warning(
+                        "Hypothesis candidate %d rejected by grounding audit: %s",
+                        candidate_index,
+                        audit["audit_report"]["hard_failures"],
+                    )
+                    continue
+                accepted_output.append(
+                    {
+                        **audit["final_hypothesis"],
+                        "_audit_report": audit["audit_report"],
+                    }
+                )
+                verified_count += 1
+            raw_output = accepted_output
+            if saw_candidate and verified_count == 0:
+                return [], [
+                    "All generated hypotheses were rejected or left unverified by the grounding audit."
+                ]
+
+        if not raw_output:
+            return [], [
+                "Generation abstained because no sufficiently grounded hypothesis was produced."
+            ]
 
         new_hypos: List[Hypothesis] = []
         errors: List[str] = []
@@ -739,6 +953,13 @@ Your refined contribution:
                 ),
             )
             hypothesis.evidence_source_ids = valid_source_ids
+            raw_evidence_refs = idea.get("evidence_refs", [])
+            hypothesis.evidence_refs = [
+                str(value).strip()
+                for value in raw_evidence_refs
+                if isinstance(value, str)
+                and str(value).strip() in available_evidence_refs
+            ] if isinstance(raw_evidence_refs, list) else []
             audit_report = idea.get("_audit_report")
             if isinstance(audit_report, dict):
                 hypothesis.audit_report = audit_report

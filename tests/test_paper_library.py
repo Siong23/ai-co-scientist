@@ -117,7 +117,10 @@ def test_enrichment_adds_bounded_full_text_and_index_metadata(tmp_path, monkeypa
 
     assert enriched[0].metadata["full_text_indexed"] is True
     assert enriched[0].metadata["full_text_chunks_used"] == 1
-    assert "[Full-text evidence, page 4]" in enriched[0].page_content
+    assert '<evidence chunk_id="' in enriched[0].page_content
+    assert 'page="4" evidence_type="full_text"' in enriched[0].page_content
+    assert enriched[0].metadata["evidence_status"] == "full_text"
+    assert enriched[0].metadata["evidence_refs"][1]["chunk_id"]
     assert "A" * 36 not in enriched[0].page_content
 
 
@@ -141,3 +144,26 @@ def test_generation_full_text_failure_falls_back_to_abstracts(monkeypatch):
     documents = [_document()]
 
     assert agent._enrich_with_full_text(documents, ResearchGoal("Reduce latency")) == documents
+
+
+def test_collection_name_changes_when_index_schema_changes(tmp_path):
+    first = _library(tmp_path)
+    second = _library(tmp_path)
+    second.index_schema_version = "next-schema"
+
+    assert first.collection_name != second.collection_name
+
+
+def test_enrichment_records_abstract_only_and_full_text_failed_status(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    no_pdf = _document("arXiv:1111.1111")
+    no_pdf.metadata.pop("pdf_url")
+    failed_pdf = _document("arXiv:2222.2222")
+
+    monkeypatch.setattr(library, "ensure_indexed", lambda _document: (_ for _ in ()).throw(RuntimeError("bad PDF")))
+
+    enriched = library.enrich_documents([no_pdf, failed_pdf], "latency evidence")
+
+    assert enriched[0].metadata["evidence_status"] == "abstract_only"
+    assert enriched[1].metadata["evidence_status"] == "full_text_failed"
+    assert all(document.metadata["evidence_mode"] == "abstract_only" for document in enriched)

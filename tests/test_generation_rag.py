@@ -49,8 +49,8 @@ def _paper(
     }
 
 
-def test_production_generation_default_does_not_run_hypothesis_auditor():
-    assert GenerationAgent().audit_enabled is False
+def test_production_generation_default_runs_hardened_hypothesis_auditor():
+    assert GenerationAgent().audit_enabled is True
 
 
 def _query_plan_payload(
@@ -337,7 +337,7 @@ def test_hypothesis_auditor_revises_and_passes_a_grounded_candidate():
     }
 
 
-def test_hypothesis_auditor_warns_and_penalizes_numeric_precision_absent_from_evidence():
+def test_hypothesis_auditor_rejects_numeric_precision_absent_from_evidence():
     final_hypothesis = {
         "title": "Invented precision",
         "hypothesis": "The method will improve throughput by 10%.",
@@ -355,10 +355,13 @@ def test_hypothesis_auditor_warns_and_penalizes_numeric_precision_absent_from_ev
 
     assert error is None
     assert audits is not None
-    assert audits[0]["passed"] is True
+    assert audits[0]["passed"] is False
     assert audits[0]["audit_report"]["unsupported_numbers"] == ["10%"]
     assert audits[0]["audit_report"]["scores"]["unsupported_specificity"] == 5.0
     assert audits[0]["audit_report"]["warnings"]
+    assert "unsupported quantitative claims" in " ".join(
+        audits[0]["audit_report"]["hard_failures"]
+    )
 
 
 def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
@@ -446,6 +449,99 @@ def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
     assert hypotheses[0].audit_verdict == "PASS"
     assert hypotheses[0].audit_score == 82.0
     assert context.last_hypothesis_audits == [audit["audit_report"]]
+
+
+def test_generation_audits_candidates_individually_and_keeps_verified_survivors():
+    source_id = "arXiv:1111.1111"
+    document = Document(
+        page_content="Source ID: arXiv:1111.1111\nAbstract: A grounded premise.",
+        metadata={
+            "source_id": source_id,
+            "arxiv_id": "1111.1111",
+            "title": "Prior work",
+            "abstract": "A grounded premise.",
+        },
+    )
+    plan = SearchQueryPlan(
+        queries=("grounded premise",),
+        required_terms=(),
+        explicit_requirements=(EvidenceAspect("premise", "grounded premise"),),
+    )
+    coverage = EvidenceCoverage(
+        aspect_source_ids={"premise": (source_id,)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Covered.",
+    )
+    synthesis = LiteratureSynthesis(
+        established_findings=(LiteratureFinding("A grounded premise.", (source_id,)),),
+        contradictions=(),
+        knowledge_gaps=("A comparison remains untested.",),
+        analytical_rationale="The premise motivates a comparison.",
+    )
+    drafts = [
+        {
+            "title": "Malformed audit candidate",
+            "hypothesis": "Candidate one.",
+            "rationale": "Grounded premise.",
+            "feasibility": "Compare baselines.",
+            "source_ids": [source_id],
+            "evidence_refs": [f"abstract:{source_id}"],
+        },
+        {
+            "title": "Verified candidate",
+            "hypothesis": "Candidate two.",
+            "rationale": "Grounded premise.",
+            "feasibility": "Compare baselines.",
+            "source_ids": [source_id],
+            "evidence_refs": [f"abstract:{source_id}"],
+        },
+    ]
+    final = {**drafts[1], "title": "Verified survivor"}
+    passing_audit = {
+        "candidate_index": 0,
+        "passed": True,
+        "final_hypothesis": final,
+        "audit_report": {
+            "scores": {},
+            "weighted_score": 80.0,
+            "closest_prior_art": [],
+            "unsupported_claims": [],
+            "unsupported_numbers": [],
+            "warnings": [],
+            "revision_instruction": "",
+            "verdict": "PASS",
+            "hard_failures": [],
+        },
+    }
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        debate_rounds=0,
+        audit_enabled=True,
+    )
+    with (
+        patch("app.agents.call_llm_for_search_queries", return_value=(plan, None)),
+        patch.object(agent, "_retrieve_scientific_sources", return_value=[document]),
+        patch("app.agents.call_llm_for_relevance_filter", return_value=([source_id], None)),
+        patch("app.agents.call_llm_for_evidence_coverage", return_value=(coverage, None)),
+        patch("app.agents.call_llm_for_literature_synthesis", return_value=(synthesis, None)),
+        patch("app.agents.call_llm_for_generation", return_value=drafts),
+        patch(
+            "app.agents.call_llm_for_hypothesis_audit",
+            side_effect=[(None, "malformed JSON"), ([passing_audit], None)],
+        ) as mock_audit,
+    ):
+        context = ContextMemory()
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("Test a grounded premise.", num_hypotheses=2),
+            context,
+        )
+
+    assert errors == []
+    assert [hypothesis.title for hypothesis in hypotheses] == ["Verified survivor"]
+    assert mock_audit.call_count == 2
+    assert context.last_hypothesis_audits[0]["verdict"] == "UNVERIFIED"
+    assert context.last_hypothesis_audits[1]["verdict"] == "PASS"
 
 
 def test_query_rewriting_allows_no_required_entity_terms():
@@ -710,8 +806,8 @@ def test_relevance_grader_keeps_only_known_directly_relevant_sources():
         "model": "chosen-model",
     }
     grader_prompt = mock_call.call_args.args[0]
-    assert "Keyword overlap" in grader_prompt
-    assert "Exclude lexical collisions" in grader_prompt
+    assert "high-recall candidate-paper filter" in grader_prompt
+    assert "lexical collisions" in grader_prompt
 
 
 def test_source_id_resolution_rejects_ambiguous_retrieved_versions():
@@ -1190,6 +1286,7 @@ def test_generation_stops_when_model_reports_insufficient_context():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
+        audit_enabled=True,
     )
     document = Mock()
     document.page_content = "Source ID: arXiv:1234.5678\nAbstract: limited evidence"
@@ -1229,9 +1326,10 @@ def test_generation_stops_when_model_reports_insufficient_context():
     assert errors == ["The retrieved context is insufficient to generate grounded hypotheses."]
 
 
-def test_empty_relevance_suggestion_does_not_override_complete_coverage():
+def test_empty_candidate_filter_abstains_before_pdf_acquisition():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
+        corrective_retrieval_rounds=0,
         debate_rounds=0,
     )
     document = Mock()
@@ -1243,44 +1341,51 @@ def test_empty_relevance_suggestion_does_not_override_complete_coverage():
         "abstract": "Context-aware computer systems.",
     }
 
-    generation_payload = json.dumps(
-        [
-            {
-                "title": "Coverage-grounded hypothesis",
-                "hypothesis": "A grounded relationship can be tested.",
-                "rationale": "The coverage-confirmed evidence supports it.",
-                "feasibility": "Evaluate the relationship empirically.",
-                "source_ids": ["0912.1838"],
-            }
-        ]
+    incomplete_coverage = EvidenceCoverage(
+        aspect_source_ids={"goal_scope": ()},
+        missing_aspect_ids=("goal_scope",),
+        gap_queries=("Malaysia scholarly history",),
+        reason="No candidate survived the abstract gate.",
     )
 
+    class RecordingLibrary:
+        def __init__(self):
+            self.calls = []
+
+        def enrich_documents(self, documents, queries):
+            self.calls.append((documents, queries))
+            return list(documents)
+
+    library = RecordingLibrary()
+    agent.paper_library = library
+
     with (
-        patch(
-            "app.agents.call_llm",
-            side_effect=[
-                _query_plan_payload("Malaysia history"),
-                _relevance_payload(),
-                _coverage_payload("0912.1838"),
-                _synthesis_payload("0912.1838"),
-                generation_payload,
-            ],
-        ) as mock_llm,
+        patch("app.agents.call_llm", return_value=_query_plan_payload("Malaysia history")),
         patch.object(
-            GenerationAgent,
+            agent,
             "_retrieve_scientific_sources",
             return_value=[document],
         ),
+        patch("app.agents.call_llm_for_relevance_filter", return_value=([], None)),
+        patch(
+            "app.agents.call_llm_for_evidence_coverage",
+            return_value=(incomplete_coverage, None),
+        ),
+        patch.object(agent.rag_retriever, "retrieve_fallback", return_value=[]),
+        patch("app.agents.call_llm_for_literature_synthesis") as mock_synthesis,
+        patch("app.agents.call_llm_for_generation") as mock_generation,
     ):
         hypotheses, errors = agent.generate_new_hypotheses(
             ResearchGoal("Malaysia history"),
             ContextMemory(),
         )
 
-    assert errors == []
-    assert len(hypotheses) == 1
-    assert hypotheses[0].evidence_source_ids == ["arXiv:0912.1838v1"]
-    assert mock_llm.call_count == 5
+    assert hypotheses == []
+    assert len(errors) == 1
+    assert "insufficient" in errors[0].casefold()
+    assert library.calls == []
+    mock_synthesis.assert_not_called()
+    mock_generation.assert_not_called()
 
 
 def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
@@ -1373,7 +1478,7 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
         **kwargs,
     ):
         candidate_contexts.append(retrieved_context)
-        assert len(available_source_ids) == 5
+        assert len(available_source_ids) == 4
         return coverage, None
 
     agent = GenerationAgent(
@@ -1401,7 +1506,15 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
         ),
         patch(
             "app.agents.call_llm_for_relevance_filter",
-            return_value=([], None),
+            return_value=(
+                [
+                    "arXiv:2101.00001v1",
+                    "arXiv:2102.00002v2",
+                    "arXiv:2103.00003v1",
+                    "arXiv:2104.00004v3",
+                ],
+                None,
+            ),
         ),
         patch(
             "app.agents.call_llm_for_evidence_coverage",
@@ -1422,7 +1535,7 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
         "arXiv:2103.00003v1",
         "arXiv:2104.00004v3",
     ]
-    assert "IRRELEVANT_UNIQUE" in candidate_contexts[0]
+    assert "IRRELEVANT_UNIQUE" not in candidate_contexts[0]
     synthesis_prompt = mock_llm.call_args_list[1].args[0]
     generation_prompt = mock_llm.call_args_list[2].args[0]
     assert "IRRELEVANT_UNIQUE" not in synthesis_prompt
@@ -1436,6 +1549,152 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
         "arXiv:2103.00003v1",
         "arXiv:2104.00004v3",
     }
+
+
+def test_full_text_coverage_runs_after_shortlist_acquisition_and_before_synthesis():
+    source_id = "arXiv:3101.00001"
+    relevant = Document(
+        page_content="Source ID: arXiv:3101.00001\nAbstract: Relevant latency evidence.",
+        metadata={
+            "source_id": source_id,
+            "arxiv_id": "3101.00001",
+            "title": "Relevant paper",
+            "abstract": "Relevant latency evidence.",
+            "pdf_url": "https://arxiv.org/pdf/3101.00001",
+        },
+    )
+    irrelevant = Document(
+        page_content="Source ID: arXiv:3101.99999\nAbstract: Unrelated evidence.",
+        metadata={
+            "source_id": "arXiv:3101.99999",
+            "arxiv_id": "3101.99999",
+            "title": "Unrelated paper",
+            "abstract": "Unrelated evidence.",
+            "pdf_url": "https://arxiv.org/pdf/3101.99999",
+        },
+    )
+    plan = SearchQueryPlan(
+        queries=("latency evidence",),
+        required_terms=(),
+        explicit_requirements=(EvidenceAspect("latency", "latency evidence"),),
+    )
+    discovery = EvidenceCoverage(
+        aspect_source_ids={"latency": (source_id,)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Abstract discovery is covered.",
+    )
+    full_ref = {
+        "source_id": source_id,
+        "chunk_id": "chunk-results-1",
+        "section": "Results",
+        "page": 7,
+        "evidence_type": "full_text",
+        "text": "The measured latency was lower than the baseline.",
+    }
+    full_coverage = EvidenceCoverage(
+        aspect_source_ids={"latency": (source_id,)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Full-text evidence is covered.",
+        aspect_evidence_refs={"latency": (full_ref,)},
+        stage="full_text",
+    )
+    synthesis = LiteratureSynthesis(
+        established_findings=(
+            LiteratureFinding(
+                "The evaluated method had lower latency than its baseline.",
+                (source_id,),
+                (full_ref,),
+            ),
+        ),
+        contradictions=(),
+        knowledge_gaps=("A new controller remains untested.",),
+        analytical_rationale="The measured limitation motivates a new comparison.",
+    )
+    events = []
+
+    class RecordingLibrary:
+        def enrich_documents(self, documents, queries):
+            events.append("pdf_acquisition_and_chunk_retrieval")
+            assert [document.metadata["source_id"] for document in documents] == [source_id]
+            assert any("experimental results" in query for query in queries)
+            metadata = dict(documents[0].metadata)
+            metadata.update(
+                {
+                    "full_text_indexed": True,
+                    "full_text_chunks_used": 1,
+                    "evidence_status": "full_text",
+                    "evidence_mode": "full_text",
+                    "evidence_refs": [
+                        {
+                            "source_id": source_id,
+                            "chunk_id": f"abstract:{source_id}",
+                            "section": "Abstract",
+                            "page": None,
+                            "evidence_type": "abstract_only",
+                        },
+                        full_ref,
+                    ],
+                }
+            )
+            return [Document(page_content=documents[0].page_content, metadata=metadata)]
+
+    def validate_full_text(*_args, **_kwargs):
+        events.append("full_text_coverage")
+        return full_coverage, None
+
+    def synthesize(*_args, **_kwargs):
+        events.append("literature_synthesis")
+        return synthesis, None
+
+    def generate(*_args, **_kwargs):
+        events.append("hypothesis_generation")
+        return [
+            {
+                "title": "Grounded candidate",
+                "hypothesis": "The new controller will be compared with the baseline.",
+                "rationale": "The cited Results chunk establishes the baseline premise.",
+                "feasibility": "Compare latency and reject the claim if it is not lower.",
+                "source_ids": [source_id],
+                "evidence_refs": ["chunk-results-1"],
+            }
+        ]
+
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        debate_rounds=0,
+        audit_enabled=False,
+        paper_library=RecordingLibrary(),
+    )
+    with (
+        patch("app.agents.call_llm_for_search_queries", return_value=(plan, None)),
+        patch.object(agent, "_retrieve_scientific_sources", return_value=[relevant, irrelevant]),
+        patch("app.agents.call_llm_for_relevance_filter", return_value=([source_id], None)),
+        patch("app.agents.call_llm_for_evidence_coverage", return_value=(discovery, None)),
+        patch(
+            "app.agents.call_llm_for_full_text_evidence_coverage",
+            side_effect=validate_full_text,
+        ),
+        patch("app.agents.call_llm_for_literature_synthesis", side_effect=synthesize),
+        patch("app.agents.call_llm_for_generation", side_effect=generate),
+    ):
+        context = ContextMemory()
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("Reduce network latency.", num_hypotheses=2),
+            context,
+        )
+
+    assert errors == []
+    assert len(hypotheses) == 1
+    assert hypotheses[0].evidence_refs == ["chunk-results-1"]
+    assert events == [
+        "pdf_acquisition_and_chunk_retrieval",
+        "full_text_coverage",
+        "literature_synthesis",
+        "hypothesis_generation",
+    ]
+    assert context.last_retrieved_sources[0]["evidence_status"] == "full_text"
 
 
 def test_generation_can_enforce_a_configured_minimum_source_count():
@@ -1481,7 +1740,7 @@ def test_generation_can_enforce_a_configured_minimum_source_count():
 
     assert hypotheses == []
     assert errors == [
-        "RAG coverage auditing confirmed 2 supporting arXiv source(s), "
+        "Discovery coverage confirmed 2 supporting source(s), "
         "but at least 3 are required. Hypothesis generation "
         "was not executed."
     ]
