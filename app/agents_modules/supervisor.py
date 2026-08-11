@@ -39,6 +39,7 @@ class SupervisorAgent:
             "hypotheses": [h.to_dict() for h in new_hypotheses],
             "sources": list(context.last_retrieved_sources),
             "audits": list(context.last_hypothesis_audits),
+            "search_stats": list(self.generation_agent.rag_retriever.last_search_stats),
         }
 
         # Propagate LLM errors to top-level errors field for frontend display, so a

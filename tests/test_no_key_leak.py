@@ -13,20 +13,19 @@ from app.agents import call_llm_for_generation
 FAKE_KEY = "LMSTUDIO-THIS-FAKE-KEY-MUST-NEVER-BE-LOGGED"
 
 
-def _completion(content: str):
-    completion = MagicMock()
-    choice = MagicMock()
-    choice.message.content = content
-    completion.choices = [choice]
-    return completion
+def _native_response(content: str):
+    response = MagicMock()
+    response.json.return_value = {
+        "output": [{"type": "message", "content": content}],
+    }
+    return response
 
 
 def test_key_absent_from_logs_on_success(monkeypatch, caplog):
     monkeypatch.setenv("LMSTUDIO_API_KEY", FAKE_KEY)
     payload = json.dumps([{"title": "T", "text": "X"}])
     with caplog.at_level(logging.DEBUG):
-        with patch.object(utils, "OpenAI") as mock_openai:
-            mock_openai.return_value.chat.completions.create.return_value = _completion(payload)
+        with patch.object(utils.requests, "post", return_value=_native_response(payload)):
             call_llm_for_generation("goal", num_hypotheses=1)
 
     assert FAKE_KEY not in caplog.text
@@ -35,10 +34,11 @@ def test_key_absent_from_logs_on_success(monkeypatch, caplog):
 def test_key_absent_from_logs_on_error(monkeypatch, caplog):
     monkeypatch.setenv("LMSTUDIO_API_KEY", FAKE_KEY)
     with caplog.at_level(logging.DEBUG):
-        with patch.object(utils, "OpenAI") as mock_openai:
-            mock_openai.return_value.chat.completions.create.side_effect = Exception(
-                "Error code: 401 - No auth credentials found"
-            )
+        with patch.object(
+            utils.requests,
+            "post",
+            side_effect=Exception("Error code: 401 - No auth credentials found"),
+        ):
             call_llm_for_generation("goal", num_hypotheses=1)
 
     assert FAKE_KEY not in caplog.text

@@ -104,7 +104,12 @@ def call_llm_for_reflection(
         "}"
     )
 
-    response = _call_llm(prompt, temperature=temperature, model=model)
+    response = _call_llm(
+        prompt,
+        temperature=temperature,
+        model=model,
+        reasoning="off",
+    )
     logger.info("LLM reflection response for hypothesis: %s", response)
 
     if response.startswith("Error:"):
@@ -140,7 +145,12 @@ def call_llm_for_reflection(
         f"{schema_instruction}\n\n"
         f"Candidate response:\n{response}"
     )
-    repaired_response = _call_llm(repair_prompt, temperature=0.0, model=model)
+    repaired_response = _call_llm(
+        repair_prompt,
+        temperature=0.0,
+        model=model,
+        reasoning="off",
+    )
     logger.info("LLM reflection repair response for hypothesis: %s", repaired_response)
 
     if repaired_response.startswith("Error:"):

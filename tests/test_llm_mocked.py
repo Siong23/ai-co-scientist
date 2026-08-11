@@ -1,9 +1,4 @@
-"""Offline tests of the LLM boundary: parsing and error propagation.
-
-The LM Studio call goes through the OpenAI SDK client in app.utils.call_llm;
-these tests mock that client so no local server or network is needed.
-They replace the coverage of the deleted FastAPI-era tests/test_api.py.
-"""
+"""Offline tests of the LLM boundary: parsing and error propagation."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -13,12 +8,12 @@ from app.agents import call_llm_for_generation, call_llm_for_reflection
 from app.models import ContextMemory, Hypothesis, ResearchGoal
 
 
-def _completion(content: str):
-    completion = MagicMock()
-    choice = MagicMock()
-    choice.message.content = content
-    completion.choices = [choice]
-    return completion
+def _native_response(content: str):
+    response = MagicMock()
+    response.json.return_value = {
+        "output": [{"type": "message", "content": content}],
+    }
+    return response
 
 
 def test_generation_happy_path_parses_hypotheses():
@@ -40,8 +35,7 @@ def test_generation_happy_path_parses_hypotheses():
             },
         ]
     )
-    with patch.object(utils, "OpenAI") as mock_openai:
-        mock_openai.return_value.chat.completions.create.return_value = _completion(payload)
+    with patch.object(utils.requests, "post", return_value=_native_response(payload)):
         result = call_llm_for_generation("test goal", num_hypotheses=2, temperature=0.7)
 
     assert [h["title"] for h in result] == ["Hypothesis A", "Hypothesis B"]
@@ -57,8 +51,7 @@ def test_generation_handles_markdown_fenced_json():
         "source_ids": ["arXiv:1234.5678"],
     }
     payload = f"```json\n{json.dumps([expected])}\n```"
-    with patch.object(utils, "OpenAI") as mock_openai:
-        mock_openai.return_value.chat.completions.create.return_value = _completion(payload)
+    with patch.object(utils.requests, "post", return_value=_native_response(payload)):
         result = call_llm_for_generation("test goal")
 
     assert result == [expected]
@@ -122,6 +115,8 @@ def test_generation_repairs_unparsable_output_once():
     assert repair_call.kwargs == {
         "temperature": 0.0,
         "model": "selected-local-model",
+        "max_tokens": 2048,
+        "reasoning": "off",
     }
     assert "format" in repair_call.args[0].lower()
 
@@ -153,13 +148,15 @@ def test_generation_passes_selected_model_to_llm_boundary():
 
     assert result == [expected]
     assert mock_call.call_args.kwargs["model"] == "selected-local-model"
+    assert "do not return an error object" in mock_call.call_args.args[0]
 
 
 def test_401_propagates_as_error_hypothesis():
-    with patch.object(utils, "OpenAI") as mock_openai:
-        mock_openai.return_value.chat.completions.create.side_effect = Exception(
-            "Error code: 401 - No auth credentials found"
-        )
+    with patch.object(
+        utils.requests,
+        "post",
+        side_effect=Exception("Error code: 401 - No auth credentials found"),
+    ):
         result = call_llm_for_generation("test goal", num_hypotheses=2)
 
     assert len(result) == 1
