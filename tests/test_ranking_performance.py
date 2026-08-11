@@ -34,6 +34,8 @@ from copy import deepcopy
 from time import perf_counter
 from unittest.mock import patch
 
+import pytest
+
 from app.agents_modules.ranking import RankingAgent
 from app.agents_modules.ranking_helpers import (
     RANKING_LLM_MODEL,
@@ -43,7 +45,6 @@ from app.agents_modules.ranking_helpers import (
     update_elo_tie,
 )
 from app.models import ContextMemory, Hypothesis, PairwiseDecision, ResearchGoal
-
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -168,6 +169,7 @@ def test_pairwise_ranking_execution_time():
     assert elapsed >= 0
 
 
+@pytest.mark.integration
 def test_full_tournament_real_execution_time():
     """
     Measure the real end-to-end execution time of the complete
