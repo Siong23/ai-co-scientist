@@ -1,7 +1,5 @@
-import html as html_lib
 import logging
 import os
-import re
 import threading
 import time
 from copy import deepcopy

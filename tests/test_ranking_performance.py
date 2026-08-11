@@ -360,7 +360,7 @@ def test_ranking_consistency():
     ranking_1 = run_ranking(hypotheses_1)
     ranking_2 = run_ranking(hypotheses_2)
 
-    print(f"\nRanking consistency:")
+    print("\nRanking consistency:")
     print(f"  Run 1: {ranking_1}")
     print(f"  Run 2: {ranking_2}")
     print(f"  Consistent: {ranking_1 == ranking_2}")
@@ -473,7 +473,7 @@ def test_elo_results_are_reproducible():
     ratings_1 = run_matches()
     ratings_2 = run_matches()
 
-    print(f"\nElo reproducibility:")
+    print("\nElo reproducibility:")
     print(f"  Run 1: {ratings_1}")
     print(f"  Run 2: {ratings_2}")
     print(f"  Consistent: {ratings_1 == ratings_2}")
