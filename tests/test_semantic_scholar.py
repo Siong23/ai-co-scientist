@@ -38,6 +38,15 @@ def test_format_paper_prefers_arxiv_id_for_cross_source_deduplication():
     assert result["source"] == "semantic_scholar"
 
 
+def test_format_paper_derives_arxiv_pdf_when_open_access_field_is_missing():
+    paper = _paper(arxiv_id="2301.00001")
+    paper["openAccessPdf"] = None
+
+    result = SemanticScholarSearchTool._format_paper(paper)
+
+    assert result["pdf_url"] == "https://arxiv.org/pdf/2301.00001"
+
+
 def test_format_paper_uses_semantic_scholar_id_when_arxiv_id_is_absent():
     result = SemanticScholarSearchTool._format_paper(_paper(paper_id="s2-paper"))
 

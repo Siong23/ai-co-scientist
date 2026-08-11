@@ -114,6 +114,8 @@ def test_generate_returns_errors_and_keeps_them_out_of_hypotheses():
         hypos, errors = GenerationAgent(
             minimum_relevant_sources=1,
             debate_rounds=0,
+            audit_enabled=False,
+            agentic_research_enabled=False,
         ).generate_new_hypotheses(_goal(), ContextMemory())
 
     assert hypos == []  # error markers must never enter the ranking flow
@@ -163,6 +165,8 @@ def test_generate_happy_path_returns_no_errors():
         hypos, errors = GenerationAgent(
             minimum_relevant_sources=1,
             debate_rounds=0,
+            audit_enabled=False,
+            agentic_research_enabled=False,
         ).generate_new_hypotheses(_goal(), ContextMemory())
 
     assert [h.title for h in hypos] == ["H1", "H2"]
@@ -214,6 +218,8 @@ def test_generate_uses_selected_research_goal_model():
         GenerationAgent(
             minimum_relevant_sources=1,
             debate_rounds=0,
+            audit_enabled=False,
+            agentic_research_enabled=False,
         ).generate_new_hypotheses(goal, ContextMemory())
 
     assert len(mock_call.call_args_list) == 4

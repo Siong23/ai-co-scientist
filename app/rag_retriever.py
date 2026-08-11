@@ -14,6 +14,7 @@ from langchain_core.vectorstores import InMemoryVectorStore
 from .config import config
 from .tools.arxiv_search import ArxivSearchTool
 from .tools.elsevier_search import ElsevierSearchTool
+from .tools.pdf_urls import find_pdf_url
 from .tools.semantic_scholar_search import SemanticScholarSearchTool
 from .tools.springer_search import SpringerSearchTool
 from .tools.tavily_search import TavilySearchTool
@@ -499,6 +500,11 @@ class ArxivRAGRetriever:
         )
 
         abstract = str(paper.get("abstract", ""))[: self.max_abstract_chars]
+        pdf_url = find_pdf_url(
+            paper.get("pdf_url"),
+            paper.get("entry_id"),
+            paper.get("arxiv_url"),
+        )
 
         page_content = (
             f"Source ID: {source_id}\n"
@@ -520,7 +526,7 @@ class ArxivRAGRetriever:
                 "published": paper.get("published"),
                 "primary_category": paper.get("primary_category"),
                 "arxiv_url": paper.get("arxiv_url"),
-                "pdf_url": paper.get("pdf_url"),
+                "pdf_url": pdf_url,
                 "source": paper.get("source", "arxiv"),
                 "rrf_score": paper.get("_rrf_score"),
             },

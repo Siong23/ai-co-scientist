@@ -826,10 +826,11 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
             str(source.get("arxiv_url") or "#"),
             quote=True,
         )
-        pdf_url = html_lib.escape(
-            str(source.get("pdf_url") or "#"),
-            quote=True,
-        )
+        raw_pdf_url = str(source.get("pdf_url") or "").strip()
+        pdf_link = ""
+        if raw_pdf_url.startswith(("https://", "http://")):
+            pdf_url = html_lib.escape(raw_pdf_url, quote=True)
+            pdf_link = f' | <a href="{pdf_url}" target="_blank">📁 Download PDF</a>'
         if source.get("full_text_indexed"):
             chunks_used = int(source.get("full_text_chunks_used") or 0)
             library_status = f"Indexed in local ChromaDB; {chunks_used} relevant full-text chunk(s) used"
@@ -845,8 +846,7 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
             <p><strong>Abstract:</strong> {abstract}...</p>
             <p><strong>Local paper library:</strong> {library_status}</p>
             <p>
-                <a href="{arxiv_url}" target="_blank">📄 View source</a> |
-                <a href="{pdf_url}" target="_blank">📁 Download PDF</a>
+                <a href="{arxiv_url}" target="_blank">📄 View source</a>{pdf_link}
             </p>
         </div>
         """

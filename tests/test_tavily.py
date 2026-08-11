@@ -41,3 +41,31 @@ def test_search_records_rate_limit(monkeypatch):
         assert tool.search_papers("edge security") == []
 
     assert tool.last_error_status == 429
+
+
+def test_search_preserves_direct_pdf_url_for_full_text_indexing(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    result = {
+        "title": "Open paper",
+        "url": "https://arxiv.org/pdf/2501.01234",
+        "content": "A relevant abstract from an open paper.",
+    }
+
+    with patch("app.tools.tavily_search.requests.post", return_value=_response([result])):
+        papers = TavilySearchTool().search_papers("open paper")
+
+    assert papers[0]["pdf_url"] == "https://arxiv.org/pdf/2501.01234"
+
+
+def test_search_derives_pdf_url_from_arxiv_abstract_result(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    result = {
+        "title": "Open paper",
+        "url": "https://arxiv.org/abs/2501.01234",
+        "content": "A relevant abstract from an open paper.",
+    }
+
+    with patch("app.tools.tavily_search.requests.post", return_value=_response([result])):
+        papers = TavilySearchTool().search_papers("open paper")
+
+    assert papers[0]["pdf_url"] == "https://arxiv.org/pdf/2501.01234"
