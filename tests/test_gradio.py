@@ -149,6 +149,45 @@ def test_references_do_not_search_again_when_no_source_was_used(
     assert html == ("<p>No retrieved evidence was used for generation.</p>")
 
 
+def test_generation_results_show_every_search_provider_call(gradio_app_module):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "generation": {
+                "hypotheses": [],
+                "sources": [],
+                "search_stats": [
+                    {
+                        "round": 1,
+                        "source": "arXiv",
+                        "queries_completed": 5,
+                        "queries_requested": 5,
+                        "results": 20,
+                        "elapsed_ms": 420,
+                        "status": "ok",
+                    },
+                    {
+                        "round": 1,
+                        "source": "Tavily",
+                        "queries_completed": 5,
+                        "queries_requested": 5,
+                        "results": 10,
+                        "elapsed_ms": 510,
+                        "status": "ok",
+                    },
+                ],
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert "Search providers called" in html
+    assert "arXiv" in html
+    assert "5/5 queries, 20 results" in html
+    assert "Tavily" in html
+
+
 def test_hypothesis_evidence_sources_are_clickable_and_validated(
     gradio_app_module,
 ):

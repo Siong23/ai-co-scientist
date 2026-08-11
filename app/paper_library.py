@@ -42,6 +42,9 @@ class ChromaPaperLibrary:
     ) -> None:
         library_config = config.get("paper_library", {})
         self.enabled = bool(library_config.get("enabled", True)) if enabled is None else enabled
+        self.require_indexed_sources_for_generation = bool(
+            library_config.get("require_indexed_sources_for_generation", False)
+        )
         self.persist_directory = Path(persist_directory or library_config.get("persist_directory", "chroma_db"))
         self.pdf_directory = Path(pdf_directory or library_config.get("pdf_directory", ".cache/papers"))
         self.collection_prefix = str(library_config.get("collection_name", "research_papers"))
@@ -98,12 +101,18 @@ class ChromaPaperLibrary:
 
         candidates = [document for document in original_documents if document.metadata.get("pdf_url")]
         indexed_source_ids: set[str] = set()
+        newly_indexed = 0
         for document in candidates:
-            if len(indexed_source_ids) >= self.max_papers_per_run:
-                break
+            source_id = str(document.metadata.get("source_id", "")).strip()
             try:
+                if source_id and self.has_indexed_source(source_id):
+                    indexed_source_ids.add(source_id)
+                    continue
+                if newly_indexed >= self.max_papers_per_run:
+                    continue
                 if self.ensure_indexed(document):
-                    indexed_source_ids.add(str(document.metadata.get("source_id", "")))
+                    indexed_source_ids.add(source_id)
+                    newly_indexed += 1
             except Exception as exc:
                 logger.warning(
                     "Full-text indexing skipped for %s: %s",
@@ -157,6 +166,16 @@ class ChromaPaperLibrary:
         )
         return enriched
 
+    def has_indexed_source(self, source_id: str) -> bool:
+        """Return whether Chroma already contains full-text chunks for a source."""
+
+        normalized_source_id = source_id.strip()
+        if not normalized_source_id:
+            return False
+        vector_store = self._get_vector_store()
+        existing = vector_store.get(where={"source_id": normalized_source_id}, limit=1, include=["metadatas"])
+        return bool(existing.get("ids"))
+
     def ensure_indexed(self, document: Document) -> bool:
         """Download, extract, embed, and upsert one paper unless already cached."""
 
@@ -165,10 +184,10 @@ class ChromaPaperLibrary:
         if not source_id or not pdf_url:
             return False
 
-        vector_store = self._get_vector_store()
-        existing = vector_store.get(where={"source_id": source_id}, limit=1, include=["metadatas"])
-        if existing.get("ids"):
+        if self.has_indexed_source(source_id):
             return True
+
+        vector_store = self._get_vector_store()
 
         pdf_path = self._pdf_path(source_id)
         if not pdf_path.exists():

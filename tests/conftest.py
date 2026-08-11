@@ -5,6 +5,29 @@ import requests
 
 from app.config import config
 
+_PROVIDER_CREDENTIALS = (
+    "LMSTUDIO_API_KEY",
+    "LMSTUDIO_BASE_URL",
+    "LMSTUDIO_MODEL",
+    "SEMANTIC_SCHOLAR_API_KEY",
+    "SPRINGER_API_KEY",
+    "SPRINGER_OPEN_ACCESS_API_KEY",
+    "SPRINGER_META_API_KEY",
+    "ELSEVIER_API_KEY",
+    "ELSEVIER_INST_TOKEN",
+    "TAVILY_API_KEY",
+)
+
+
+@pytest.fixture(autouse=True)
+def disable_external_provider_credentials(monkeypatch, request):
+    """Keep local .env credentials out of the canonical offline suite."""
+
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    for variable in _PROVIDER_CREDENTIALS:
+        monkeypatch.delenv(variable, raising=False)
+
 
 @pytest.fixture(autouse=True)
 def disable_automatic_paper_downloads(monkeypatch):

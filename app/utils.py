@@ -40,6 +40,14 @@ def get_lmstudio_base_url() -> str:
     return str(value).rstrip("/")
 
 
+def get_lmstudio_native_chat_url() -> str:
+    """Return LM Studio's native chat endpoint beside the configured /v1 API."""
+
+    base_url = get_lmstudio_base_url()
+    server_url = base_url[:-3] if base_url.endswith("/v1") else base_url
+    return f"{server_url}/api/v1/chat"
+
+
 def get_lmstudio_api_key() -> str:
     """Return the optional LM Studio API key or the SDK placeholder value."""
     return os.getenv("LMSTUDIO_API_KEY") or DEFAULT_LMSTUDIO_API_KEY
@@ -92,6 +100,16 @@ def fetch_lmstudio_models() -> List[str]:
 def classify_llm_error(error_text: str) -> str:
     """Map a local LLM error string to a short, user-actionable category."""
     text = (error_text or "").lower()
+    if any(
+        marker in text
+        for marker in (
+            "context size has been exceeded",
+            "context length exceeded",
+            "maximum context length",
+            "context window exceeded",
+        )
+    ):
+        return "Model context window exceeded"
     if "authentication failed" in text or "401" in text or "unauthorized" in text:
         return "Missing or invalid API key"
     if "timed out" in text or "timeout" in text:
@@ -141,14 +159,51 @@ def call_llm(
     temperature: float = 0.7,
     model: Optional[str] = None,
     system_prompt: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    reasoning: Optional[str] = None,
 ) -> str:
-    """Call the local LM Studio server through its OpenAI-compatible API."""
+    """Call LM Studio, using its native API when reasoning is configured."""
     selected_model = get_lmstudio_model(model)
     if not selected_model:
         logger.error("LM Studio model is not configured.")
         return "Error: LLM model not configured."
 
     try:
+        output_token_limit = max_tokens
+        if output_token_limit is None:
+            output_token_limit = int(config.get("llm_default_max_tokens", 2048))
+        output_token_limit = max(1, int(output_token_limit))
+
+        if reasoning is not None:
+            payload = {
+                "model": selected_model,
+                "input": prompt,
+                "temperature": temperature,
+                "max_output_tokens": output_token_limit,
+                "reasoning": reasoning,
+                "store": False,
+                "stream": False,
+            }
+            if system_prompt:
+                payload["system_prompt"] = system_prompt
+            response = requests.post(
+                get_lmstudio_native_chat_url(),
+                headers=_lmstudio_headers(),
+                json=payload,
+                timeout=config.get("llm_request_timeout_seconds", 180),
+            )
+            response.raise_for_status()
+            response_payload = response.json()
+            output = response_payload.get("output", []) if isinstance(response_payload, dict) else []
+            content = "\n".join(
+                str(item.get("content", ""))
+                for item in output
+                if isinstance(item, dict) and item.get("type") == "message" and item.get("content")
+            ).strip()
+            if not content:
+                return "Error: LM Studio returned an empty response."
+            return content
+
         client = OpenAI(
             base_url=get_lmstudio_base_url(),
             api_key=get_lmstudio_api_key(),
@@ -163,6 +218,7 @@ def call_llm(
             model=selected_model,
             messages=messages,
             temperature=temperature,
+            max_tokens=output_token_limit,
         )
         if not completion.choices:
             return "Error: LM Studio returned no completion choices."

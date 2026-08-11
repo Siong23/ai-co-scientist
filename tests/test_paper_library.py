@@ -49,6 +49,7 @@ def test_default_storage_directories_are_persistent_and_separate():
 
     assert library.pdf_directory == Path("app/paper")
     assert library.persist_directory == Path("chroma_db")
+    assert library.require_indexed_sources_for_generation is True
 
 
 def test_indexes_pdf_chunks_in_persistent_chroma_and_reuses_cache(tmp_path, monkeypatch):
@@ -121,6 +122,27 @@ def test_enrichment_adds_bounded_full_text_and_index_metadata(tmp_path, monkeypa
     assert "A" * 36 not in enriched[0].page_content
 
 
+def test_cached_sources_do_not_consume_the_new_download_budget(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    library.max_papers_per_run = 1
+    cached = _document("arXiv:1111.1111")
+    new = _document("arXiv:2222.2222")
+    monkeypatch.setattr(library, "has_indexed_source", lambda source_id: source_id == "arXiv:1111.1111")
+    indexed_calls = []
+
+    def index_new(document):
+        indexed_calls.append(document.metadata["source_id"])
+        return True
+
+    monkeypatch.setattr(library, "ensure_indexed", index_new)
+    monkeypatch.setattr(library, "search", lambda *_args, **_kwargs: [])
+
+    enriched = library.enrich_documents([cached, new], "research query")
+
+    assert indexed_calls == ["arXiv:2222.2222"]
+    assert all(document.metadata["full_text_indexed"] is True for document in enriched)
+
+
 def test_download_rejects_unapproved_pdf_hosts(tmp_path):
     library = _library(tmp_path)
 
@@ -128,6 +150,12 @@ def test_download_rejects_unapproved_pdf_hosts(tmp_path):
         library._validate_pdf_url("http://127.0.0.1/private.pdf")
     with pytest.raises(ValueError, match="not allowed"):
         library._validate_pdf_url("https://example.com/paper.pdf")
+
+
+def test_download_allows_configured_springer_pdf_host(tmp_path):
+    library = _library(tmp_path)
+
+    library._validate_pdf_url("https://link.springer.com/content/pdf/10.1007/test.pdf")
 
 
 def test_generation_full_text_failure_falls_back_to_abstracts(monkeypatch):

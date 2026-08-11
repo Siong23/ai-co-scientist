@@ -1,7 +1,15 @@
 import logging
+from pathlib import Path
 from typing import Dict
 
 import yaml
+from dotenv import load_dotenv
+
+
+def load_environment(dotenv_path: str | Path = ".env") -> bool:
+    """Load local credentials without overriding explicit environment values."""
+
+    return load_dotenv(dotenv_path=dotenv_path, override=False)
 
 
 def load_config(config_path: str = "config.yaml") -> Dict:
@@ -32,6 +40,9 @@ def load_config(config_path: str = "config.yaml") -> Dict:
         print(f"An unexpected error occurred while loading config: {e}")
         exit(1)
 
+
+# Load local credentials before search and model clients inspect os.environ.
+load_environment()
 
 # Load configuration at the start when this module is imported
 config = load_config()

@@ -31,6 +31,7 @@ def _disable_live_original_goal_search(monkeypatch):
         ("Error: LM Studio request timed out for model 'x'.", "Model provider timed out"),
         ("Error: LM Studio model unavailable ('x/y').", "Model unavailable or delisted"),
         ("Error: Could not connect to LM Studio at localhost.", "LM Studio unavailable"),
+        ("Context size has been exceeded.", "Model context window exceeded"),
         ("Could not parse LLM response: Expecting value", "Model returned unparsable output"),
         ("Error: LLM model not configured.", "LLM model not configured"),
         (
@@ -58,8 +59,7 @@ def _goal():
 QUERY_PLAN = """
 {
   "queries": [
-    "query 1", "query 2", "query 3", "query 4",
-    "query 5", "query 6", "query 7", "query 8"
+    "query 1", "query 2", "query 3", "query 4", "query 5"
   ],
   "required_terms": ["test"],
   "explicit_requirements": [
@@ -282,8 +282,11 @@ def test_surfaced_error_never_contains_key(monkeypatch):
     'No endpoints found' branch returns immediately — no retry sleeps)."""
     fake_key = "LMSTUDIO-LEAK-CANARY"
     monkeypatch.setenv("LMSTUDIO_API_KEY", fake_key)
-    with patch.object(utils, "OpenAI") as mock_openai:
-        mock_openai.return_value.chat.completions.create.side_effect = Exception(f"model not found; key was {fake_key}")
+    with patch.object(
+        utils.requests,
+        "post",
+        side_effect=Exception(f"model not found; key was {fake_key}"),
+    ):
         details = SupervisorAgent().run_cycle(_goal(), ContextMemory())
 
     assert details.get("errors"), "expected the model-unavailable error to surface"

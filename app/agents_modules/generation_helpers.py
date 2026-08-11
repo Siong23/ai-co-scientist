@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List
 
+from ..config import config
 from ..rag_retriever import EvidenceAspect, SearchQueryPlan
 from ..utils import logger
 
@@ -21,6 +22,18 @@ def _call_llm(*args, **kwargs):
     from .. import agents as facade
 
     return facade.call_llm(*args, **kwargs)
+
+
+def _output_token_limit(task: str, default: int) -> int:
+    """Return a positive per-task output budget from configuration."""
+
+    configured = config.get("llm_max_tokens", {})
+    if not isinstance(configured, dict):
+        return default
+    try:
+        return max(1, int(configured.get(task, default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _parse_generation_response(response: str) -> List[Dict]:
@@ -116,14 +129,20 @@ def call_llm_for_generation(
         "Every object must contain exactly these five keys: 'title', "
         "'hypothesis', 'rationale', 'feasibility', and 'source_ids'. The "
         "first four values must be strings and 'source_ids' must be an array "
-        "of exact Source ID strings from the retrieved context. If the "
-        "retrieved context is insufficient or not directly relevant, return "
-        'exactly {"error": "The retrieved context is insufficient to generate '
-        'grounded hypotheses."}.'
+        "of exact Source ID strings from the retrieved context. Evidence "
+        "coverage has already been validated upstream. Do not re-grade "
+        "coverage and do not return an error object; return the requested "
+        "hypothesis array."
     )
     full_prompt = f"{prompt}\n\n{schema_instruction}"
 
-    response = _call_llm(full_prompt, temperature=temperature, model=model)
+    response = _call_llm(
+        full_prompt,
+        temperature=temperature,
+        model=model,
+        max_tokens=_output_token_limit("generation", 3072),
+        reasoning="off",
+    )
     logger.info("LLM generation response: %s", response)
 
     if response.startswith("Error:"):
@@ -149,6 +168,8 @@ def call_llm_for_generation(
         repair_prompt,
         temperature=0.0,
         model=model,
+        max_tokens=_output_token_limit("format_repair", 2048),
+        reasoning="off",
     )
     logger.info("LLM generation format-repair response: %s", repaired_response)
     if repaired_response.startswith("Error:"):
@@ -317,6 +338,8 @@ USER RESEARCH GOAL
         temperature=0.0,
         model=model,
         system_prompt=research_planner_prompt,
+        max_tokens=_output_token_limit("research_planning", 1200),
+        reasoning="off",
     )
     if planner_response.startswith("Error:"):
         return None, f"Query rewriting failed: {planner_response}"
@@ -405,6 +428,8 @@ STRUCTURED RESEARCH PLAN
                 temperature=0.0,
                 model=model,
                 system_prompt=rewriter_system_prompt,
+                max_tokens=_output_token_limit("query_rewriting", 1600),
+                reasoning="off",
             )
         if response.startswith("Error:"):
             return None, f"Query rewriting failed: {response}"
@@ -547,6 +572,8 @@ Retrieved sources:
         prompt,
         temperature=0.0,
         model=model,
+        max_tokens=_output_token_limit("relevance_grading", 512),
+        reasoning="off",
     )
     if response.startswith("Error:"):
         return None, f"Evidence relevance grading failed: {response}"
@@ -653,6 +680,8 @@ original draft. A rejected item may use null for final_hypothesis.
         temperature=0.0,
         model=model,
         system_prompt=system_prompt,
+        max_tokens=_output_token_limit("hypothesis_audit", 3072),
+        reasoning="off",
     )
     if response.startswith("Error:"):
         return None, f"Hypothesis audit failed: {response}"
@@ -885,6 +914,8 @@ Retrieved sources:
         prompt,
         temperature=0.0,
         model=model,
+        max_tokens=_output_token_limit("coverage_grading", 1024),
+        reasoning="off",
     )
     if response.startswith("Error:"):
         return None, f"Evidence coverage grading failed: {response}"
@@ -1026,6 +1057,8 @@ Retrieved sources:
         prompt,
         temperature=0.0,
         model=model,
+        max_tokens=_output_token_limit("literature_synthesis", 1800),
+        reasoning="off",
     )
     if response.startswith("Error:"):
         return None, f"Literature synthesis failed: {response}"

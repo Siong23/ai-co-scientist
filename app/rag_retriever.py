@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Sequence
+from urllib.parse import urlparse
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
@@ -15,7 +17,7 @@ from .tools.elsevier_search import ElsevierSearchTool
 from .tools.semantic_scholar_search import SemanticScholarSearchTool
 from .tools.springer_search import SpringerSearchTool
 from .tools.tavily_search import TavilySearchTool
-from .utils import get_sentence_transformer_model, logger
+from .utils import get_sentence_transformer_model, logger, redact_secrets
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,28 @@ class ArxivRAGRetriever:
         self.rrf_k = rrf_k or int(rag_config.get("rrf_k", 60))
         self.max_abstract_chars = max_abstract_chars or int(rag_config.get("max_abstract_chars", 4000))
 
+        library_config = config.get("paper_library", {})
+        require_indexed_sources = bool(library_config.get("enabled", True)) and bool(
+            library_config.get("require_indexed_sources_for_generation", False)
+        )
+        self.minimum_downloadable_sources = (
+            min(
+                self.top_k,
+                max(
+                    0,
+                    int(library_config.get("minimum_downloadable_sources", self.minimum_relevant_sources)),
+                ),
+            )
+            if require_indexed_sources
+            else 0
+        )
+        configured_pdf_hosts = library_config.get("allowed_pdf_hosts", ())
+        self.downloadable_pdf_hosts = {
+            str(host).strip().casefold() for host in configured_pdf_hosts if str(host).strip()
+        }
+        self.last_search_stats: list[dict[str, Any]] = []
+        self._search_round = 0
+
         self.arxiv = ArxivSearchTool(max_results=self.results_per_query)
         semantic_scholar_config = config.get("semantic_scholar", {})
         semantic_scholar_results = int(semantic_scholar_config.get("results_per_query", self.results_per_query))
@@ -159,6 +183,12 @@ class ArxivRAGRetriever:
         self.tavily = TavilySearchTool(max_results=tavily_results) if tavily_config.get("enabled", True) else None
         self.embeddings = SharedSentenceTransformerEmbeddings()
 
+    def reset_search_stats(self) -> None:
+        """Clear provider-call telemetry at the start of one generation run."""
+
+        self.last_search_stats = []
+        self._search_round = 0
+
     def _supplementary_sources(self):
         return (
             ("Semantic Scholar", self.semantic_scholar),
@@ -170,19 +200,96 @@ class ArxivRAGRetriever:
     def _supplementary_results(self, queries: Sequence[str]) -> list[list[dict[str, Any]]]:
         """Search non-arXiv academic sources for the supplied queries."""
 
+        return self._search_sources(queries, include_arxiv=False)
+
+    @staticmethod
+    def _source_results(source_name: str, source, queries: Sequence[str]) -> list[list[dict[str, Any]]]:
+        """Search one source serially so its rate-limit stop remains effective."""
+
         ranked_results: list[list[dict[str, Any]]] = []
-        for source_name, source in self._supplementary_sources():
-            if source is None:
-                continue
-            for query in queries:
-                ranked_results.append(source.search_papers(query=query))
-                if getattr(source, "last_error_status", None) in (429, 503):
-                    logger.warning(
-                        "%s returned HTTP %s; skipping its remaining queries in this retrieval round.",
+        for query in queries:
+            ranked_results.append(source.search_papers(query=query))
+            if getattr(source, "last_error_status", None) in (429, 503):
+                logger.warning(
+                    "%s returned HTTP %s; skipping its remaining queries in this retrieval round.",
+                    source_name,
+                    source.last_error_status,
+                )
+                break
+        return ranked_results
+
+    def _search_sources(
+        self,
+        queries: Sequence[str],
+        *,
+        include_arxiv: bool,
+    ) -> list[list[dict[str, Any]]]:
+        """Search configured providers concurrently while preserving result order."""
+
+        normalized_queries = tuple(query.strip() for query in queries if query.strip())
+        if not normalized_queries:
+            return []
+
+        tasks = []
+        if include_arxiv:
+            tasks.append(("arXiv", lambda: self._arxiv_results(normalized_queries)))
+        tasks.extend(
+            (
+                source_name,
+                lambda source_name=source_name, source=source: self._source_results(
+                    source_name,
+                    source,
+                    normalized_queries,
+                ),
+            )
+            for source_name, source in self._supplementary_sources()
+            if source is not None
+        )
+        if not tasks:
+            return []
+
+        self._search_round += 1
+        search_round = self._search_round
+        started_at = time.monotonic()
+        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            futures = [(source_name, executor.submit(search)) for source_name, search in tasks]
+            ranked_results: list[list[dict[str, Any]]] = []
+            for source_name, future in futures:
+                try:
+                    source_results = future.result()
+                    ranked_results.extend(source_results)
+                    logger.info(
+                        "%s search completed queries=%d/%d results=%d elapsed_ms=%d",
                         source_name,
-                        source.last_error_status,
+                        len(source_results),
+                        len(normalized_queries),
+                        sum(len(results) for results in source_results),
+                        int((time.monotonic() - started_at) * 1000),
                     )
-                    break
+                    self.last_search_stats.append(
+                        {
+                            "round": search_round,
+                            "source": source_name,
+                            "queries_completed": len(source_results),
+                            "queries_requested": len(normalized_queries),
+                            "results": sum(len(results) for results in source_results),
+                            "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+                            "status": "ok",
+                        }
+                    )
+                except Exception as exc:
+                    logger.error("%s search failed: %s", source_name, redact_secrets(str(exc)))
+                    self.last_search_stats.append(
+                        {
+                            "round": search_round,
+                            "source": source_name,
+                            "queries_completed": 0,
+                            "queries_requested": len(normalized_queries),
+                            "results": 0,
+                            "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+                            "status": "error",
+                        }
+                    )
         return ranked_results
 
     def retrieve_original_goal(self, original_query: str) -> list[Document]:
@@ -192,20 +299,7 @@ class ArxivRAGRetriever:
         if not original_query:
             return []
 
-        tasks = [("arXiv", lambda: self._arxiv_results((original_query,)))]
-        tasks.extend(
-            (source_name, lambda source=source: [source.search_papers(query=original_query)])
-            for source_name, source in self._supplementary_sources()
-            if source is not None
-        )
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            futures = [(source_name, executor.submit(search)) for source_name, search in tasks]
-            ranked_results: list[list[dict[str, Any]]] = []
-            for source_name, future in futures:
-                try:
-                    ranked_results.extend(future.result())
-                except Exception as exc:
-                    logger.error("%s original-goal search failed: %s", source_name, exc)
+        ranked_results = self._search_sources((original_query,), include_arxiv=True)
 
         return self._rank_documents(
             original_query,
@@ -262,13 +356,63 @@ class ArxivRAGRetriever:
             documents=documents,
             ids=[str(document.metadata["source_id"]) for document in documents],
         )
-        selected = vector_store.similarity_search(original_query, k=min(self.top_k, len(documents)))
+        ranked_documents = vector_store.similarity_search(original_query, k=len(documents))
+        selected = list(ranked_documents[: min(self.top_k, len(ranked_documents))])
+        selected = self._promote_downloadable_documents(selected, ranked_documents)
         logger.info(
-            "RAG selected %d sources from %d entity-matched candidates: %s",
+            "RAG selected %d sources (%d downloadable) from %d entity-matched candidates: %s",
             len(selected),
+            sum(self._has_allowed_pdf(document) for document in selected),
             len(documents),
             [document.metadata.get("source_id") for document in selected],
         )
+        return selected
+
+    def _has_allowed_pdf(self, document: Document) -> bool:
+        pdf_url = str(document.metadata.get("pdf_url", "")).strip()
+        parsed = urlparse(pdf_url)
+        host = (parsed.hostname or "").casefold()
+        return parsed.scheme in {"http", "https"} and host in self.downloadable_pdf_hosts
+
+    def _promote_downloadable_documents(
+        self,
+        selected: list[Document],
+        ranked_documents: Sequence[Document],
+    ) -> list[Document]:
+        """Keep enough safe PDF candidates in the semantic top-k when available."""
+
+        required = self.minimum_downloadable_sources
+        if required <= 0:
+            return selected
+
+        selected_ids = {str(document.metadata.get("source_id", "")) for document in selected}
+        downloadable_count = sum(self._has_allowed_pdf(document) for document in selected)
+        for candidate in ranked_documents:
+            if downloadable_count >= required:
+                break
+            candidate_id = str(candidate.metadata.get("source_id", ""))
+            if candidate_id in selected_ids or not self._has_allowed_pdf(candidate):
+                continue
+            replacement_index = next(
+                (index for index in range(len(selected) - 1, -1, -1) if not self._has_allowed_pdf(selected[index])),
+                None,
+            )
+            if replacement_index is None:
+                if len(selected) >= self.top_k:
+                    break
+                selected.append(candidate)
+            else:
+                selected_ids.discard(str(selected[replacement_index].metadata.get("source_id", "")))
+                selected[replacement_index] = candidate
+            selected_ids.add(candidate_id)
+            downloadable_count += 1
+
+        if downloadable_count < required:
+            logger.warning(
+                "RAG found only %d/%d downloadable PDF source(s) in the retrieved candidate set.",
+                downloadable_count,
+                required,
+            )
         return selected
 
     def retrieve(
@@ -282,8 +426,7 @@ class ArxivRAGRetriever:
         if not original_query:
             return []
 
-        ranked_results = self._supplementary_results(query_plan.queries)
-        ranked_results.extend(self._arxiv_results(query_plan.queries))
+        ranked_results = self._search_sources(query_plan.queries, include_arxiv=True)
         return self._rank_documents(original_query, query_plan, ranked_results)
 
     @staticmethod
@@ -378,6 +521,7 @@ class ArxivRAGRetriever:
                 "primary_category": paper.get("primary_category"),
                 "arxiv_url": paper.get("arxiv_url"),
                 "pdf_url": paper.get("pdf_url"),
+                "source": paper.get("source", "arxiv"),
                 "rrf_score": paper.get("_rrf_score"),
             },
         )
@@ -398,6 +542,55 @@ def format_documents_for_prompt(
     return "\n\n".join(sections)
 
 
+def format_documents_for_grading(
+    documents: Sequence[Document],
+    *,
+    max_abstract_chars: int = 1600,
+    max_total_chars: int = 24000,
+) -> str:
+    """Build a bounded source digest for relevance and coverage grading.
+
+    Every source receives a fair share of the total budget so later corrective
+    retrieval rounds cannot crowd new evidence out of the grading prompt.
+    """
+
+    remaining = max(1000, int(max_total_chars))
+    abstract_cap = max(0, int(max_abstract_chars))
+    sections: list[str] = []
+    document_list = list(documents)
+
+    for index, document in enumerate(document_list):
+        separator = "\n\n" if sections else ""
+        remaining -= len(separator)
+        sources_left = len(document_list) - index
+        fair_share = max(1, remaining // max(1, sources_left))
+
+        source_id = str(document.metadata.get("source_id", "unknown"))[:160]
+        title = str(document.metadata.get("title", "Untitled"))[:300]
+        published = str(document.metadata.get("published", "Unknown"))[:40]
+        category = str(document.metadata.get("primary_category", "Unknown"))[:80]
+        abstract = str(document.metadata.get("abstract", ""))
+        header = (
+            f'<source id="{source_id}">\n'
+            f"Source ID: {source_id}\n"
+            f"Title: {title}\n"
+            f"Published: {published}\n"
+            f"Primary category: {category}\n"
+            "Abstract: "
+        )
+        footer = "\n</source>"
+        available_abstract_chars = max(0, fair_share - len(header) - len(footer))
+        bounded_abstract = abstract[: min(abstract_cap, available_abstract_chars)]
+        section = f"{header}{bounded_abstract}{footer}"
+
+        if len(section) > remaining:
+            break
+        sections.append(section)
+        remaining -= len(section)
+
+    return "\n\n".join(sections)
+
+
 def serialize_documents(
     documents: Sequence[Document],
 ) -> list[dict[str, Any]]:
@@ -412,6 +605,7 @@ def serialize_documents(
             "primary_category": document.metadata.get("primary_category"),
             "arxiv_url": document.metadata.get("arxiv_url"),
             "pdf_url": document.metadata.get("pdf_url"),
+            "source": document.metadata.get("source"),
             "rrf_score": document.metadata.get("rrf_score"),
             "full_text_indexed": document.metadata.get("full_text_indexed", False),
             "full_text_chunks_used": document.metadata.get("full_text_chunks_used", 0),
