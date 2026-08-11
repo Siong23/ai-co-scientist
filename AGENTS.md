@@ -15,8 +15,7 @@ LM Studio server). The autonomous-development process is specified in
 - `app/agents.py` — multi-agent pipeline (Generation, Reflection, Ranking,
   Evolution, Proximity, Meta-review) and LLM-call wrappers.
 - `app/utils.py` — `call_llm` (LM Studio via its OpenAI-compatible API),
-  similarity scoring,
-  vis.js graph data, logging, `redact_secrets`.
+  similarity scoring, vis.js graph data, logging, `redact_secrets`.
 - `app/models.py` — pydantic models. `app/config.py` + `config.yaml` — config.
 - `app/tools/arxiv_search.py` — arXiv literature integration.
 - `tests/` — offline by default; `integration` (local LM Studio) and `network`
@@ -54,13 +53,13 @@ worktree after the PR merges (`make wt-clean ISSUE=N`).
 
 When the user asks to create/open PRs, create **ready-for-review PRs by
 default**. Do not create draft PRs unless the user explicitly asks for a draft
-or the PR is intentionally blocked/incomplete; if you must use draft, say why
-before handing off. The goal is to avoid unnecessary friction in human review
-and merge flow.
+or the PR is intentionally blocked/incomplete; if you must use draft, explain
+why before handing off. The goal is to avoid unnecessary friction in human
+review and merge flow.
 
 After opening a pull request, wait briefly for automated review comments from
 the `chatgpt-codex-connector` bot. Check the PR review threads/comments, address
 actionable feedback with follow-up commits when needed, rerun the relevant
 checks, and push the fixes before handing off. If no bot review arrives within a
-reasonable wait or the comments are non-actionable, say that explicitly in the
+reasonable wait or the comments are non-actionable, state that explicitly in the
 handoff.
