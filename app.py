@@ -575,8 +575,8 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         padding:15px;
                         margin:15px 0;
                         background:#f8f9fa;">
-                        <summary style="font-weight: bold; cursor: pointer;">
-                            ⚔️ Tournament Match {count}: {title_a} (ID: {match.get('hypothesis_a', 'Unknown')}) vs {title_b} (ID: {match.get('hypothesis_b', 'Unknown')})
+                        <summary style="cursor: pointer;">
+                            <strong>⚔️ Tournament Match {count}:</strong> {title_a} <strong>(ID: {match.get('hypothesis_a', 'Unknown')})</strong> vs {title_b} <strong>(ID: {match.get('hypothesis_b', 'Unknown')})</strong>
                         </summary>
                         <div style="margin-top: 10px; spacing: 5px;">
                             <p><b>🅰 Hypothesis A</b><br>
