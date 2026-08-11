@@ -569,41 +569,38 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     else:
                         winner = "Abstain"
                     html += f"""
-                    <div style="
+                    <details style="
                         border:1px solid #ddd;
                         border-radius:10px;
                         padding:15px;
                         margin:15px 0;
                         background:#f8f9fa;">
+                        <summary style="font-weight: bold; cursor: pointer;">
+                            ⚔️ Tournament Match {count}: {title_a} (ID: {match.get('hypothesis_a', 'Unknown')}) vs {title_b} (ID: {match.get('hypothesis_b', 'Unknown')})
+                        </summary>
+                        <div style="margin-top: 10px; spacing: 5px;">
+                            <p><b>🅰 Hypothesis A</b><br>
+                            {title_a} <strong>(ID: {match.get('hypothesis_a', 'Unknown')})</strong></p>
 
-                    <h4>⚔️ Tournament Match {count}</h4>
+                            <p><b>🅱 Hypothesis B</b><br>
+                            {title_b} <strong>(ID: {match.get('hypothesis_b', 'Unknown')})</strong></p>
 
-                    <hr>
+                            <p><b>🏆 Winner</b><br>
+                            {winner}</p>
 
-                    <p><b>🅰 Hypothesis A</b><br>
-                    {title_a} (ID: {match.get('hypothesis_a', 'Unknown')})</p>
+                            <p><b>🎯 Confidence</b><br>
+                            {match.get("confidence", 0) * 100:.0f}%</p>
 
-                    <p><b>🅱 Hypothesis B</b><br>
-                    {title_b} (ID: {match.get('hypothesis_b', 'Unknown')})</p>
+                            <p><b>💡 Why it won</b><br>
+                            {match.get("reasoning", "No reason provided.")}</p>
 
-                    <br>
+                            <p><b>📌 Decisive Criteria</b></p>
 
-                    <p><b>🏆 Winner</b><br>
-                    {winner}</p>
-
-                    <p><b>🎯 Confidence</b><br>
-                    {match.get("confidence", 0) * 100:.0f}%</p>
-
-                    <p><b>💡 Why it won</b><br>
-                    {match.get("reasoning", "No reason provided.")}</p>
-
-                    <p><b>📌 Decisive Criteria</b></p>
-
-                    <ul>
-                        {"".join(f"<li>{c}</li>" for c in match.get("criteria", []))}
-                    </ul>
-
-                    </div>
+                            <ul>
+                                {"".join(f"<li>{c}</li>" for c in match.get("criteria", []))}
+                            </ul>
+                        </div>
+                    </details>
                     """
 
         elif step_name == "evolution":
