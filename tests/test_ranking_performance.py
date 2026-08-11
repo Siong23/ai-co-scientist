@@ -4,14 +4,15 @@ The tests evaluate:
 
 1. LLM call efficiency
 2. Pairwise execution time
-3. New-hypothesis tournament comparison efficiency
-4. Ranking consistency
-5. A/B order consistency
-6. Elo reproducibility
-7. TIE and ABSTAIN handling
-8. Inactive hypothesis filtering
-9. Tournament result recording
-10. Structured ranking-decision information
+3. Full tournament execution time
+4. New-hypothesis tournament comparison efficiency
+5. Ranking consistency
+6. A/B order consistency
+7. Elo reproducibility
+8. TIE and ABSTAIN handling
+9. Inactive hypothesis filtering
+10. Tournament result recording
+11. Structured ranking-decision information
 
 The improved Ranking Agent uses an LLM-based adjudication process for
 pairwise ranking. The dedicated ranking model is tested through a mocked
@@ -163,6 +164,53 @@ def test_pairwise_ranking_execution_time():
     # The test primarily records runtime rather than enforcing a strict
     # machine-dependent threshold.
     print(f"\nPairwise ranking execution time: {elapsed:.6f} seconds")
+
+    assert elapsed >= 0
+
+
+def test_full_tournament_real_execution_time():
+    """
+    Measure the real end-to-end execution time of the complete
+    improved Ranking Agent tournament, including real LLM calls.
+    """
+
+    hypotheses = [
+        _hypothesis("A"),
+        _hypothesis("B"),
+        _hypothesis("C"),
+        _hypothesis("D"),
+    ]
+
+    context = ContextMemory()
+
+    goal = ResearchGoal(
+        description="Test research goal",
+        llm_model=RANKING_LLM_MODEL,
+    )
+
+    # IMPORTANT:
+    # Do NOT mock _call_llm here.
+    # This measures the real end-to-end tournament,
+    # including LLM inference/API latency.
+    start = perf_counter()
+
+    RankingAgent().run_tournament(
+        hypotheses,
+        context,
+        goal,
+    )
+
+    elapsed = perf_counter() - start
+
+    print(
+        f"\nFull improved tournament execution time: "
+        f"{elapsed:.6f} seconds"
+    )
+
+    print(
+        f"Total tournament results: "
+        f"{len(context.tournament_results)}"
+    )
 
     assert elapsed >= 0
 
