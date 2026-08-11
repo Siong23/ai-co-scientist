@@ -392,6 +392,56 @@ def judge_debate(
     )
 
 
+# def judge_hypotheses(
+#     hypo_a: Hypothesis,
+#     hypo_b: Hypothesis,
+#     review_a: str,
+#     review_b: str,
+#     research_goal: ResearchGoal,
+# ) -> str:
+#     """Make one structured ranking decision without a multi-call debate."""
+#     prompt = f"""
+#     You are ranking two scientific hypotheses for the following research goal:
+#     {research_goal.description}
+
+#     Evaluation criteria: {research_goal.preferences}
+#     Idea attributes: {research_goal.idea_attributes}
+
+#     Hypothesis A:
+#     {hypo_a.text}
+
+#     Reflection report for A:
+#     {review_a}
+
+#     Hypothesis B:
+#     {hypo_b.text}
+
+#     Reflection report for B:
+#     {review_b}
+
+#     Compare novelty, feasibility, scientific plausibility, evidence quality,
+#     expected research value, and alignment with the research goal. Finish
+#     EXACTLY in this format:
+
+#     Decision:
+#     A/B/TIE/ABSTAIN
+
+#     Short Justification:
+#     One or two sentences.
+
+#     Decisive Criteria:
+#     - Criterion 1
+#     - Criterion 2
+
+#     If the decision is TIE, list the shared strengths or equally balanced evaluation factors as the decisive criteria.
+
+#     If the decision is ABSTAIN, list the reasons that prevented a confident comparison as the decisive criteria.
+
+#     Confidence:
+#     A decimal number between 0 and 1.
+#     """
+#     return _call_llm(prompt, temperature=0.2, model=RANKING_LLM_MODEL)
+
 def judge_hypotheses(
     hypo_a: Hypothesis,
     hypo_b: Hypothesis,
@@ -399,44 +449,124 @@ def judge_hypotheses(
     review_b: str,
     research_goal: ResearchGoal,
 ) -> str:
-    """Make one structured ranking decision without a multi-call debate."""
+    """Make one structured ranking decision with scientific and implementation auditing."""
+
     prompt = f"""
-    You are ranking two scientific hypotheses for the following research goal:
+    You are the final ranking judge for two competing scientific hypotheses.
+
+    Your task is to determine which hypothesis provides the stronger research
+    direction while checking BOTH scientific quality and implementation risk.
+
+    Research Goal:
     {research_goal.description}
 
-    Evaluation criteria: {research_goal.preferences}
-    Idea attributes: {research_goal.idea_attributes}
+    Evaluation Criteria:
+    {research_goal.preferences}
 
-    Hypothesis A:
+    Idea Attributes:
+    {research_goal.idea_attributes}
+
+    ================================================================
+    HYPOTHESIS A
+    ================================================================
+
     {hypo_a.text}
 
-    Reflection report for A:
+    Reflection Report for A:
     {review_a}
 
-    Hypothesis B:
+    ================================================================
+    HYPOTHESIS B
+    ================================================================
+
     {hypo_b.text}
 
-    Reflection report for B:
+    Reflection Report for B:
     {review_b}
 
-    Compare novelty, feasibility, scientific plausibility, evidence quality,
-    expected research value, and alignment with the research goal. Finish
-    EXACTLY in this format:
+    ================================================================
+    EVALUATION REQUIREMENTS
+    ================================================================
+
+    Evaluate both hypotheses using:
+
+    1. Scientific novelty
+    2. Feasibility
+    3. Scientific plausibility
+    4. Testability
+    5. Evidence quality
+    6. Expected research value
+    7. Alignment with the research goal
+
+    Do not select a hypothesis simply because it reports a higher metric,
+    score, or expected performance.
+
+    ================================================================
+    IMPLEMENTATION AUDIT
+    ================================================================
+
+    Carefully inspect the hypothesis descriptions and reflection reports for
+    possible metric-winning implementation problems.
+
+    Check specifically for:
+
+    1. SILENT MODEL SCALING
+       Did a hypothesis improve results mainly by secretly increasing model
+       capacity, such as larger hidden layers, wider embeddings, more
+       parameters, or substantially more computation without justification?
+
+    2. PARAMETER OR COMPUTATIONAL BLOATING
+       Does the proposed improvement depend on excessive model size,
+       computation, memory, or latency that may make the approach impractical?
+
+    3. DATA OR EVALUATION LEAKAGE
+       Does the approach appear to use test information, future information,
+       duplicated samples, validation information, or other information that
+       should not be available during evaluation?
+
+    4. METRIC-WINNING WITHOUT SCIENTIFIC VALUE
+       Does the hypothesis optimize a metric while weakening the actual
+       research objective, generalization, robustness, or scientific validity?
+
+    5. CORRUPTED OR UNMAINTAINABLE LOGIC
+       Does the proposed improvement introduce fragile, unnecessarily complex,
+       inconsistent, or difficult-to-maintain implementation logic?
+
+    6. UNFAIR COMPARISON
+       Does one hypothesis receive additional resources, information,
+       preprocessing, or experimental advantages that are not justified by
+       the research goal?
+
+    IMPORTANT:
+    Do not assume that a problem exists simply because it is possible.
+    Penalize an issue only when there is evidence in the provided hypothesis
+    or reflection report.
+
+    A hypothesis with a slightly lower reported metric may be preferable if
+    it is scientifically sound, reproducible, fair, and implementation-safe.
+
+    If the available information is insufficient to confidently determine
+    which hypothesis is better, use ABSTAIN.
+
+    If both hypotheses are genuinely equivalent in scientific quality and
+    implementation validity, use TIE.
+
+    ================================================================
+    OUTPUT FORMAT
+    ================================================================
+
+    Finish your response EXACTLY in this format:
 
     Decision:
     A/B/TIE/ABSTAIN
 
     Short Justification:
-    One or two sentences.
+    Provide 1-2 concise sentences explaining the decision.
 
     Decisive Criteria:
     - Criterion 1
     - Criterion 2
 
-    If the decision is TIE, list the shared strengths or equally balanced evaluation factors as the decisive criteria.
-
-    If the decision is ABSTAIN, list the reasons that prevented a confident comparison as the decisive criteria.
-    
     Confidence:
     A decimal number between 0 and 1.
     """

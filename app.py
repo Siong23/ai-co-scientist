@@ -1,7 +1,5 @@
-import html as html_lib
 import logging
 import os
-import re
 import threading
 import time
 from copy import deepcopy
@@ -583,11 +581,11 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     <hr>
 
                     <p><b>🅰 Hypothesis A</b><br>
-                    {title_a}</p>
+                    {title_a} (ID: {match.get('hypothesis_a', 'Unknown')})</p>
 
                     <p><b>🅱 Hypothesis B</b><br>
-                    {title_b}</p>
-                    
+                    {title_b} (ID: {match.get('hypothesis_b', 'Unknown')})</p>
+
                     <br>
 
                     <p><b>🏆 Winner</b><br>
