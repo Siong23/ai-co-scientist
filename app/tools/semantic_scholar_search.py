@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from ..utils import logger, redact_secrets
+from .pdf_urls import find_pdf_url
 
 _BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 _FIELDS = "title,abstract,year,authors,externalIds,fieldsOfStudy,openAccessPdf,publicationDate"
@@ -119,7 +120,7 @@ class SemanticScholarSearchTool:
             "published": published,
             "updated": published,
             "doi": external_ids.get("DOI"),
-            "pdf_url": open_access_pdf.get("url"),
+            "pdf_url": find_pdf_url(open_access_pdf.get("url"), source_url),
             "arxiv_url": source_url,
             "comment": None,
             "journal_ref": None,

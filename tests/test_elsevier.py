@@ -54,3 +54,17 @@ def test_search_records_rate_limit(monkeypatch):
     response.raise_for_status.side_effect = RuntimeError("rate limit")
     with patch("app.tools.elsevier_search.requests.get", return_value=response):
         assert ElsevierSearchTool().search_papers("quantum biology") == []
+
+
+def test_format_paper_preserves_explicit_full_text_pdf_link():
+    entry = _entry()
+    entry["link"].append(
+        {
+            "@ref": "full-text",
+            "@href": "https://link.springer.com/content/pdf/10.1007/test.pdf",
+        }
+    )
+
+    paper = ElsevierSearchTool._format_paper(entry)
+
+    assert paper["pdf_url"] == "https://link.springer.com/content/pdf/10.1007/test.pdf"

@@ -436,7 +436,7 @@ def judge_debate(
 #     If the decision is TIE, list the shared strengths or equally balanced evaluation factors as the decisive criteria.
 
 #     If the decision is ABSTAIN, list the reasons that prevented a confident comparison as the decisive criteria.
-    
+
 #     Confidence:
 #     A decimal number between 0 and 1.
 #     """

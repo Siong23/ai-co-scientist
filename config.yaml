@@ -76,7 +76,7 @@ rag:
   generation_debate_rounds: 0
   # Disabled after rollback: malformed or truncated audit JSON must not block
   # otherwise valid RAG-grounded hypothesis generation.
-  hypothesis_audit_enabled: false
+  hypothesis_audit_enabled: true
   rrf_k: 60
   max_abstract_chars: 4000
   # Relevance and coverage grading need titles plus concise abstracts, not the
@@ -113,6 +113,14 @@ paper_library:
     - "pdfs.semanticscholar.org"
     - "link.springer.com"
     - "api.springernature.com"
+    # Direct scholarly PDFs observed through supplementary web search.
+    # Keep this as an explicit host allowlist so web results cannot trigger
+    # downloads from arbitrary or internal network locations.
+    - "dspace.networks.imdea.org"
+    - "ieeexplore.ieee.org"
+    - "inss.egr.msu.edu"
+    - "paper.ijcsns.org"
+    - "www.tdx.cat"
 
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.

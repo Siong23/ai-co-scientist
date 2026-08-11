@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from ..utils import logger, redact_secrets
+from .pdf_urls import find_pdf_url
 
 _SEARCH_URL = "https://api.tavily.com/search"
 _DEFAULT_TIMEOUT = 15
@@ -77,6 +78,6 @@ class TavilySearchTool:
             "primary_category": "web",
             "categories": ["web"],
             "arxiv_url": url,
-            "pdf_url": None,
+            "pdf_url": find_pdf_url(url),
             "source": "tavily",
         }
