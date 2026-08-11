@@ -140,7 +140,7 @@ def call_llm_for_generation(
         full_prompt,
         temperature=temperature,
         model=model,
-        max_tokens=_output_token_limit("generation", 3072),
+        max_tokens=_output_token_limit("generation", 4096),
         reasoning="off",
     )
     logger.info("LLM generation response: %s", response)
@@ -168,7 +168,7 @@ def call_llm_for_generation(
         repair_prompt,
         temperature=0.0,
         model=model,
-        max_tokens=_output_token_limit("format_repair", 2048),
+        max_tokens=_output_token_limit("format_repair", 4096),
         reasoning="off",
     )
     logger.info("LLM generation format-repair response: %s", repaired_response)
@@ -643,7 +643,7 @@ def _numeric_specificity_not_in_evidence(
 
     final_text = " ".join(str(final_hypothesis.get(field, "")) for field in ("hypothesis", "rationale", "feasibility"))
     patterns = re.findall(
-        r"(?<!\w)\d+(?:\.\d+)?\s*(?:%|ms|milliseconds?|seconds?|Mbps|Gbps|dB)(?!\w)",
+        r"(?<!\w)\d+(?:\.\d+)?\s*(?:%|x|×|fold|times?|k|m|tokens?|ms|milliseconds?|seconds?|Mbps|Gbps|dB)(?!\w)",
         final_text,
         flags=re.IGNORECASE,
     )
@@ -659,118 +659,401 @@ def call_llm_for_hypothesis_audit(
     model: str | None = None,
     system_prompt: str | None = None,
 ) -> tuple[list[dict] | None, str | None]:
-    """Audit, revise, and gate generated hypotheses against retrieved evidence."""
+    """Audit hypotheses one at a time to avoid oversized/truncated JSON output.
 
-    prompt = f"""
+    Each candidate gets its own LLM call. If the first audit response is
+    malformed or truncated, retry that candidate once with a shorter,
+    stricter-output instruction.
+
+    A single malformed candidate audit is converted into a rejected audit
+    instead of aborting the entire generation run.
+    """
+
+    def _parse_single_audit_response(
+        response: str,
+    ) -> dict:
+        """Parse exactly one audit result from an LLM response."""
+
+        cleaned = response.strip()
+
+        fenced_match = re.search(
+            r"```(?:json)?\s*(.*?)\s*```",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fenced_match:
+            cleaned = fenced_match.group(1).strip()
+
+        # Accept short commentary before/after the JSON object.
+        object_start = cleaned.find("{")
+        if object_start < 0:
+            raise ValueError("No JSON object found in hypothesis audit response.")
+
+        payload, _ = json.JSONDecoder().raw_decode(
+            cleaned[object_start:]
+        )
+
+        if not isinstance(payload, dict):
+            raise ValueError("Hypothesis audit response must be a JSON object.")
+
+        raw_audits = payload.get("audited_hypotheses")
+
+        if not isinstance(raw_audits, list) or len(raw_audits) != 1:
+            raise ValueError(
+                "Expected exactly one item in 'audited_hypotheses'."
+            )
+
+        raw_audit = raw_audits[0]
+
+        if not isinstance(raw_audit, dict):
+            raise ValueError(
+                "The hypothesis audit item must be a JSON object."
+            )
+
+        return raw_audit
+
+    def _call_single_candidate(
+        candidate: dict,
+        candidate_index: int,
+    ) -> tuple[dict | None, str | None]:
+        """Audit one candidate, with one retry for malformed/truncated output."""
+
+        candidate_json = json.dumps(
+            candidate,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+        base_prompt = f"""
 RESEARCH GOAL
 {research_goal}
 
-CANDIDATE HYPOTHESES
-{json.dumps(hypotheses, ensure_ascii=False, indent=2)}
+CANDIDATE HYPOTHESIS
+{candidate_json}
 
 VERIFIED RETRIEVED SOURCES
 {retrieved_context}
 
-Audit every candidate and return one result for every zero-based candidate
-index. Scores must evaluate the final_hypothesis after any revision, not the
-original draft. A rejected item may use null for final_hypothesis.
+Audit only this single candidate.
+
+The candidate_index in your response MUST be 0 because only one candidate is
+being supplied in this request.
+
+Scores must evaluate final_hypothesis after any revision, not the original
+draft. A rejected candidate may use null for final_hypothesis.
+
+Keep audit explanations concise. Do not repeat large passages from the
+retrieved sources. Return only valid JSON matching the required schema.
 """.strip()
-    response = _call_llm(
-        prompt,
-        temperature=0.0,
-        model=model,
-        system_prompt=system_prompt,
-        max_tokens=_output_token_limit("hypothesis_audit", 3072),
-        reasoning="off",
-    )
-    if response.startswith("Error:"):
-        return None, f"Hypothesis audit failed: {response}"
 
-    try:
-        fenced_match = re.search(
-            r"```(?:json)?\s*(.*?)\s*```",
-            response.strip(),
-            flags=re.DOTALL | re.IGNORECASE,
+        response = _call_llm(
+            base_prompt,
+            temperature=0.0,
+            model=model,
+            system_prompt=system_prompt,
+            max_tokens=_output_token_limit(
+                "hypothesis_audit",
+                3072,
+            ),
+            reasoning="off",
         )
-        payload = json.loads(fenced_match.group(1) if fenced_match else response.strip())
-        raw_audits = payload.get("audited_hypotheses")
-        if not isinstance(raw_audits, list) or len(raw_audits) != len(hypotheses):
-            raise ValueError("Expected one audited_hypotheses item per candidate.")
 
-        audits_by_index: dict[int, dict] = {}
-        for raw_audit in raw_audits:
-            if not isinstance(raw_audit, dict):
-                raise ValueError("Every audit item must be an object.")
-            index = raw_audit.get("candidate_index")
-            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(hypotheses):
-                raise ValueError("Invalid candidate_index in hypothesis audit.")
-            if index in audits_by_index:
-                raise ValueError("Duplicate candidate_index in hypothesis audit.")
+        if response.startswith("Error:"):
+            return None, f"Hypothesis audit failed: {response}"
 
+        try:
+            raw_audit = _parse_single_audit_response(response)
+            return raw_audit, None
+
+        except (
+            json.JSONDecodeError,
+            AttributeError,
+            TypeError,
+            ValueError,
+        ) as first_error:
+            logger.warning(
+                "Hypothesis audit candidate %d returned malformed/truncated JSON; "
+                "retrying once: %s",
+                candidate_index,
+                first_error,
+            )
+
+        # Do NOT ask the model to repair the truncated text itself because the
+        # missing suffix may contain information that cannot be reconstructed.
+        # Instead, run a fresh audit of the same candidate with stricter brevity.
+        retry_prompt = f"""
+RESEARCH GOAL
+{research_goal}
+
+CANDIDATE HYPOTHESIS
+{candidate_json}
+
+VERIFIED RETRIEVED SOURCES
+{retrieved_context}
+
+Audit only this single candidate.
+
+Your previous audit response was malformed or truncated.
+
+Return a NEW audit from scratch.
+
+Requirements:
+- candidate_index MUST be 0.
+- Return exactly one item inside "audited_hypotheses".
+- Return valid JSON only.
+- No Markdown.
+- No commentary outside JSON.
+- Keep overlap, remaining_novelty, revision_instruction, and unsupported-claim
+  descriptions concise.
+- Do not quote long passages from sources.
+- Do not omit required score fields.
+- Scores must refer to the final revised hypothesis.
+- A rejected candidate may use null for final_hypothesis.
+""".strip()
+
+        retry_response = _call_llm(
+            retry_prompt,
+            temperature=0.0,
+            model=model,
+            system_prompt=system_prompt,
+            max_tokens=_output_token_limit(
+                "hypothesis_audit_retry",
+                3072,
+            ),
+            reasoning="off",
+        )
+
+        if retry_response.startswith("Error:"):
+            return None, f"Hypothesis audit retry failed: {retry_response}"
+
+        try:
+            raw_audit = _parse_single_audit_response(
+                retry_response
+            )
+            return raw_audit, None
+
+        except (
+            json.JSONDecodeError,
+            AttributeError,
+            TypeError,
+            ValueError,
+        ) as retry_error:
+            logger.error(
+                "Could not parse hypothesis audit candidate %d after retry. "
+                "Initial response=%s Retry response=%s",
+                candidate_index,
+                response,
+                retry_response,
+                exc_info=True,
+            )
+            return (
+                None,
+                "Hypothesis audit failed after retry: "
+                f"{retry_error}",
+            )
+
+    def _build_failed_audit(
+        candidate_index: int,
+        error: str,
+    ) -> dict:
+        """Convert an unrecoverable audit-format error into a rejected candidate."""
+
+        return {
+            "candidate_index": candidate_index,
+            "passed": False,
+            "final_hypothesis": None,
+            "audit_report": {
+                "scores": {
+                    score_name: 0.0
+                    for score_name in AUDIT_SCORE_WEIGHTS
+                },
+                "weighted_score": 0.0,
+                "closest_prior_art": [],
+                "draft_unsupported_claims": [],
+                "draft_unsupported_numbers": [],
+                "unsupported_claims": [],
+                "unsupported_numbers": [],
+                "warnings": [
+                    "The candidate audit could not be parsed after one retry."
+                ],
+                "revision_instruction": "",
+                "verdict": "REJECT",
+                "hard_failures": [
+                    error,
+                ],
+            },
+        }
+
+    audits: list[dict] = []
+
+    for candidate_index, candidate in enumerate(hypotheses):
+        if not isinstance(candidate, dict):
+            audits.append(
+                _build_failed_audit(
+                    candidate_index,
+                    "Candidate hypothesis is not a valid object.",
+                )
+            )
+            continue
+
+        raw_audit, audit_error = _call_single_candidate(
+            candidate,
+            candidate_index,
+        )
+
+        if audit_error or raw_audit is None:
+            logger.warning(
+                "Hypothesis candidate %d audit failed after retry; "
+                "rejecting only this candidate: %s",
+                candidate_index,
+                audit_error or "unknown audit error",
+            )
+            audits.append(
+                _build_failed_audit(
+                    candidate_index,
+                    audit_error or "Hypothesis audit failed.",
+                )
+            )
+            continue
+
+        try:
+            # Because each LLM call contains only one hypothesis, its local
+            # candidate_index should be zero. We deliberately replace it with
+            # the original batch index below.
             raw_scores = raw_audit.get("scores")
+
             if not isinstance(raw_scores, dict):
-                raise ValueError("Hypothesis audit scores must be an object.")
+                raise ValueError(
+                    "Hypothesis audit scores must be an object."
+                )
 
             scores: dict[str, float] = {}
+
             for score_name in AUDIT_SCORE_WEIGHTS:
                 score = raw_scores.get(score_name)
-                if not isinstance(score, (int, float)) or isinstance(score, bool) or not 0 <= score <= 10:
-                    raise ValueError(f"Invalid audit score: {score_name}.")
-                scores[score_name] = float(score)
-            if scores and max(scores.values()) <= 1:
-                scores = {score_name: score * 10 for score_name, score in scores.items()}
 
-            final_hypothesis = raw_audit.get("final_hypothesis")
+                if (
+                    not isinstance(score, (int, float))
+                    or isinstance(score, bool)
+                    or not 0 <= score <= 10
+                ):
+                    raise ValueError(
+                        f"Invalid audit score: {score_name}."
+                    )
+
+                scores[score_name] = float(score)
+
+            # Keep backwards compatibility with accidental 0-1 scoring.
+            if scores and max(scores.values()) <= 1:
+                scores = {
+                    score_name: score * 10
+                    for score_name, score in scores.items()
+                }
+
+            final_hypothesis = raw_audit.get(
+                "final_hypothesis"
+            )
+
             valid_final = None
             valid_source_ids: list[str] = []
+
             if isinstance(final_hypothesis, dict):
-                required_fields = ("title", "hypothesis", "rationale", "feasibility")
-                if all(
-                    isinstance(final_hypothesis.get(field), str) and final_hypothesis[field].strip()
-                    for field in required_fields
-                ) and isinstance(final_hypothesis.get("source_ids"), list):
-                    valid_source_ids = _resolve_retrieved_source_ids(
-                        final_hypothesis["source_ids"],
-                        available_source_ids,
+                required_fields = (
+                    "title",
+                    "hypothesis",
+                    "rationale",
+                    "feasibility",
+                )
+
+                if (
+                    all(
+                        isinstance(
+                            final_hypothesis.get(field),
+                            str,
+                        )
+                        and final_hypothesis[field].strip()
+                        for field in required_fields
                     )
+                    and isinstance(
+                        final_hypothesis.get("source_ids"),
+                        list,
+                    )
+                ):
+                    valid_source_ids = (
+                        _resolve_retrieved_source_ids(
+                            final_hypothesis[
+                                "source_ids"
+                            ],
+                            available_source_ids,
+                        )
+                    )
+
                     if valid_source_ids:
-                        valid_final = {field: final_hypothesis[field].strip() for field in required_fields}
-                        valid_final["source_ids"] = valid_source_ids
+                        valid_final = {
+                            field: final_hypothesis[
+                                field
+                            ].strip()
+                            for field in required_fields
+                        }
+                        valid_final["source_ids"] = (
+                            valid_source_ids
+                        )
 
             draft_unsupported_claims = tuple(
                 dict.fromkeys(
                     value.strip()
                     for value in raw_audit.get(
                         "draft_unsupported_claims",
-                        raw_audit.get("unsupported_claims", []),
+                        raw_audit.get(
+                            "unsupported_claims",
+                            [],
+                        ),
                     )
-                    if isinstance(value, str) and value.strip()
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
+
             draft_unsupported_numbers = list(
                 dict.fromkeys(
                     value.strip()
                     for value in raw_audit.get(
                         "draft_unsupported_numbers",
-                        raw_audit.get("unsupported_numbers", []),
+                        raw_audit.get(
+                            "unsupported_numbers",
+                            [],
+                        ),
                     )
-                    if isinstance(value, str) and value.strip()
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
+
             unsupported_claims = tuple(
                 dict.fromkeys(
                     value.strip()
-                    for value in raw_audit.get("remaining_unsupported_claims", [])
-                    if isinstance(value, str) and value.strip()
+                    for value in raw_audit.get(
+                        "remaining_unsupported_claims",
+                        [],
+                    )
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
+
             unsupported_numbers = list(
                 dict.fromkeys(
                     value.strip()
-                    for value in raw_audit.get("remaining_unsupported_numbers", [])
-                    if isinstance(value, str) and value.strip()
+                    for value in raw_audit.get(
+                        "remaining_unsupported_numbers",
+                        [],
+                    )
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
+
+            # Deterministic numeric check against retrieved evidence.
             if valid_final is not None:
                 unsupported_numbers = list(
                     dict.fromkeys(
@@ -785,78 +1068,207 @@ original draft. A rejected item may use null for final_hypothesis.
                 )
 
             closest_prior_art = []
-            for item in raw_audit.get("closest_prior_art", []):
+
+            raw_prior_art = raw_audit.get(
+                "closest_prior_art",
+                [],
+            )
+
+            if not isinstance(raw_prior_art, list):
+                raw_prior_art = []
+
+            for item in raw_prior_art:
                 if not isinstance(item, dict):
                     continue
-                resolved_id = _resolve_retrieved_source_id(
-                    str(item.get("source_id", "")),
-                    available_source_ids,
+
+                resolved_id = (
+                    _resolve_retrieved_source_id(
+                        str(
+                            item.get(
+                                "source_id",
+                                "",
+                            )
+                        ),
+                        available_source_ids,
+                    )
                 )
+
                 if resolved_id is None:
                     continue
+
                 closest_prior_art.append(
                     {
                         "source_id": resolved_id,
-                        "overlap": str(item.get("overlap", "")).strip(),
-                        "remaining_novelty": str(item.get("remaining_novelty", "")).strip(),
+                        "overlap": str(
+                            item.get(
+                                "overlap",
+                                "",
+                            )
+                        ).strip(),
+                        "remaining_novelty": str(
+                            item.get(
+                                "remaining_novelty",
+                                "",
+                            )
+                        ).strip(),
                     }
                 )
 
             audit_warnings = []
+
             if unsupported_numbers:
                 scores["unsupported_specificity"] = min(
                     scores["unsupported_specificity"],
                     5.0,
                 )
+
                 audit_warnings.append(
-                    "The final hypothesis contains numeric specificity not found verbatim in the evidence."
+                    "The final hypothesis contains numeric specificity "
+                    "not found verbatim in the evidence."
                 )
 
             weighted_score = round(
-                sum(scores[name] * weight for name, weight in AUDIT_SCORE_WEIGHTS.items()) / 10,
+                sum(
+                    scores[name] * weight
+                    for name, weight
+                    in AUDIT_SCORE_WEIGHTS.items()
+                )
+                / 10,
                 1,
             )
+
             hard_failures = []
+
             if valid_final is None:
-                hard_failures.append("No valid final hypothesis with retrieved citations.")
+                hard_failures.append(
+                    "No valid final hypothesis with retrieved citations."
+                )
+
             if scores["evidence_validity"] < 5:
-                hard_failures.append("Evidence validity score is below 5/10.")
-            if scores["claim_evidence_entailment"] < 5:
-                hard_failures.append("Claim-evidence entailment score is below 5/10.")
-            if scores["novelty_against_prior_art"] < 5:
-                hard_failures.append("Novelty score is below 5/10.")
+                hard_failures.append(
+                    "Evidence validity score is below 5/10."
+                )
+
+            if scores[
+                "claim_evidence_entailment"
+            ] < 5:
+                hard_failures.append(
+                    "Claim-evidence entailment score is below 5/10."
+                )
+
+            if scores[
+                "novelty_against_prior_art"
+            ] < 5:
+                hard_failures.append(
+                    "Novelty score is below 5/10."
+                )
+
             if unsupported_claims:
-                hard_failures.append("The final hypothesis contains unsupported claims.")
+                hard_failures.append(
+                    "The final hypothesis contains unsupported claims."
+                )
+
+            # Keep this enabled if you want unsupported numerical claims
+            # to be a hard rejection rather than only a warning.
+            if unsupported_numbers:
+                hard_failures.append(
+                    "The final hypothesis contains unsupported numerical claims."
+                )
+
             if weighted_score < 70:
-                hard_failures.append("Weighted audit score is below 70/100.")
-            if str(raw_audit.get("verdict", "")).strip().casefold() == "reject":
-                hard_failures.append("The novelty auditor rejected the candidate.")
+                hard_failures.append(
+                    "Weighted audit score is below 70/100."
+                )
+
+            if (
+                str(
+                    raw_audit.get(
+                        "verdict",
+                        "",
+                    )
+                )
+                .strip()
+                .casefold()
+                == "reject"
+            ):
+                hard_failures.append(
+                    "The novelty auditor rejected the candidate."
+                )
 
             audit_report = {
                 "scores": scores,
                 "weighted_score": weighted_score,
                 "closest_prior_art": closest_prior_art,
-                "draft_unsupported_claims": list(draft_unsupported_claims),
-                "draft_unsupported_numbers": draft_unsupported_numbers,
-                "unsupported_claims": list(unsupported_claims),
-                "unsupported_numbers": unsupported_numbers,
+                "draft_unsupported_claims": list(
+                    draft_unsupported_claims
+                ),
+                "draft_unsupported_numbers": (
+                    draft_unsupported_numbers
+                ),
+                "unsupported_claims": list(
+                    unsupported_claims
+                ),
+                "unsupported_numbers": (
+                    unsupported_numbers
+                ),
                 "warnings": audit_warnings,
-                "revision_instruction": str(raw_audit.get("revision_instruction", "")).strip(),
-                "verdict": "REJECT" if hard_failures else "PASS",
+                "revision_instruction": str(
+                    raw_audit.get(
+                        "revision_instruction",
+                        "",
+                    )
+                ).strip(),
+                "verdict": (
+                    "REJECT"
+                    if hard_failures
+                    else "PASS"
+                ),
                 "hard_failures": hard_failures,
             }
-            audits_by_index[index] = {
-                "candidate_index": index,
-                "passed": not hard_failures,
-                "final_hypothesis": valid_final,
-                "audit_report": audit_report,
-            }
 
-        return [audits_by_index[index] for index in range(len(hypotheses))], None
-    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
-        logger.error("Could not parse hypothesis audit response: %s", response, exc_info=True)
-        return None, f"Hypothesis audit failed: {exc}"
+            audits.append(
+                {
+                    "candidate_index": (
+                        candidate_index
+                    ),
+                    "passed": not hard_failures,
+                    "final_hypothesis": (
+                        valid_final
+                    ),
+                    "audit_report": (
+                        audit_report
+                    ),
+                }
+            )
 
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.error(
+                "Hypothesis candidate %d returned a structurally invalid "
+                "audit after JSON parsing.",
+                candidate_index,
+                exc_info=True,
+            )
+
+            audits.append(
+                _build_failed_audit(
+                    candidate_index,
+                    "Hypothesis audit structure validation failed: "
+                    f"{exc}",
+                )
+            )
+
+    logger.info(
+        "Hypothesis audit completed: %d candidate(s), %d passed, %d rejected.",
+        len(audits),
+        sum(1 for audit in audits if audit["passed"]),
+        sum(1 for audit in audits if not audit["passed"]),
+    )
+
+    return audits, None
 
 def call_llm_for_evidence_coverage(
     research_goal: str,
@@ -998,6 +1410,502 @@ class LiteratureSynthesis:
     contradictions: tuple[LiteratureFinding, ...]
     knowledge_gaps: tuple[str, ...]
     analytical_rationale: str
+
+
+# ---------------------------------------------------------------------------
+# Agentic research control
+# ---------------------------------------------------------------------------
+
+ASSUMPTION_STATUSES = {
+    "SUPPORTED",
+    "CONTRADICTED",
+    "MIXED",
+    "UNVERIFIED",
+}
+
+RESEARCH_ACTIONS = {
+    "SEARCH_GAP",
+    "SEARCH_COUNTEREVIDENCE",
+    "VERIFY_ASSUMPTION",
+    "GENERATE",
+}
+
+GENERATION_STRATEGIES = (
+    "literature_grounded",
+    "contradiction_driven",
+    "conditional_hop",
+    "cross_paper_synthesis",
+)
+
+
+@dataclass(frozen=True)
+class AssumptionAssessment:
+    """One intermediate assumption considered by the Generation agent."""
+
+    assumption_id: str
+    assumption: str
+    status: str
+    critical: bool
+    source_ids: tuple[str, ...]
+    search_query: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ResearchActionDecision:
+    """One bounded next action selected from the current research state."""
+
+    action: str
+    queries: tuple[str, ...]
+    target: str
+    reason: str
+
+
+def _parse_agentic_json_object(response: str) -> dict:
+    """Parse one JSON object from a structured agentic-control response."""
+
+    cleaned = response.strip()
+    fenced_match = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if fenced_match:
+        cleaned = fenced_match.group(1).strip()
+
+    starts = [index for index in (cleaned.find("{"), cleaned.find("[")) if index >= 0]
+    if not starts:
+        raise ValueError("No JSON object was found.")
+
+    payload, _ = json.JSONDecoder().raw_decode(cleaned[min(starts) :])
+    if not isinstance(payload, dict):
+        raise ValueError("Expected a JSON object.")
+    return payload
+
+
+def _compact_search_history(search_history: list[dict], limit: int = 8) -> list[dict]:
+    """Keep only compact recent search telemetry for the action controller."""
+
+    compact: list[dict] = []
+    for item in search_history[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(
+            {
+                key: item.get(key)
+                for key in ("round", "source", "queries_requested", "queries_completed", "results", "status")
+                if key in item
+            }
+        )
+    return compact
+
+
+def format_assumption_assessments(assumptions: list[AssumptionAssessment]) -> str:
+    """Format assumption state for controller and generation prompts."""
+
+    if not assumptions:
+        return "- None identified"
+
+    lines = []
+    for item in assumptions:
+        sources = ", ".join(item.source_ids) if item.source_ids else "none"
+        query = f" Search query: {item.search_query}" if item.search_query else ""
+        lines.append(
+            f"- {item.assumption_id} [{item.status}] critical={str(item.critical).lower()}: "
+            f"{item.assumption} Sources: {sources}. Reason: {item.reason}.{query}"
+        )
+    return "\n".join(lines)
+
+
+def call_llm_for_assumption_analysis(
+    research_goal: str,
+    synthesis: LiteratureSynthesis,
+    retrieved_context: str,
+    available_source_ids: set[str],
+    model: str | None = None,
+    max_assumptions: int = 6,
+) -> tuple[list[AssumptionAssessment] | None, str | None]:
+    """Identify and evidence-check intermediate assumptions before generation.
+
+    This is deliberately a lightweight conditional-hop analysis. It does not
+    generate hypotheses. It exposes assumptions that a later hypothesis may
+    depend on so the research controller can decide whether another retrieval
+    step is worthwhile.
+    """
+
+    max_assumptions = max(1, min(8, int(max_assumptions)))
+    synthesis_text = format_literature_synthesis(synthesis)
+    prompt = f"""
+You are the Assumption Analysis component of an agentic scientific research
+system.
+
+Analyze the literature synthesis and identify at most {max_assumptions}
+intermediate assumptions that would matter when formulating new hypotheses for
+the research goal. The purpose is to expose conditional reasoning hops before
+generation, not to invent new facts.
+
+Rules:
+- Use only the verified retrieved sources below when assigning evidence status.
+- Do not treat the research goal, a plausible mechanism, or the analytical
+  rationale as evidence.
+- Break broad generalizations into smaller assumptions when needed.
+- Mark an assumption SUPPORTED only when the supplied evidence directly supports
+  it.
+- Mark CONTRADICTED when the evidence directly argues against it.
+- Mark MIXED when the supplied evidence contains meaningful support and
+  counterevidence.
+- Mark UNVERIFIED when the assumption is plausible but not established by the
+  supplied evidence.
+- critical=true only when a strong candidate hypothesis would materially depend
+  on that assumption.
+- For critical MIXED or UNVERIFIED assumptions, provide one concise search query
+  that could resolve the uncertainty.
+- source_ids must contain only exact Source IDs from the verified evidence.
+- Do not generate a final hypothesis.
+
+Return only valid JSON:
+{{
+  "assumptions": [
+    {{
+      "assumption_id": "a1",
+      "assumption": "one concise intermediate assumption",
+      "status": "SUPPORTED | CONTRADICTED | MIXED | UNVERIFIED",
+      "critical": true,
+      "source_ids": ["exact Source ID"],
+      "search_query": "targeted query or empty string",
+      "reason": "brief evidence-calibrated explanation"
+    }}
+  ]
+}}
+
+Research goal:
+{research_goal}
+
+Literature synthesis:
+{synthesis_text}
+
+Verified retrieved sources:
+{retrieved_context}
+""".strip()
+
+    response = _call_llm(
+        prompt,
+        temperature=0.0,
+        model=model,
+        max_tokens=_output_token_limit("assumption_analysis", 1400),
+        reasoning="off",
+    )
+    if response.startswith("Error:"):
+        return None, f"Assumption analysis failed: {response}"
+
+    try:
+        payload = _parse_agentic_json_object(response)
+        raw_assumptions = payload.get("assumptions")
+        if not isinstance(raw_assumptions, list):
+            raise ValueError("Expected an 'assumptions' array.")
+
+        assessments: list[AssumptionAssessment] = []
+        seen_ids: set[str] = set()
+        for index, item in enumerate(raw_assumptions[:max_assumptions], start=1):
+            if not isinstance(item, dict):
+                continue
+
+            assumption_id = str(item.get("assumption_id", f"a{index}")).strip() or f"a{index}"
+            if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,31}", assumption_id):
+                assumption_id = f"a{index}"
+            if assumption_id in seen_ids:
+                assumption_id = f"a{index}"
+            seen_ids.add(assumption_id)
+
+            assumption = str(item.get("assumption", "")).strip()
+            status = str(item.get("status", "UNVERIFIED")).strip().upper()
+            critical = item.get("critical", False)
+            reason = str(item.get("reason", "")).strip()
+            search_query = str(item.get("search_query", "")).strip()
+            source_ids = _resolve_retrieved_source_ids(
+                item.get("source_ids", []),
+                available_source_ids,
+            )
+
+            if not assumption:
+                continue
+            if status not in ASSUMPTION_STATUSES:
+                status = "UNVERIFIED"
+            if not isinstance(critical, bool):
+                critical = False
+
+            # Evidence-bearing statuses must cite at least one verified source.
+            # Otherwise downgrade them rather than trusting an unsupported label.
+            if status in {"SUPPORTED", "CONTRADICTED", "MIXED"} and not source_ids:
+                status = "UNVERIFIED"
+
+            if status not in {"MIXED", "UNVERIFIED"}:
+                search_query = ""
+
+            assessments.append(
+                AssumptionAssessment(
+                    assumption_id=assumption_id,
+                    assumption=assumption,
+                    status=status,
+                    critical=critical,
+                    source_ids=tuple(source_ids),
+                    search_query=search_query,
+                    reason=reason or "No additional explanation supplied.",
+                )
+            )
+
+        logger.info(
+            "Assumption analysis produced %d assumption(s): %s",
+            len(assessments),
+            [(item.assumption_id, item.status, item.critical) for item in assessments],
+        )
+        return assessments, None
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        logger.error("Could not parse assumption-analysis response: %s", response, exc_info=True)
+        return None, f"Assumption analysis failed: {exc}"
+
+
+def call_llm_for_research_action(
+    research_goal: str,
+    synthesis: LiteratureSynthesis,
+    coverage: EvidenceCoverage,
+    assumptions: list[AssumptionAssessment],
+    explicit_requirements: tuple[EvidenceAspect, ...] = (),
+    search_history: list[dict] | None = None,
+    step: int = 0,
+    max_steps: int = 4,
+    model: str | None = None,
+    max_queries: int = 3,
+) -> tuple[ResearchActionDecision | None, str | None]:
+    """Choose one bounded next research action from the current evidence state.
+
+    The LLM chooses the research direction, while deterministic guards prevent
+    it from bypassing explicit evidence coverage or creating an unbounded loop.
+    """
+
+    max_steps = max(1, int(max_steps))
+    step = max(0, int(step))
+    max_queries = max(1, min(5, int(max_queries)))
+    search_history = search_history or []
+
+    requirement_by_id = {item.aspect_id: item.description for item in explicit_requirements}
+    missing_requirements = [
+        requirement_by_id.get(aspect_id, aspect_id)
+        for aspect_id in coverage.missing_aspect_ids
+    ]
+    synthesis_text = format_literature_synthesis(synthesis)
+    assumption_text = format_assumption_assessments(assumptions)
+    history_text = json.dumps(_compact_search_history(search_history), ensure_ascii=False, indent=2)
+
+    # On the final allowed step, do not spend another LLM call deciding to search
+    # if the deterministic evidence gate is already satisfied.
+    if step >= max_steps - 1 and coverage.sufficient:
+        return (
+            ResearchActionDecision(
+                action="GENERATE",
+                queries=(),
+                target="bounded research budget reached",
+                reason="Evidence coverage is sufficient and the configured agentic research budget is exhausted.",
+            ),
+            None,
+        )
+
+    prompt = f"""
+You are the Research Action Controller of an agentic scientific Generation
+agent. Choose exactly one next action using the current evidence state.
+
+Allowed actions:
+- SEARCH_GAP: retrieve evidence for an explicit requirement or knowledge gap.
+- SEARCH_COUNTEREVIDENCE: actively search for evidence that could challenge a
+  broad conclusion, category-level generalization, or apparent consensus.
+- VERIFY_ASSUMPTION: search specifically for a critical MIXED or UNVERIFIED
+  intermediate assumption.
+- GENERATE: stop researching and hand the evidence state to hypothesis
+  generation.
+
+Decision rules:
+1. Never choose GENERATE when explicit evidence coverage is insufficient.
+2. Prefer SEARCH_GAP when a user-stated explicit requirement is still missing.
+3. Prefer VERIFY_ASSUMPTION when a critical assumption is unresolved and the
+   resulting hypothesis would materially depend on it.
+4. Prefer SEARCH_COUNTEREVIDENCE when current evidence supports a broad
+   generalization but plausible counterexamples have not been checked.
+5. Do not search merely to accumulate more papers. Search only when another
+   retrieval step could materially change the hypothesis space or confidence.
+6. Avoid repeating queries that have already failed unless the new query is
+   materially more specific.
+7. Return at most {max_queries} concise search queries.
+8. Do not generate hypotheses or answer the research goal.
+
+Return only valid JSON:
+{{
+  "action": "SEARCH_GAP | SEARCH_COUNTEREVIDENCE | VERIFY_ASSUMPTION | GENERATE",
+  "queries": ["targeted search query"],
+  "target": "the evidence gap, contradiction, or assumption being addressed",
+  "reason": "brief decision rationale"
+}}
+
+Research goal:
+{research_goal}
+
+Agentic step:
+{step + 1} of {max_steps}
+
+Coverage sufficient:
+{coverage.sufficient}
+
+Missing explicit requirements:
+{json.dumps(missing_requirements, ensure_ascii=False)}
+
+Coverage-proposed gap queries:
+{json.dumps(list(coverage.gap_queries), ensure_ascii=False)}
+
+Literature synthesis:
+{synthesis_text}
+
+Intermediate assumptions:
+{assumption_text}
+
+Recent search history:
+{history_text}
+""".strip()
+
+    response = _call_llm(
+        prompt,
+        temperature=0.0,
+        model=model,
+        max_tokens=_output_token_limit("research_action", 700),
+        reasoning="off",
+    )
+    if response.startswith("Error:"):
+        return None, f"Research action selection failed: {response}"
+
+    try:
+        payload = _parse_agentic_json_object(response)
+        action = str(payload.get("action", "")).strip().upper()
+        if action not in RESEARCH_ACTIONS:
+            raise ValueError(f"Unsupported research action: {action or 'empty'}.")
+
+        raw_queries = payload.get("queries", [])
+        if not isinstance(raw_queries, list):
+            raise ValueError("Expected a 'queries' array.")
+        queries = tuple(
+            dict.fromkeys(
+                query.strip()
+                for query in raw_queries
+                if isinstance(query, str) and query.strip()
+            )
+        )[:max_queries]
+        target = str(payload.get("target", "")).strip()
+        reason = str(payload.get("reason", "")).strip()
+
+        # Deterministic guard: the controller cannot bypass user-stated evidence
+        # coverage. Convert an invalid GENERATE decision into targeted retrieval.
+        if action == "GENERATE" and not coverage.sufficient:
+            fallback_queries = tuple(coverage.gap_queries)
+            if not fallback_queries:
+                fallback_queries = tuple(
+                    requirement
+                    for requirement in missing_requirements
+                    if isinstance(requirement, str) and requirement.strip()
+                )
+            if not fallback_queries:
+                return None, (
+                    "Research action selection failed: coverage is insufficient "
+                    "but no corrective query could be derived."
+                )
+            action = "SEARCH_GAP"
+            queries = fallback_queries[:max_queries]
+            target = target or "missing explicit evidence coverage"
+            reason = (
+                "The model attempted to generate before the deterministic evidence gate was satisfied; "
+                "the action was converted to corrective retrieval."
+            )
+
+        if action == "GENERATE":
+            queries = ()
+        elif not queries:
+            if action == "SEARCH_GAP":
+                queries = tuple(coverage.gap_queries)[:max_queries]
+            elif action == "VERIFY_ASSUMPTION":
+                queries = tuple(
+                    dict.fromkeys(
+                        item.search_query
+                        for item in assumptions
+                        if item.critical
+                        and item.status in {"MIXED", "UNVERIFIED"}
+                        and item.search_query
+                    )
+                )[:max_queries]
+
+        # If the chosen search action still has no executable query, fall back to
+        # GENERATE only when coverage is already sufficient. Otherwise fail
+        # explicitly instead of inventing a query in code.
+        if action != "GENERATE" and not queries:
+            if coverage.sufficient:
+                action = "GENERATE"
+                target = target or "current evidence state"
+                reason = reason or "No additional targeted retrieval query was available."
+            else:
+                return None, (
+                    "Research action selection failed: the selected retrieval action "
+                    "did not contain an executable query."
+                )
+
+        decision = ResearchActionDecision(
+            action=action,
+            queries=queries,
+            target=target or "current research state",
+            reason=reason or "No additional rationale supplied.",
+        )
+        logger.info(
+            "Research action step=%d/%d action=%s target=%s queries=%s",
+            step + 1,
+            max_steps,
+            decision.action,
+            decision.target,
+            decision.queries,
+        )
+        return decision, None
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+        logger.error("Could not parse research-action response: %s", response, exc_info=True)
+        return None, f"Research action selection failed: {exc}"
+
+
+def generation_strategies_for_count(num_hypotheses: int) -> tuple[str, ...]:
+    """Return a deterministic mix of generation strategies for candidate diversity."""
+
+    count = max(0, int(num_hypotheses))
+    if count == 0:
+        return ()
+    return tuple(GENERATION_STRATEGIES[index % len(GENERATION_STRATEGIES)] for index in range(count))
+
+
+def generation_strategy_instruction(strategy: str) -> str:
+    """Return the prompt instruction for one hypothesis-generation strategy."""
+
+    instructions = {
+        "literature_grounded": (
+            "Generate a hypothesis directly from a genuine unresolved gap in the literature synthesis. "
+            "Keep every established premise tied to retrieved evidence."
+        ),
+        "contradiction_driven": (
+            "Start from a source-supported disagreement, boundary condition, or conflicting result. "
+            "Propose a falsifiable hypothesis that could explain why the findings differ."
+        ),
+        "conditional_hop": (
+            "Construct a short chain of explicit intermediate assumptions from supported observations to a new claim. "
+            "Do not present UNVERIFIED assumptions as established facts; make the final relationship falsifiable."
+        ),
+        "cross_paper_synthesis": (
+            "Identify findings from different retrieved sources that have not clearly been tested together. "
+            "Propose a specific interaction or boundary-condition hypothesis rather than merely combining keywords."
+        ),
+    }
+    normalized = strategy.strip().casefold()
+    if normalized not in instructions:
+        raise ValueError(f"Unknown generation strategy: {strategy}.")
+    return instructions[normalized]
 
 
 def call_llm_for_literature_synthesis(

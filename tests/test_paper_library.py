@@ -103,6 +103,33 @@ def test_search_is_restricted_to_selected_source_ids(tmp_path, monkeypatch):
     assert {result.source_id for result in results} == {"arXiv:2222.2222"}
 
 
+def test_web_search_pdf_is_automatically_downloaded_and_indexed(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    document = Document(
+        page_content="Title: Web-discovered paper\nAbstract: Relevant open evidence.",
+        metadata={
+            "source_id": "tavily:open-paper",
+            "title": "Web-discovered paper",
+            "pdf_url": "https://dspace.networks.imdea.org/bitstream/handle/paper.pdf",
+        },
+    )
+    download_calls = []
+
+    def fake_download(url, destination):
+        download_calls.append(url)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"%PDF")
+
+    monkeypatch.setattr(library, "_download_pdf", fake_download)
+    monkeypatch.setattr(library, "_extract_pages", lambda _path: [(1, "Web full-text evidence " * 40)])
+
+    enriched = library.enrich_documents([document], "open evidence")
+
+    assert download_calls == ["https://dspace.networks.imdea.org/bitstream/handle/paper.pdf"]
+    assert enriched[0].metadata["full_text_indexed"] is True
+    assert library.has_indexed_source("tavily:open-paper") is True
+
+
 def test_enrichment_adds_bounded_full_text_and_index_metadata(tmp_path, monkeypatch):
     library = _library(tmp_path)
     library.max_prompt_chars = 35
@@ -156,6 +183,12 @@ def test_download_allows_configured_springer_pdf_host(tmp_path):
     library = _library(tmp_path)
 
     library._validate_pdf_url("https://link.springer.com/content/pdf/10.1007/test.pdf")
+
+
+def test_download_allows_configured_web_search_pdf_host(tmp_path):
+    library = _library(tmp_path)
+
+    library._validate_pdf_url("https://dspace.networks.imdea.org/bitstream/handle/paper.pdf")
 
 
 def test_generation_full_text_failure_falls_back_to_abstracts(monkeypatch):

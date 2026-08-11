@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from ..utils import logger, redact_secrets
+from .pdf_urls import find_pdf_url
 
 _DEFAULT_TIMEOUT = 15
 _DEFAULT_SEARCH_URL = "https://api.elsevier.com/content/search/scopus"
@@ -78,6 +79,7 @@ class ElsevierSearchTool:
         publication_name = str(entry.get("prism:publicationName") or "").strip() or None
         abstract = str(entry.get("dc:description") or "").strip()
         entry_url = cls._entry_url(entry, doi, eid)
+        pdf_url = find_pdf_url(entry.get("link"), entry.get("prism:url"), entry_url)
         return {
             "arxiv_id": source_id,
             "entry_id": entry_url,
@@ -89,7 +91,7 @@ class ElsevierSearchTool:
             "published": published,
             "updated": published,
             "doi": doi or None,
-            "pdf_url": None,
+            "pdf_url": pdf_url,
             "arxiv_url": entry_url,
             "comment": None,
             "journal_ref": publication_name,

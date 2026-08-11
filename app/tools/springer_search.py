@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from ..utils import logger, redact_secrets
+from .pdf_urls import find_pdf_url
 
 _DEFAULT_TIMEOUT = 15
 
@@ -122,13 +123,13 @@ class SpringerSearchTool:
 
         urls = record.get("url") or []
         web_url = None
-        pdf_url = None
+        pdf_url = find_pdf_url(urls)
         if isinstance(urls, list):
             for u in urls:
                 if isinstance(u, dict):
                     val = u.get("value")
-                    fmt = u.get("format", "")
-                    if fmt == "pdf":
+                    fmt = str(u.get("format", "")).casefold()
+                    if fmt == "pdf" and val:
                         pdf_url = val
                     elif fmt == "html" or not web_url:
                         web_url = val

@@ -149,6 +149,28 @@ def test_references_do_not_search_again_when_no_source_was_used(
     assert html == ("<p>No retrieved evidence was used for generation.</p>")
 
 
+def test_references_hide_pdf_link_when_source_has_no_pdf(gradio_app_module):
+    cycle_details = {
+        "steps": {
+            "generation": {
+                "sources": [
+                    {
+                        "title": "Web-only evidence",
+                        "arxiv_id": "tavily:web-only",
+                        "arxiv_url": "https://example.org/article",
+                        "pdf_url": None,
+                    }
+                ]
+            }
+        }
+    }
+
+    html = gradio_app_module.get_references_html(cycle_details)
+
+    assert "View source" in html
+    assert "Download PDF" not in html
+
+
 def test_generation_results_show_every_search_provider_call(gradio_app_module):
     cycle_details = {
         "iteration": 1,
