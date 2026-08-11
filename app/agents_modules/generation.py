@@ -8,10 +8,12 @@ from typing import Dict, List, Tuple
 
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
+from ..paper_library import ChromaPaperLibrary
 from ..rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
     SearchQueryPlan,
+    format_documents_for_grading,
     format_documents_for_prompt,
     serialize_documents,
 )
@@ -177,6 +179,7 @@ class GenerationAgent:
         corrective_retrieval_rounds: int | None = None,
         debate_rounds: int | None = None,
         audit_enabled: bool | None = None,
+        paper_library: ChromaPaperLibrary | None = None,
     ) -> None:
         self.rag_retriever = ArxivRAGRetriever(
             minimum_relevant_sources=minimum_relevant_sources,
@@ -188,11 +191,20 @@ class GenerationAgent:
             min(5, self.rag_retriever.generation_debate_rounds),
         )
         rag_config = config.get("rag", {})
+        self.max_grading_abstract_chars = max(
+            0,
+            int(rag_config.get("max_grading_abstract_chars", 1600)),
+        )
+        self.max_grading_context_chars = max(
+            1000,
+            int(rag_config.get("max_grading_context_chars", 24000)),
+        )
         self.audit_enabled = (
             bool(rag_config.get("hypothesis_audit_enabled", False))
             if audit_enabled is None and debate_rounds is None
             else bool(audit_enabled)
         )
+        self.paper_library = paper_library or ChromaPaperLibrary(embeddings=self.rag_retriever.embeddings)
 
     def _retrieve_scientific_sources(
         self,
@@ -209,6 +221,40 @@ class GenerationAgent:
         """Run the first retrieval stage with the user's unmodified goal."""
 
         return self.rag_retriever.retrieve_original_goal(research_goal.description)
+
+    def _enrich_with_full_text(self, documents, research_goal: ResearchGoal):
+        """Use relevant paper bodies when available without blocking generation."""
+
+        try:
+            return self.paper_library.enrich_documents(documents, research_goal.description)
+        except Exception as exc:
+            _legacy.logger.warning(
+                "Paper download/vector indexing failed; continuing with abstracts: %s",
+                _legacy.redact_secrets(str(exc)),
+            )
+            return list(documents)
+
+    def _requires_indexed_sources(self) -> bool:
+        return bool(getattr(self.paper_library, "enabled", False)) and bool(
+            getattr(self.paper_library, "require_indexed_sources_for_generation", False)
+        )
+
+    def _prepare_candidate_documents(self, documents, research_goal: ResearchGoal):
+        """Retain only successfully indexed full text when strict mode is enabled."""
+
+        if not self._requires_indexed_sources():
+            return list(documents)
+
+        enriched_documents = self._enrich_with_full_text(documents, research_goal)
+        indexed_documents = [
+            document for document in enriched_documents if document.metadata.get("full_text_indexed") is True
+        ]
+        _legacy.logger.info(
+            "Full-text evidence gate retained %d/%d source(s) successfully indexed in ChromaDB.",
+            len(indexed_documents),
+            len(enriched_documents),
+        )
+        return indexed_documents
 
     @staticmethod
     def _build_minimal_fallback_plan(research_goal: str) -> SearchQueryPlan:
@@ -330,6 +376,7 @@ Your refined contribution:
 
         num_to_generate = research_goal.num_hypotheses
         gen_temp = research_goal.generation_temperature
+        self.rag_retriever.reset_search_stats()
         query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
             research_goal.description,
             model=getattr(research_goal, "query_rewrite_model", getattr(research_goal, "llm_model", None)),
@@ -379,11 +426,23 @@ Your refined contribution:
 
         retrieved_documents = []
         coverage = None
+        graded_documents = []
         corrective_round = 0
         fallback_attempted = False
         while True:
-            candidate_context = format_documents_for_prompt(candidate_documents)
-            candidate_source_ids = {str(document.metadata["source_id"]) for document in candidate_documents}
+            documents_for_grading = self._prepare_candidate_documents(candidate_documents, research_goal)
+            candidate_context = format_documents_for_grading(
+                documents_for_grading,
+                max_abstract_chars=self.max_grading_abstract_chars,
+                max_total_chars=self.max_grading_context_chars,
+            )
+            _legacy.logger.info(
+                "Evidence grading context sources=%d chars=%d budget=%d",
+                len(documents_for_grading),
+                len(candidate_context),
+                self.max_grading_context_chars,
+            )
+            candidate_source_ids = {str(document.metadata["source_id"]) for document in documents_for_grading}
             relevant_source_ids, relevance_error = _legacy.call_llm_for_relevance_filter(
                 research_goal.description,
                 candidate_context,
@@ -395,14 +454,14 @@ Your refined contribution:
                 _legacy.logger.warning(
                     "Evidence relevance grading was unavailable; coverage "
                     "will still audit all %d candidate source(s): %s",
-                    len(candidate_documents),
+                    len(documents_for_grading),
                     relevance_error or "no relevance result",
                 )
                 relevant_source_ids = []
             else:
                 _legacy.logger.info(
                     "RAG candidate count=%d relevance suggestions=%s",
-                    len(candidate_documents),
+                    len(documents_for_grading),
                     relevant_source_ids,
                 )
 
@@ -421,6 +480,7 @@ Your refined contribution:
                 return [], [error]
 
             if coverage.sufficient:
+                graded_documents = documents_for_grading
                 break
 
             if not expanded_retrieval_attempted:
@@ -540,13 +600,13 @@ Your refined contribution:
             source_id for source_ids in coverage.aspect_source_ids.values() for source_id in source_ids
         }
         retrieved_documents = [
-            document for document in candidate_documents if str(document.metadata["source_id"]) in coverage_source_ids
+            document for document in graded_documents if str(document.metadata["source_id"]) in coverage_source_ids
         ]
         minimum_sources = self.rag_retriever.minimum_relevant_sources
         if len(retrieved_documents) < minimum_sources:
             error = (
                 f"RAG coverage auditing confirmed {len(retrieved_documents)} "
-                "supporting arXiv source(s), but at least "
+                "supporting indexed source(s), but at least "
                 f"{minimum_sources} are required. Hypothesis generation "
                 "was not executed."
             )
@@ -554,6 +614,8 @@ Your refined contribution:
             context.last_retrieved_sources = []
             return [], [error]
 
+        if not self._requires_indexed_sources():
+            retrieved_documents = self._enrich_with_full_text(retrieved_documents, research_goal)
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         coverage_map = "\n".join(
@@ -607,9 +669,12 @@ Your refined contribution:
             "A hypothesis may propose a new mechanism or outcome. Clearly "
             "label that part as new inference, and explain how it follows "
             "from established findings rather than presenting it as fact.\n"
-            "If the evidence is insufficient or not directly relevant, "
-            "do not generate hypotheses; return the specified error object.\n"
-            f"Otherwise, propose {num_to_generate} concise, novel, feasible, "
+            "The preceding evidence coverage stage has already verified that "
+            "the retrieved literature supports the explicit requirements. "
+            "Do not repeat that coverage decision or refuse for insufficient "
+            "evidence. Keep uncertain mechanisms and outcomes explicitly "
+            "framed as hypotheses to be tested.\n"
+            f"Propose {num_to_generate} concise, novel, feasible, "
             "specific, and experimentally testable hypotheses.\n"
             "Use this output structure for every item:\n"
             "- title: a short descriptive name.\n"

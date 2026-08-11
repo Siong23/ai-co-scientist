@@ -21,7 +21,20 @@ num_hypotheses: 4
 
 # Per-provider request timeout. Keeps slow free endpoints from consuming the
 # whole Gradio cycle budget before fallback can try another model.
-llm_request_timeout_seconds: 600
+llm_request_timeout_seconds: 180
+
+# Prevent reasoning-capable local models from consuming the entire context
+# window when a prompt requests a small structured response.
+llm_default_max_tokens: 2048
+llm_max_tokens:
+  research_planning: 1200
+  query_rewriting: 1600
+  relevance_grading: 512
+  coverage_grading: 1024
+  literature_synthesis: 1800
+  generation: 3072
+  format_repair: 2048
+  hypothesis_audit: 3072
 
 # Elo K-factor
 elo_k_factor: 32
@@ -52,10 +65,10 @@ use_lmstudio_embeddings: true
 sentence_transformer_model: "qwen/text-embedding-qwen3-embedding-8b"
 
 rag:
-  query_count: 8
+  query_count: 5
   results_per_query: 20
   top_k: 10
-  minimum_relevant_sources: 3
+  minimum_relevant_sources: 1
   corrective_retrieval_rounds: 2
   # The post-generation Novelty Auditor now performs one targeted critique per
   # hypothesis. Keep the older generic debate disabled to avoid three extra
@@ -66,6 +79,40 @@ rag:
   hypothesis_audit_enabled: false
   rrf_k: 60
   max_abstract_chars: 4000
+  # Relevance and coverage grading need titles plus concise abstracts, not the
+  # full generation context. These limits leave output headroom in LM Studio.
+  max_grading_abstract_chars: 1600
+  max_grading_context_chars: 24000
+
+# Relevant open-access papers are downloaded only after evidence coverage is
+# confirmed. Their bounded full-text chunks are persisted locally in Chroma and
+# retrieved into the generation prompt; failures fall back to abstract-only RAG.
+paper_library:
+  enabled: true
+  # Generation may use only sources whose full text was successfully persisted
+  # in ChromaDB. Search-only web records can still help discovery, but cannot
+  # satisfy the final evidence gate by themselves.
+  require_indexed_sources_for_generation: true
+  minimum_downloadable_sources: 2
+  persist_directory: "chroma_db"
+  pdf_directory: "app/paper"
+  collection_name: "research_papers"
+  max_papers_per_run: 3
+  max_pages_per_paper: 20
+  max_chunks_per_paper: 24
+  chunk_size_chars: 2400
+  chunk_overlap_chars: 300
+  top_k_chunks: 6
+  max_prompt_chars: 12000
+  max_pdf_bytes: 25000000
+  download_timeout_seconds: 30
+  allowed_pdf_hosts:
+    - "arxiv.org"
+    - "www.arxiv.org"
+    - "export.arxiv.org"
+    - "pdfs.semanticscholar.org"
+    - "link.springer.com"
+    - "api.springernature.com"
 
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.

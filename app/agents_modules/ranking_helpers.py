@@ -301,6 +301,7 @@ def generate_debate_argument(
         prompt,
         temperature=0.3,
         model=RANKING_LLM_MODEL,
+        reasoning="off",
     )
 
 def judge_debate(
@@ -387,6 +388,7 @@ def judge_debate(
         prompt,
         temperature=0.2,
         model=RANKING_LLM_MODEL,
+        reasoning="off",
     )
 
 
@@ -568,8 +570,12 @@ def judge_hypotheses(
     Confidence:
     A decimal number between 0 and 1.
     """
-
-    return _call_llm(prompt, temperature=0.1, model=RANKING_LLM_MODEL,)
+    return _call_llm(
+        prompt,
+        temperature=0.2,
+        model=RANKING_LLM_MODEL,
+        reasoning="off",
+    )
 
 def parse_short_justification(response: str) -> str:
 

@@ -8,8 +8,6 @@ from typing import Any
 
 import requests
 
-from ..utils import logger, redact_secrets
-
 _DEFAULT_TIMEOUT = 15
 _DEFAULT_SEARCH_URL = "https://api.elsevier.com/content/search/scopus"
 
@@ -55,9 +53,13 @@ class ElsevierSearchTool:
             entries = response.json().get("search-results", {}).get("entry", [])
             papers = [self._format_paper(entry) for entry in entries if entry.get("dc:title")]
             usable_papers = [paper for paper in papers if paper.get("abstract")]
+            from ..utils import logger
+
             logger.info("Elsevier Scopus returned %d usable paper(s) for query %r.", len(usable_papers), query)
             return usable_papers
         except Exception as exc:
+            from ..utils import logger, redact_secrets
+
             logger.error("Elsevier Scopus search failed for query %r: %s", query, redact_secrets(str(exc)))
             return []
 

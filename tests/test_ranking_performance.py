@@ -34,6 +34,8 @@ from copy import deepcopy
 from time import perf_counter
 from unittest.mock import patch
 
+import pytest
+
 from app.agents_modules.ranking import RankingAgent
 from app.agents_modules.ranking_helpers import (
     RANKING_LLM_MODEL,
@@ -43,7 +45,6 @@ from app.agents_modules.ranking_helpers import (
     update_elo_tie,
 )
 from app.models import ContextMemory, Hypothesis, PairwiseDecision, ResearchGoal
-
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -168,6 +169,7 @@ def test_pairwise_ranking_execution_time():
     assert elapsed >= 0
 
 
+@pytest.mark.integration
 def test_full_tournament_real_execution_time():
     """
     Measure the real end-to-end execution time of the complete
@@ -358,7 +360,7 @@ def test_ranking_consistency():
     ranking_1 = run_ranking(hypotheses_1)
     ranking_2 = run_ranking(hypotheses_2)
 
-    print(f"\nRanking consistency:")
+    print("\nRanking consistency:")
     print(f"  Run 1: {ranking_1}")
     print(f"  Run 2: {ranking_2}")
     print(f"  Consistent: {ranking_1 == ranking_2}")
@@ -471,7 +473,7 @@ def test_elo_results_are_reproducible():
     ratings_1 = run_matches()
     ratings_2 = run_matches()
 
-    print(f"\nElo reproducibility:")
+    print("\nElo reproducibility:")
     print(f"  Run 1: {ratings_1}")
     print(f"  Run 2: {ratings_2}")
     print(f"  Consistent: {ratings_1 == ratings_2}")

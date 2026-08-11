@@ -475,6 +475,25 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         # Step-specific content
         if step_name == "generation":
             hypotheses = step_data.get("hypotheses", [])
+            search_stats = step_data.get("search_stats", [])
+            if isinstance(search_stats, list) and search_stats:
+                html += """
+                <details style="margin: 5px 0 10px;">
+                    <summary style="cursor: pointer; font-size: 0.9em;">Search details</summary>
+                    <p><strong>Search providers called:</strong></p><ul>
+                """
+                for stat in search_stats:
+                    if not isinstance(stat, dict):
+                        continue
+                    provider = html_lib.escape(str(stat.get("source", "Unknown")))
+                    status = html_lib.escape(str(stat.get("status", "unknown")))
+                    html += (
+                        f"<li>Round {int(stat.get('round', 0))}: {provider} — "
+                        f"{int(stat.get('queries_completed', 0))}/{int(stat.get('queries_requested', 0))} "
+                        f"queries, {int(stat.get('results', 0))} results, "
+                        f"{int(stat.get('elapsed_ms', 0))} ms ({status})</li>"
+                    )
+                html += "</ul></details>"
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
             for i, hypo in enumerate(hypotheses):
                 audit = hypo.get("audit_report", {})
@@ -497,7 +516,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 html += f"""
                 <div style="border-left: 3px solid #28a745; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>#{i + 1}: {hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
-                    <p style="white-space: pre-line;">{hypo.get("text", "No description")}</p>
+                    <p style="white-space: pre-line;">{hypo.get("text")}</p>
                     {audit_html}
                     {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
@@ -594,7 +613,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 html += f"""
                 <div style="border-left: 3px solid #ffc107; padding: 10px; margin: 10px 0; border-radius: 15px;">
                     <h5>{hypo.get("title", "Untitled")} (ID: {hypo.get("id", "Unknown")})</h5>
-                    <p>{hypo.get("text", "No description")}</p>
+                    <p style="white-space: pre-line;">{hypo.get("text")}</p>
                     {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
@@ -673,7 +692,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         <h6>#{i + 1}: {hypo.get("title", "Untitled")}</h6>
                         <p><strong>ID:</strong> {hypo.get("id", "Unknown")} | 
                            <strong>Elo Score:</strong> {hypo.get("elo_score", 0):.2f}</p>
-                        <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
+                        <p style="white-space: pre-line;"><strong>Description:</strong> {hypo.get("text")}</p>
                         <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                            <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
                         {format_evidence_sources_html(hypo, generation_sources)}
@@ -754,7 +773,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 <h4>#{i + 1}: {hypo.get("title", "Untitled")}</h4>
                 <p><strong>ID:</strong> {hypo.get("id", "Unknown")} | 
                    <strong>Elo Score:</strong> {hypo.get("elo_score", 0):.2f}</p>
-                <p><strong>Description:</strong> {hypo.get("text", "No description")}</p>
+                <p style="white-space: pre-line;"><strong>Description:</strong><br /> {(hypo.get("text"))}</p>
                 <p><strong>Novelty:</strong> {hypo.get("novelty_review", "Not assessed")} | 
                    <strong>Feasibility:</strong> {hypo.get("feasibility_review", "Not assessed")}</p>
                         <p><strong>Reviewer Comments</strong></p>
@@ -802,7 +821,8 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
 
         title = html_lib.escape(str(source.get("title") or "Untitled"))
         authors = html_lib.escape(", ".join(str(author) for author in source.get("authors", [])[:5]))
-        arxiv_id = html_lib.escape(str(source.get("arxiv_id") or "Unknown"))
+        source_id = html_lib.escape(str(source.get("source_id") or source.get("arxiv_id") or "Unknown"))
+        provider = html_lib.escape(str(source.get("source") or "arxiv"))
         published = html_lib.escape(str(source.get("published") or "Unknown"))
         abstract = html_lib.escape(str(source.get("abstract") or "No abstract")[:300])
         arxiv_url = html_lib.escape(
@@ -813,15 +833,22 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
             str(source.get("pdf_url") or "#"),
             quote=True,
         )
+        if source.get("full_text_indexed"):
+            chunks_used = int(source.get("full_text_chunks_used") or 0)
+            library_status = f"Indexed in local ChromaDB; {chunks_used} relevant full-text chunk(s) used"
+        else:
+            library_status = "Abstract-only evidence"
         html += f"""
         <div style="border: 1px solid #e0e0e0; padding: 15px; margin: 10px 0; border-radius: 8px; background-color: #fafafa;">
             <h4>{title}</h4>
             <p><strong>Authors:</strong> {authors}</p>
-            <p><strong>arXiv ID:</strong> {arxiv_id} |
+            <p><strong>Source:</strong> {provider} |
+               <strong>Source ID:</strong> {source_id} |
                <strong>Published:</strong> {published}</p>
             <p><strong>Abstract:</strong> {abstract}...</p>
+            <p><strong>Local paper library:</strong> {library_status}</p>
             <p>
-                <a href="{arxiv_url}" target="_blank">📄 View on arXiv</a> |
+                <a href="{arxiv_url}" target="_blank">📄 View source</a> |
                 <a href="{pdf_url}" target="_blank">📁 Download PDF</a>
             </p>
         </div>

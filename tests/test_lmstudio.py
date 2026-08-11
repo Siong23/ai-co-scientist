@@ -81,6 +81,7 @@ def test_call_llm_uses_local_openai_compatible_api(monkeypatch):
         model="selected-model",
         messages=[{"role": "user", "content": "prompt"}],
         temperature=0.2,
+        max_tokens=utils.config.get("llm_default_max_tokens", 2048),
     )
 
 
@@ -100,7 +101,56 @@ def test_call_llm_sends_an_explicit_system_prompt():
             {"role": "user", "content": "user request"},
         ],
         temperature=0.7,
+        max_tokens=utils.config.get("llm_default_max_tokens", 2048),
     )
+
+
+def test_call_llm_honors_an_explicit_output_limit():
+    with patch.object(utils, "OpenAI") as mock_openai:
+        mock_openai.return_value.chat.completions.create.return_value = _completion()
+        call_llm("prompt", model="selected-model", max_tokens=321)
+
+    assert mock_openai.return_value.chat.completions.create.call_args.kwargs["max_tokens"] == 321
+
+
+def test_call_llm_uses_native_api_to_disable_reasoning(monkeypatch):
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
+    response = MagicMock()
+    response.json.return_value = {
+        "output": [{"type": "message", "content": '{"ok": true}'}],
+    }
+
+    with (
+        patch.object(utils.requests, "post", return_value=response) as mock_post,
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        result = call_llm(
+            "return JSON",
+            temperature=0.0,
+            model="selected-model",
+            system_prompt="JSON only",
+            max_tokens=64,
+            reasoning="off",
+        )
+
+    assert result == '{"ok": true}'
+    mock_post.assert_called_once_with(
+        "http://localhost:1234/api/v1/chat",
+        headers={},
+        json={
+            "model": "selected-model",
+            "input": "return JSON",
+            "temperature": 0.0,
+            "max_output_tokens": 64,
+            "reasoning": "off",
+            "store": False,
+            "stream": False,
+            "system_prompt": "JSON only",
+        },
+        timeout=utils.config.get("llm_request_timeout_seconds", 180),
+    )
+    response.raise_for_status.assert_called_once()
+    mock_openai.assert_not_called()
 
 
 def test_missing_model_short_circuits_without_network(monkeypatch):
@@ -120,6 +170,11 @@ def test_missing_model_short_circuits_without_network(monkeypatch):
         ("Request timed out", "Model provider timed out", "timed out"),
         ("Error code: 404 - model not found", "Model unavailable or delisted", "model unavailable"),
         ("Connection refused", "LM Studio unavailable", "Could not connect"),
+        (
+            "Context size has been exceeded",
+            "Model context window exceeded",
+            "LM Studio call failed",
+        ),
         ("unexpected local server error", "LLM/API error", "LM Studio call failed"),
     ],
 )

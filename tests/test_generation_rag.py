@@ -1,4 +1,5 @@
 import json
+import threading
 from unittest.mock import Mock, patch
 
 import pytest
@@ -21,6 +22,7 @@ from app.rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
     SearchQueryPlan,
+    format_documents_for_grading,
     reciprocal_rank_fusion,
 )
 
@@ -56,7 +58,7 @@ def test_production_generation_default_does_not_run_hypothesis_auditor():
 def _query_plan_payload(
     goal: str = "brief describe the malaysia history",
     requirements: list[dict] | None = None,
-    query_count: int = 8,
+    query_count: int = 5,
 ) -> str:
     if requirements is None:
         requirements = [
@@ -334,6 +336,8 @@ def test_hypothesis_auditor_revises_and_passes_a_grounded_candidate():
         "temperature": 0.0,
         "model": "audit-model",
         "system_prompt": "auditor system prompt",
+        "max_tokens": 3072,
+        "reasoning": "off",
     }
 
 
@@ -682,6 +686,33 @@ def test_rag_defaults_keep_more_candidate_evidence():
     assert retriever.max_abstract_chars == 4000
 
 
+def test_grading_context_is_bounded_and_keeps_every_source():
+    documents = [
+        Document(
+            page_content="unused full source text",
+            metadata={
+                "source_id": f"arXiv:0000.0000{i}",
+                "title": f"Paper {i}",
+                "abstract": f"MARKER_{i} " + ("evidence " * 1000),
+                "published": "2026-01-01",
+                "primary_category": "cs.NI",
+            },
+        )
+        for i in range(10)
+    ]
+
+    context = format_documents_for_grading(
+        documents,
+        max_abstract_chars=1600,
+        max_total_chars=12000,
+    )
+
+    assert len(context) <= 12000
+    assert context.count("<source id=") == 10
+    assert all(f"MARKER_{i}" in context for i in range(10))
+    assert "unused full source text" not in context
+
+
 def test_relevance_grader_keeps_only_known_directly_relevant_sources():
     available_ids = {
         "arXiv:2001.03488v1",
@@ -708,6 +739,8 @@ def test_relevance_grader_keeps_only_known_directly_relevant_sources():
     assert mock_call.call_args.kwargs == {
         "temperature": 0.0,
         "model": "chosen-model",
+        "max_tokens": 512,
+        "reasoning": "off",
     }
     grader_prompt = mock_call.call_args.args[0]
     assert "Keyword overlap" in grader_prompt
@@ -1005,6 +1038,111 @@ def test_retrieval_tries_original_goal_in_semantic_scholar_before_rewritten_quer
     assert documents[0].metadata["source_id"] == "s2:direct-paper"
 
 
+def test_expanded_retrieval_searches_different_sources_concurrently():
+    both_sources_started = threading.Event()
+    start_lock = threading.Lock()
+    started_sources = 0
+
+    class BlockingSearchSource:
+        last_error_status = None
+
+        def __init__(self, paper):
+            self.paper = paper
+
+        def search_papers(self, query, **kwargs):
+            nonlocal started_sources
+            with start_lock:
+                started_sources += 1
+                if started_sources == 2:
+                    both_sources_started.set()
+            assert both_sources_started.wait(timeout=1)
+            return [self.paper]
+
+    retriever = ArxivRAGRetriever(query_count=1, top_k=2)
+    retriever.arxiv = BlockingSearchSource(
+        _paper("2401.00001v1", "arXiv result", "Shared concurrent evidence."),
+    )
+    retriever.semantic_scholar = BlockingSearchSource(
+        _paper("s2:paper-id", "Semantic Scholar result", "Shared concurrent evidence."),
+    )
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.tavily = None
+    query_plan = SearchQueryPlan(queries=("concurrent query",), required_terms=())
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
+        documents = retriever.retrieve("research goal", query_plan)
+
+    assert both_sources_started.is_set()
+    assert {document.metadata["source_id"] for document in documents} == {
+        "arXiv:2401.00001v1",
+        "s2:paper-id",
+    }
+    assert {stat["source"] for stat in retriever.last_search_stats} == {"arXiv", "Semantic Scholar"}
+    assert all(stat["status"] == "ok" for stat in retriever.last_search_stats)
+
+
+def test_reranking_promotes_a_downloadable_pdf_into_the_top_k():
+    web_result = _paper(
+        "tavily:web-result",
+        "Web result",
+        "Relevant search-only evidence.",
+    )
+    web_result.update({"pdf_url": None, "source": "tavily"})
+    arxiv_result = _paper(
+        "2401.00001v1",
+        "Downloadable arXiv result",
+        "Relevant downloadable evidence.",
+    )
+    arxiv_result["source"] = "arxiv"
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1, minimum_relevant_sources=1)
+    retriever.minimum_downloadable_sources = 1
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
+        documents = retriever._rank_documents(
+            "research goal",
+            SearchQueryPlan(queries=("query",), required_terms=()),
+            [[web_result, arxiv_result]],
+        )
+
+    assert [document.metadata["source_id"] for document in documents] == ["arXiv:2401.00001v1"]
+    assert documents[0].metadata["source"] == "arxiv"
+
+
+def test_strict_generation_evidence_gate_keeps_only_chroma_indexed_sources():
+    indexed = Document(
+        page_content="Indexed evidence",
+        metadata={"source_id": "arXiv:1111.1111", "full_text_indexed": True},
+    )
+    abstract_only = Document(
+        page_content="Abstract-only evidence",
+        metadata={"source_id": "tavily:web", "full_text_indexed": False},
+    )
+
+    class StrictPaperLibrary:
+        enabled = True
+        require_indexed_sources_for_generation = True
+
+        @staticmethod
+        def enrich_documents(documents, _query):
+            return list(documents)
+
+    agent = GenerationAgent(paper_library=StrictPaperLibrary())
+
+    assert agent._prepare_candidate_documents(
+        [indexed, abstract_only],
+        ResearchGoal("Use downloadable evidence"),
+    ) == [indexed]
+
+
 def test_retrieval_stops_arxiv_batch_after_rate_limit():
     retriever = ArxivRAGRetriever(query_count=3, top_k=1)
     retriever.semantic_scholar = Mock()
@@ -1172,7 +1310,8 @@ def test_generation_prompt_contains_retrieved_abstract_and_source_id():
     assert "Literature review and analytical rationale" in generation_prompt
     assert "Explicit requirements validated" in generation_prompt
     assert "Optional exploration directions" in generation_prompt
-    assert "If the evidence is insufficient or not directly relevant" in generation_prompt
+    assert "evidence coverage stage has already verified" in generation_prompt
+    assert "do not return an error object" in generation_prompt
     assert "- hypothesis: one clear, testable claim." in generation_prompt
     assert "- rationale: why the claim follows" in generation_prompt
     assert "- feasibility: a concise practical method" in generation_prompt
@@ -1481,7 +1620,7 @@ def test_generation_can_enforce_a_configured_minimum_source_count():
 
     assert hypotheses == []
     assert errors == [
-        "RAG coverage auditing confirmed 2 supporting arXiv source(s), "
+        "RAG coverage auditing confirmed 2 supporting indexed source(s), "
         "but at least 3 are required. Hypothesis generation "
         "was not executed."
     ]
