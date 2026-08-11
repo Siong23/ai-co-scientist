@@ -479,7 +479,11 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             hypotheses = step_data.get("hypotheses", [])
             search_stats = step_data.get("search_stats", [])
             if isinstance(search_stats, list) and search_stats:
-                html += "<p><strong>Search providers called:</strong></p><ul>"
+                html += """
+                <details style="margin: 5px 0 10px;">
+                    <summary style="cursor: pointer; font-size: 0.9em;">Search details</summary>
+                    <p><strong>Search providers called:</strong></p><ul>
+                """
                 for stat in search_stats:
                     if not isinstance(stat, dict):
                         continue
@@ -491,7 +495,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         f"queries, {int(stat.get('results', 0))} results, "
                         f"{int(stat.get('elapsed_ms', 0))} ms ({status})</li>"
                     )
-                html += "</ul>"
+                html += "</ul></details>"
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
             for i, hypo in enumerate(hypotheses):
                 audit = hypo.get("audit_report", {})

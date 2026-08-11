@@ -182,6 +182,13 @@ def test_generation_results_show_every_search_provider_call(gradio_app_module):
 
     html = gradio_app_module.format_cycle_results(cycle_details)
 
+    search_details_start = html.index('<details style="margin: 5px 0 10px;">')
+    search_details_end = html.index("</details>", search_details_start)
+    search_details = html[search_details_start:search_details_end]
+
+    assert "<summary" in search_details
+    assert "Search details</summary>" in search_details
+    assert " open" not in search_details.split(">", 1)[0]
     assert "Search providers called" in html
     assert "arXiv" in html
     assert "5/5 queries, 20 results" in html
