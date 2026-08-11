@@ -51,8 +51,12 @@ def _paper(
     }
 
 
-def test_production_generation_default_does_not_run_hypothesis_auditor():
-    assert GenerationAgent().audit_enabled is False
+def test_production_generation_defaults_enable_audit_and_agentic_research():
+    agent = GenerationAgent()
+
+    assert agent.audit_enabled is True
+    assert agent.agentic_research_enabled is True
+    assert GenerationAgent(agentic_research_enabled=False).agentic_research_enabled is False
 
 
 def _query_plan_payload(
@@ -359,10 +363,13 @@ def test_hypothesis_auditor_warns_and_penalizes_numeric_precision_absent_from_ev
 
     assert error is None
     assert audits is not None
-    assert audits[0]["passed"] is True
+    assert audits[0]["passed"] is False
     assert audits[0]["audit_report"]["unsupported_numbers"] == ["10%"]
     assert audits[0]["audit_report"]["scores"]["unsupported_specificity"] == 5.0
     assert audits[0]["audit_report"]["warnings"]
+    assert "unsupported numerical claims" in " ".join(
+        audits[0]["audit_report"]["hard_failures"]
+    )
 
 
 def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
@@ -428,6 +435,7 @@ def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
         minimum_relevant_sources=1,
         debate_rounds=0,
         audit_enabled=True,
+        agentic_research_enabled=False,
     )
     with (
         patch("app.agents.call_llm_for_search_queries", return_value=(plan, None)),
@@ -601,6 +609,8 @@ def test_query_rewriting_failure_stops_when_original_retrieval_is_empty():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     with (
         patch(
@@ -626,6 +636,8 @@ def test_query_rewriting_failure_uses_original_candidates():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     document = Mock()
     document.page_content = "Source ID: arXiv:1234.5678\nAbstract: relevant evidence"
@@ -1240,7 +1252,12 @@ def test_springer_fallback_fuses_evidence_for_generation():
 
 
 def test_generation_prompt_contains_retrieved_abstract_and_source_id():
-    agent = GenerationAgent(minimum_relevant_sources=1, debate_rounds=0)
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
+    )
     query_plan = _query_plan_payload()
     paper = _paper(
         "2001.03488v1",
@@ -1329,6 +1346,8 @@ def test_generation_stops_when_model_reports_insufficient_context():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     document = Mock()
     document.page_content = "Source ID: arXiv:1234.5678\nAbstract: limited evidence"
@@ -1372,6 +1391,8 @@ def test_empty_relevance_suggestion_does_not_override_complete_coverage():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     document = Mock()
     document.page_content = "Source ID: arXiv:0912.1838v1\nAbstract: history of context"
@@ -1518,6 +1539,8 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     with (
         patch(
@@ -1647,6 +1670,8 @@ def test_generation_rejects_source_id_outside_retrieved_top_k():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     generation_payload = json.dumps(
         [
@@ -1699,6 +1724,8 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         minimum_relevant_sources=1,
         corrective_retrieval_rounds=2,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     subject_document = Mock()
     subject_document.page_content = "Source ID: arXiv:1111.1111\nAbstract: Evidence about the subject."
@@ -1917,6 +1944,8 @@ def test_semantic_scholar_fallback_can_fill_gap_after_arxiv_is_exhausted():
         minimum_relevant_sources=1,
         corrective_retrieval_rounds=0,
         debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
     )
     arxiv_document = Mock()
     arxiv_document.page_content = "Source ID: arXiv:1111.1111\nAbstract: Evidence about the subject."

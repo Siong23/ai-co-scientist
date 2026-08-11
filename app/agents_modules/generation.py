@@ -28,7 +28,6 @@ from .generation_helpers import (
     generation_strategy_instruction,
 )
 
-
 RESEARCH_PLANNER_SYSTEM_PROMPT = """You are the Research Planning component of a research-oriented RAG system.
 
 Your job is NOT to answer the user's question and NOT to generate web
@@ -193,6 +192,7 @@ class GenerationAgent:
         debate_rounds: int | None = None,
         audit_enabled: bool | None = None,
         paper_library: ChromaPaperLibrary | None = None,
+        agentic_research_enabled: bool | None = None,
     ) -> None:
         self.rag_retriever = ArxivRAGRetriever(
             minimum_relevant_sources=minimum_relevant_sources,
@@ -220,7 +220,11 @@ class GenerationAgent:
         )
 
         agentic_config = config.get("agentic_research", {})
-        self.agentic_research_enabled = bool(agentic_config.get("enabled", True))
+        self.agentic_research_enabled = (
+            bool(agentic_config.get("enabled", True))
+            if agentic_research_enabled is None
+            else bool(agentic_research_enabled)
+        )
         self.agentic_max_steps = max(
             1,
             min(6, int(agentic_config.get("max_steps", 4))),
@@ -490,14 +494,14 @@ Your refined contribution:
         current_documents = list(retrieved_documents)
         current_synthesis = synthesis
 
+        if not self.agentic_research_enabled:
+            return current_documents, current_synthesis, []
+
         assumptions = self._analyze_assumptions(
             research_goal,
             current_synthesis,
             current_documents,
         )
-
-        if not self.agentic_research_enabled:
-            return current_documents, current_synthesis, assumptions
 
         for step in range(self.agentic_max_steps):
             decision, decision_error = call_llm_for_research_action(
