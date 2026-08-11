@@ -68,7 +68,7 @@ rag:
   query_count: 5
   results_per_query: 20
   top_k: 10
-  minimum_relevant_sources: 2
+  minimum_relevant_sources: 1
   corrective_retrieval_rounds: 2
   # The post-generation Novelty Auditor now performs one targeted critique per
   # hypothesis. Keep the older generic debate disabled to avoid three extra
