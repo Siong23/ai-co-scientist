@@ -74,9 +74,15 @@ rag:
   # hypothesis. Keep the older generic debate disabled to avoid three extra
   # large-model calls that repeat the same review work.
   generation_debate_rounds: 0
-  # Disabled after rollback: malformed or truncated audit JSON must not block
-  # otherwise valid RAG-grounded hypothesis generation.
+  # Audits revise candidates and enforce grounding/citation safety. Composite
+  # quality and novelty scores are advisory because later stages already
+  # reflect on and rank viable hypotheses.
   hypothesis_audit_enabled: true
+  # balanced: reject only structurally invalid or severely ungrounded outputs;
+  # keep novelty, wording, and unsupported-target concerns as review warnings.
+  # strict: unsupported claims/numbers are hard failures and grounding scores
+  # must be at least 5/10. Set hypothesis_audit_enabled false to bypass auditing.
+  hypothesis_audit_mode: balanced
   rrf_k: 60
   max_abstract_chars: 4000
   # Relevance and coverage grading need titles plus concise abstracts, not the
@@ -89,9 +95,9 @@ rag:
 # retrieved into the generation prompt; failures fall back to abstract-only RAG.
 paper_library:
   enabled: true
-  # Generation may use only sources whose full text was successfully persisted
-  # in ChromaDB. Search-only web records can still help discovery, but cannot
-  # satisfy the final evidence gate by themselves.
+  # Academic sources may be used for generation only after their full text is
+  # persisted in ChromaDB. Retrieved web-page content is already usable evidence
+  # and does not require a PDF; web-discovered PDFs may still be indexed.
   require_indexed_sources_for_generation: true
   minimum_downloadable_sources: 2
   persist_directory: "chroma_db"
@@ -143,4 +149,14 @@ elsevier:
 tavily:
   enabled: true
   results_per_query: 10
+  # Search first returns URLs plus bounded relevance snippets for local reranking.
+  # Only the top URLs are then sent to Extract and admitted as web evidence.
+  search_depth: "advanced"
+  search_chunks_per_source: 3
+  max_extract_results: 5
+  extract_depth: "basic"
+  extract_chunks_per_source: 3
+  # Extracted passages are reranked locally against their assigned sub-question.
+  max_evidence_chunks: 8
+  max_chunk_chars: 1600
 

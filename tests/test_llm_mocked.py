@@ -121,6 +121,111 @@ def test_generation_repairs_unparsable_output_once():
     assert "format" in repair_call.args[0].lower()
 
 
+def test_generation_recovers_remaining_candidate_after_truncated_json():
+    first = {
+        "title": "Hypothesis A",
+        "hypothesis": "Complete hypothesis A.",
+        "rationale": "Complete rationale A.",
+        "feasibility": "Complete feasibility A.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+    second = {
+        "title": "Hypothesis B",
+        "hypothesis": "Complete hypothesis B.",
+        "rationale": "Complete rationale B.",
+        "feasibility": "Complete feasibility B.",
+        "source_ids": ["arXiv:2222.2222"],
+    }
+    truncated = json.dumps([first])[:-1] + ', {"title": "Hypothesis B", "hypothesis": "cut off'
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[truncated, json.dumps([second])],
+    ) as mock_call:
+        result = call_llm_for_generation(
+            "test goal with numbered strategies",
+            num_hypotheses=2,
+            model="selected-local-model",
+        )
+
+    assert result == [first, second]
+    assert mock_call.call_count == 2
+    recovery_call = mock_call.call_args_list[1]
+    assert "candidate 2 of 2" in recovery_call.args[0]
+    assert "test goal with numbered strategies" in recovery_call.args[0]
+    assert recovery_call.kwargs == {
+        "temperature": 0.2,
+        "model": "selected-local-model",
+        "max_tokens": 3072,
+        "reasoning": "off",
+    }
+
+
+def test_generation_accepts_complete_candidates_when_only_closing_array_was_truncated():
+    candidate = {
+        "title": "Hypothesis A",
+        "hypothesis": "Complete hypothesis.",
+        "rationale": "Complete rationale.",
+        "feasibility": "Complete feasibility.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+    truncated = json.dumps([candidate])[:-1]
+
+    with patch("app.agents.call_llm", return_value=truncated) as mock_call:
+        result = call_llm_for_generation("test goal", num_hypotheses=1)
+
+    assert result == [candidate]
+    assert mock_call.call_count == 1
+
+
+def test_generation_retries_when_model_reports_incomplete_candidate_response():
+    candidate = {
+        "title": "Recovered hypothesis",
+        "hypothesis": "Complete hypothesis.",
+        "rationale": "Complete rationale.",
+        "feasibility": "Complete feasibility.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+    incomplete_error = json.dumps(
+        {
+            "error": (
+                "Incomplete candidate response: missing closing brackets and remaining fields."
+            )
+        }
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[incomplete_error, json.dumps([candidate])],
+    ) as mock_call:
+        result = call_llm_for_generation("test goal", num_hypotheses=1)
+
+    assert result == [candidate]
+    assert mock_call.call_count == 2
+
+
+def test_generation_recovers_when_format_repair_reports_missing_candidate_content():
+    candidate = {
+        "title": "Recovered hypothesis",
+        "hypothesis": "Complete hypothesis.",
+        "rationale": "Complete rationale.",
+        "feasibility": "Complete feasibility.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+    incomplete_error = json.dumps(
+        {"error": "Incomplete candidate response: missing remaining fields."}
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=["not structured JSON", incomplete_error, json.dumps([candidate])],
+    ) as mock_call:
+        result = call_llm_for_generation("test goal", num_hypotheses=1)
+
+    assert result == [candidate]
+    assert mock_call.call_count == 3
+
+
 def test_generation_parses_insufficient_context_error():
     payload = json.dumps({"error": ("The retrieved context is insufficient to generate grounded hypotheses.")})
     with patch("app.agents.call_llm", return_value=payload):
