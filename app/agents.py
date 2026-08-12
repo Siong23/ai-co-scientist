@@ -38,10 +38,13 @@ from .agents_modules.ranking_helpers import (
 from .agents_modules.reflection import ReflectionAgent
 from .agents_modules.reflection_helpers import call_llm_for_reflection
 from .agents_modules.supervisor import SupervisorAgent
+from .evidence import EvidenceChunk, EvidenceDocument, EvidenceSource
 from .models import ContextMemory, Hypothesis, ResearchGoal
 from .rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
+    ResearchRetriever,
+    SearchQuery,
     SearchQueryPlan,
     format_documents_for_prompt,
     serialize_documents,
@@ -59,6 +62,9 @@ __all__ = [
     "ArxivRAGRetriever",
     "ContextMemory",
     "EvidenceAspect",
+    "EvidenceChunk",
+    "EvidenceDocument",
+    "EvidenceSource",
     "EvidenceCoverage",
     "EvolutionAgent",
     "GenerationAgent",
@@ -70,6 +76,8 @@ __all__ = [
     "RankingAgent",
     "ReflectionAgent",
     "ResearchGoal",
+    "ResearchRetriever",
+    "SearchQuery",
     "SearchQueryPlan",
     "SupervisorAgent",
     "call_llm",
