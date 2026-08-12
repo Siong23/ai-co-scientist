@@ -336,7 +336,7 @@ def format_evidence_sources_html(
         if not isinstance(source_id, str) or source_id not in available_sources:
             continue
         source = available_sources[source_id]
-        href = str(source.get("arxiv_url") or source.get("pdf_url") or "").strip()
+        href = str(source.get("url") or source.get("arxiv_url") or source.get("pdf_url") or "").strip()
         if not href and source_id.startswith("arXiv:"):
             arxiv_id = source_id.removeprefix("arXiv:")
             href = f"https://arxiv.org/abs/{quote(arxiv_id, safe='/.-')}"
@@ -521,6 +521,44 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     {format_evidence_sources_html(hypo, generation_sources)}
                 </div>
                 """
+
+            audits = step_data.get("audits", [])
+            if isinstance(audits, list) and audits:
+                html += """
+                <details style="margin: 10px 0;">
+                    <summary style="cursor: pointer; font-size: 0.9em;">Quality audit details</summary>
+                    <ol>
+                """
+                for audit in audits:
+                    if not isinstance(audit, dict):
+                        continue
+                    verdict = html_lib.escape(
+                        str(audit.get("verdict", "UNREVIEWED"))
+                    )
+                    score = html_lib.escape(
+                        str(audit.get("weighted_score", "N/A"))
+                    )
+                    messages = [
+                        str(message).strip()
+                        for key in ("hard_failures", "warnings")
+                        for message in audit.get(key, [])
+                        if isinstance(message, str) and message.strip()
+                    ]
+                    message_html = (
+                        "<ul>"
+                        + "".join(
+                            f"<li>{html_lib.escape(message)}</li>"
+                            for message in messages
+                        )
+                        + "</ul>"
+                        if messages
+                        else ""
+                    )
+                    html += (
+                        f"<li><strong>{verdict} · {score}/100</strong>"
+                        f"{message_html}</li>"
+                    )
+                html += "</ol></details>"
         elif step_name in ["reflection", "reflection_evolved"]:
             hypotheses = step_data.get("hypotheses", [])
             html += f"<p><strong>Reviewed {len(hypotheses)} hypotheses:</strong></p>"
@@ -576,14 +614,14 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         margin:15px 0;
                         background:#f8f9fa;">
                         <summary style="cursor: pointer;">
-                            <strong>⚔️ Tournament Match {count}:</strong> {title_a} <strong>(ID: {match.get('hypothesis_a', 'Unknown')})</strong> vs {title_b} <strong>(ID: {match.get('hypothesis_b', 'Unknown')})</strong>
+                            <strong>⚔️ Tournament Match {count}:</strong> {title_a} <strong>(ID: {match.get("hypothesis_a", "Unknown")})</strong> vs {title_b} <strong>(ID: {match.get("hypothesis_b", "Unknown")})</strong>
                         </summary>
                         <div style="margin-top: 10px; spacing: 5px;">
                             <p><b>🅰 Hypothesis A</b><br>
-                            {title_a} <strong>(ID: {match.get('hypothesis_a', 'Unknown')})</strong></p>
+                            {title_a} <strong>(ID: {match.get("hypothesis_a", "Unknown")})</strong></p>
 
                             <p><b>🅱 Hypothesis B</b><br>
-                            {title_b} <strong>(ID: {match.get('hypothesis_b', 'Unknown')})</strong></p>
+                            {title_b} <strong>(ID: {match.get("hypothesis_b", "Unknown")})</strong></p>
 
                             <p><b>🏆 Winner</b><br>
                             {winner}</p>
@@ -819,11 +857,12 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
         title = html_lib.escape(str(source.get("title") or "Untitled"))
         authors = html_lib.escape(", ".join(str(author) for author in source.get("authors", [])[:5]))
         source_id = html_lib.escape(str(source.get("source_id") or source.get("arxiv_id") or "Unknown"))
-        provider = html_lib.escape(str(source.get("source") or "arxiv"))
-        published = html_lib.escape(str(source.get("published") or "Unknown"))
-        abstract = html_lib.escape(str(source.get("abstract") or "No abstract")[:300])
-        arxiv_url = html_lib.escape(
-            str(source.get("arxiv_url") or "#"),
+        source_type = str(source.get("source_type") or "academic")
+        provider = html_lib.escape(str(source.get("provider") or source.get("source") or "arxiv"))
+        published = html_lib.escape(str(source.get("published_at") or source.get("published") or "Unknown"))
+        summary = html_lib.escape(str(source.get("summary") or source.get("abstract") or "No summary")[:300])
+        source_url = html_lib.escape(
+            str(source.get("url") or source.get("arxiv_url") or "#"),
             quote=True,
         )
         raw_pdf_url = str(source.get("pdf_url") or "").strip()
@@ -831,22 +870,27 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
         if raw_pdf_url.startswith(("https://", "http://")):
             pdf_url = html_lib.escape(raw_pdf_url, quote=True)
             pdf_link = f' | <a href="{pdf_url}" target="_blank">📁 Download PDF</a>'
-        if source.get("full_text_indexed"):
+        if source_type == "web" and not source.get("full_text_indexed"):
+            library_status = "Retrieved web content used directly"
+        elif source.get("full_text_indexed"):
             chunks_used = int(source.get("full_text_chunks_used") or 0)
             library_status = f"Indexed in local ChromaDB; {chunks_used} relevant full-text chunk(s) used"
         else:
             library_status = "Abstract-only evidence"
+        content_label = "Web content" if source_type == "web" else "Abstract"
+        author_line = f"<p><strong>Authors:</strong> {authors}</p>" if authors else ""
         html += f"""
         <div style="border: 1px solid #e0e0e0; padding: 15px; margin: 10px 0; border-radius: 8px; background-color: #fafafa;">
             <h4>{title}</h4>
-            <p><strong>Authors:</strong> {authors}</p>
+            {author_line}
             <p><strong>Source:</strong> {provider} |
+               <strong>Type:</strong> {html_lib.escape(source_type)} |
                <strong>Source ID:</strong> {source_id} |
                <strong>Published:</strong> {published}</p>
-            <p><strong>Abstract:</strong> {abstract}...</p>
-            <p><strong>Local paper library:</strong> {library_status}</p>
+            <p><strong>{content_label}:</strong> {summary}...</p>
+            <p><strong>Evidence storage:</strong> {library_status}</p>
             <p>
-                <a href="{arxiv_url}" target="_blank">📄 View source</a>{pdf_link}
+                <a href="{source_url}" target="_blank">📄 View source</a>{pdf_link}
             </p>
         </div>
         """

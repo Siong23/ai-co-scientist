@@ -156,8 +156,11 @@ def test_references_hide_pdf_link_when_source_has_no_pdf(gradio_app_module):
                 "sources": [
                     {
                         "title": "Web-only evidence",
-                        "arxiv_id": "tavily:web-only",
-                        "arxiv_url": "https://example.org/article",
+                        "source_id": "web:web-only",
+                        "source_type": "web",
+                        "provider": "tavily",
+                        "url": "https://example.org/article",
+                        "summary": "Current web guidance.",
                         "pdf_url": None,
                     }
                 ]
@@ -169,6 +172,8 @@ def test_references_hide_pdf_link_when_source_has_no_pdf(gradio_app_module):
 
     assert "View source" in html
     assert "Download PDF" not in html
+    assert "Web content" in html
+    assert "Retrieved web content used directly" in html
 
 
 def test_generation_results_show_every_search_provider_call(gradio_app_module):
@@ -215,6 +220,37 @@ def test_generation_results_show_every_search_provider_call(gradio_app_module):
     assert "arXiv" in html
     assert "5/5 queries, 20 results" in html
     assert "Tavily" in html
+
+
+def test_generation_results_explain_quality_gate_outcomes(gradio_app_module):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "generation": {
+                "hypotheses": [],
+                "sources": [],
+                "audits": [
+                    {
+                        "verdict": "REJECT",
+                        "weighted_score": 66.5,
+                        "hard_failures": [
+                            "The final hypothesis contains unsupported claims."
+                        ],
+                        "warnings": [
+                            "Weighted audit score is below 70/100."
+                        ],
+                    }
+                ],
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert "Quality audit details" in html
+    assert "REJECT · 66.5/100" in html
+    assert "The final hypothesis contains unsupported claims." in html
+    assert "Weighted audit score is below 70/100." in html
 
 
 def test_hypothesis_evidence_sources_are_clickable_and_validated(

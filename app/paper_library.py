@@ -149,6 +149,10 @@ class ChromaPaperLibrary:
             source_chunks = chunks_by_source.get(source_id, [])
             metadata = dict(document.metadata)
             metadata["full_text_indexed"] = source_id in indexed_source_ids
+            metadata["full_text_available"] = bool(
+                metadata.get("content_extracted")
+                or metadata["full_text_indexed"]
+            )
             metadata["full_text_chunks_used"] = len(source_chunks)
             if source_chunks:
                 excerpts = "\n\n".join(

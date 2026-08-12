@@ -17,13 +17,20 @@ from app.agents import (
     call_llm_for_search_queries,
     combine_hypotheses,
 )
+from app.agents_modules.generation_helpers import (
+    ResearchActionDecision,
+    call_llm_for_research_action,
+)
+from app.config import config
 from app.models import ContextMemory, Hypothesis, ResearchGoal
 from app.rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
+    SearchQuery,
     SearchQueryPlan,
     format_documents_for_grading,
     reciprocal_rank_fusion,
+    serialize_documents,
 )
 
 
@@ -57,6 +64,128 @@ def test_production_generation_defaults_enable_audit_and_agentic_research():
     assert agent.audit_enabled is True
     assert agent.agentic_research_enabled is True
     assert GenerationAgent(agentic_research_enabled=False).agentic_research_enabled is False
+
+
+def test_research_action_controller_can_find_in_known_web_page():
+    coverage = EvidenceCoverage(
+        aspect_source_ids={"goal_scope": ("web:docs",)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Covered.",
+    )
+    synthesis = LiteratureSynthesis(
+        established_findings=(),
+        contradictions=(),
+        knowledge_gaps=("The exact limit needs verification.",),
+        analytical_rationale="Inspect the primary documentation.",
+    )
+    response = json.dumps(
+        {
+            "action": "FIND_IN_PAGE",
+            "queries": [],
+            "source_ids": ["web:docs", "web:invented", "arXiv:paper"],
+            "target": "What exact context limit does the documentation state?",
+            "reason": "The known official page should contain the exact value.",
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=response) as mock_llm:
+        decision, error = call_llm_for_research_action(
+            "Verify the documented model context limit.",
+            synthesis,
+            coverage,
+            [],
+            available_sources=[
+                {
+                    "source_id": "web:docs",
+                    "source_family": "web",
+                    "document_type": "official_docs",
+                    "title": "Model documentation",
+                    "url": "https://docs.example.org/model",
+                    "domain": "docs.example.org",
+                },
+                {
+                    "source_id": "arXiv:paper",
+                    "source_family": "academic",
+                    "title": "A paper",
+                },
+            ],
+        )
+
+    assert error is None
+    assert decision is not None
+    assert decision.action == "FIND_IN_PAGE"
+    assert decision.source_ids == ("web:docs",)
+    assert decision.queries == ()
+    controller_prompt = mock_llm.call_args.args[0]
+    assert "OPEN_URL" in controller_prompt
+    assert "SEARCH_PRIMARY_SOURCE" in controller_prompt
+    assert "Search queries maximize discovery recall" in controller_prompt
+
+
+def test_agentic_search_reranks_against_information_need_not_joined_queries():
+    agent = GenerationAgent(agentic_research_enabled=True)
+    coverage = EvidenceCoverage(
+        aspect_source_ids={"goal_scope": ("arXiv:known",)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Covered.",
+    )
+    synthesis = LiteratureSynthesis(
+        established_findings=(),
+        contradictions=(),
+        knowledge_gaps=("The mechanism is unresolved.",),
+        analytical_rationale="Target the unresolved mechanism.",
+    )
+    current_document = Document(
+        page_content="Known evidence",
+        metadata={
+            "source_id": "arXiv:known",
+            "source_type": "academic",
+            "title": "Known evidence",
+            "abstract": "Known evidence.",
+        },
+    )
+    target = "What evidence shows hierarchical retrieval reduces long-context degradation?"
+    decision = ResearchActionDecision(
+        action="SEARCH",
+        queries=(
+            "hierarchical retrieval long context",
+            "retrieval degradation benchmark",
+            "Qwen context length",
+        ),
+        target=target,
+        reason="Resolve the mechanism-specific evidence need.",
+    )
+
+    with (
+        patch.object(agent, "_analyze_assumptions", return_value=[]),
+        patch(
+            "app.agents_modules.generation.call_llm_for_research_action",
+            return_value=(decision, None),
+        ),
+        patch.object(
+            agent,
+            "_retrieve_scientific_sources",
+            return_value=[],
+        ) as mock_retrieve,
+    ):
+        agent._run_agentic_research(
+            ResearchGoal("Study long-context degradation."),
+            SearchQueryPlan(
+                queries=("long-context retrieval",),
+                required_terms=(),
+                explicit_requirements=(EvidenceAspect("goal_scope", "long-context degradation"),),
+            ),
+            coverage,
+            [current_document],
+            synthesis,
+        )
+
+    assert mock_retrieve.call_args.kwargs["rerank_query"] == target
+    action_plan = mock_retrieve.call_args.args[1]
+    assert action_plan.query_texts == decision.queries
+    assert all(query.sub_question == target for query in action_plan.queries)
 
 
 def _query_plan_payload(
@@ -185,7 +314,7 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert "STRUCTURED RESEARCH PLAN" in rewriter_prompt
     assert "discovery and synthesis" in rewriter_prompt
     rewriter_system_prompt = mock_call.call_args_list[1].kwargs["system_prompt"]
-    assert "Web Search Query Rewriter" in rewriter_system_prompt
+    assert "Search Planner" in rewriter_system_prompt
     assert "goal_quote copied verbatim" in rewriter_system_prompt
     assert "must never become evidence gates" in " ".join(rewriter_system_prompt.split())
 
@@ -197,8 +326,10 @@ def test_query_rewriter_accepts_structured_query_objects():
             "query": query,
             "purpose": "Find supporting evidence",
             "sub_question": "What evidence addresses the goal?",
-            "preferred_sources": ["primary sources"],
-            "freshness": "any",
+            "source_type": "official",
+            "preferred_domains": ["https://Example.org/docs"],
+            "freshness": "year",
+            "evidence_requirement_id": "goal_scope",
         }
         for query in rewritten["queries"]
     ]
@@ -214,7 +345,15 @@ def test_query_rewriter_accepts_structured_query_objects():
 
     assert error is None
     assert plan is not None
-    assert plan.queries[0] == "Malaysia colonial history"
+    assert plan.queries[0] == SearchQuery(
+        query="Malaysia colonial history",
+        purpose="Find supporting evidence",
+        sub_question="What evidence addresses the goal?",
+        source_type="official",
+        preferred_domains=("example.org",),
+        freshness="year",
+        evidence_requirement_id="goal_scope",
+    )
     assert len(plan.queries) == 5
 
 
@@ -345,7 +484,7 @@ def test_hypothesis_auditor_revises_and_passes_a_grounded_candidate():
     }
 
 
-def test_hypothesis_auditor_warns_and_penalizes_numeric_precision_absent_from_evidence():
+def test_balanced_hypothesis_auditor_keeps_numeric_target_with_warning():
     final_hypothesis = {
         "title": "Invented precision",
         "hypothesis": "The method will improve throughput by 10%.",
@@ -363,13 +502,85 @@ def test_hypothesis_auditor_warns_and_penalizes_numeric_precision_absent_from_ev
 
     assert error is None
     assert audits is not None
-    assert audits[0]["passed"] is False
+    assert audits[0]["passed"] is True
     assert audits[0]["audit_report"]["unsupported_numbers"] == ["10%"]
     assert audits[0]["audit_report"]["scores"]["unsupported_specificity"] == 5.0
     assert audits[0]["audit_report"]["warnings"]
+    assert audits[0]["audit_report"]["hard_failures"] == []
+    assert "proposed experimental targets" in " ".join(
+        audits[0]["audit_report"]["warnings"]
+    )
+
+
+def test_strict_hypothesis_auditor_rejects_unsupported_numeric_target(monkeypatch):
+    monkeypatch.setitem(config["rag"], "hypothesis_audit_mode", "strict")
+    final_hypothesis = {
+        "title": "Invented precision",
+        "hypothesis": "The method will improve throughput by 10%.",
+        "rationale": "The source describes the method without that number.",
+        "feasibility": "Compare it with a baseline and measure throughput.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+
+    with patch("app.agents.call_llm", return_value=_audit_payload(final_hypothesis)):
+        audits, error = call_llm_for_hypothesis_audit(
+            "Improve network performance.",
+            [{"title": "Draft"}],
+            "Source ID: arXiv:1111.1111\nAbstract: The method improves throughput.",
+            {"arXiv:1111.1111"},
+        )
+
+    assert error is None
+    assert audits is not None
+    assert audits[0]["passed"] is False
+    assert audits[0]["audit_report"]["mode"] == "strict"
     assert "unsupported numerical claims" in " ".join(
         audits[0]["audit_report"]["hard_failures"]
     )
+
+
+def test_hypothesis_auditor_treats_quality_score_and_model_verdict_as_advisory():
+    final_hypothesis = {
+        "title": "Grounded but exploratory",
+        "hypothesis": "The method may outperform the baseline under congestion.",
+        "rationale": "The source establishes the baseline limitation; the improvement remains a hypothesis.",
+        "feasibility": "Compare both methods and reject the hypothesis if latency is not lower.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+    scores = {
+        "evidence_validity": 6,
+        "claim_evidence_entailment": 6,
+        "novelty_against_prior_art": 4,
+        "cross_paper_synthesis": 6,
+        "mechanistic_plausibility": 6,
+        "operational_falsifiability": 6,
+        "unsupported_specificity": 6,
+    }
+
+    with patch(
+        "app.agents.call_llm",
+        return_value=_audit_payload(
+            final_hypothesis,
+            scores=scores,
+            verdict="reject",
+        ),
+    ):
+        audits, error = call_llm_for_hypothesis_audit(
+            "Improve network performance.",
+            [{"title": "Draft"}],
+            "Source ID: arXiv:1111.1111\nAbstract: The baseline has a documented limitation.",
+            {"arXiv:1111.1111"},
+        )
+
+    assert error is None
+    assert audits is not None
+    assert audits[0]["passed"] is True
+    assert audits[0]["audit_report"]["verdict"] == "PASS_WITH_WARNINGS"
+    assert audits[0]["audit_report"]["hard_failures"] == []
+    warnings = " ".join(audits[0]["audit_report"]["warnings"])
+    assert "Novelty score is below 5/10" in warnings
+    assert "Weighted audit score is below 70/100" in warnings
+    assert "model auditor recommended rejection" in warnings
 
 
 def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
@@ -725,6 +936,73 @@ def test_grading_context_is_bounded_and_keeps_every_source():
     assert "unused full source text" not in context
 
 
+def test_grading_context_exposes_provenance_and_retrieval_intent():
+    document = Document(
+        page_content="unused full source text",
+        metadata={
+            "source_id": "web:official",
+            "source_family": "web",
+            "document_type": "official_docs",
+            "provider": "tavily",
+            "title": "Official model documentation",
+            "canonical_url": "https://docs.example.org/models/context",
+            "domain": "docs.example.org",
+            "source_authority": "official first-party documentation",
+            "published_at": "2026-01-01",
+            "updated_at": "2026-07-01",
+            "sub_question": "What is the supported context window?",
+            "retrieval_query": "Example model context window official docs",
+            "freshness": "year",
+            "summary": "The supported context window is documented here.",
+        },
+    )
+
+    context = format_documents_for_grading([document])
+
+    assert "URL: https://docs.example.org/models/context" in context
+    assert "Domain: docs.example.org" in context
+    assert "Provider: tavily" in context
+    assert "Source type: web" in context
+    assert "Document type: official_docs" in context
+    assert "Authority: official first-party documentation" in context
+    assert "Published: 2026-01-01" in context
+    assert "Updated: 2026-07-01" in context
+    assert "Retrieved for: What is the supported context window?" in context
+    assert "Search query: Example model context window official docs" in context
+    assert "Requested freshness: year" in context
+    assert "Content: The supported context window is documented here." in context
+
+
+def test_web_evidence_serialization_preserves_canonical_fields():
+    document = Document(
+        page_content="Web evidence",
+        metadata={
+            "source_id": "web:guidance",
+            "source_type": "web",
+            "provider": "tavily",
+            "title": "Official guidance",
+            "url": "https://agency.example/guidance",
+            "canonical_url": "https://agency.example/guidance",
+            "domain": "agency.example",
+            "summary": "Current technical guidance.",
+            "content": "Current technical guidance.",
+            "published_at": "2026-01-01",
+            "updated_at": "2026-02-01",
+            "page_type": "government_guidance",
+            "source_authority": "official",
+        },
+    )
+
+    serialized = serialize_documents([document])[0]
+
+    assert serialized["source_type"] == "web"
+    assert serialized["url"] == "https://agency.example/guidance"
+    assert serialized["domain"] == "agency.example"
+    assert serialized["summary"] == "Current technical guidance."
+    assert serialized["source_authority"] == "official"
+    assert serialized["arxiv_id"] is None
+
+
 def test_relevance_grader_keeps_only_known_directly_relevant_sources():
     available_ids = {
         "arXiv:2001.03488v1",
@@ -755,8 +1033,13 @@ def test_relevance_grader_keeps_only_known_directly_relevant_sources():
         "reasoning": "off",
     }
     grader_prompt = mock_call.call_args.args[0]
-    assert "Keyword overlap" in grader_prompt
+    assert "mixed research evidence" in grader_prompt
+    assert "Keyword\noverlap" in grader_prompt
     assert "Exclude lexical collisions" in grader_prompt
+    assert "Do not reject a source merely because it is a web page" in grader_prompt
+    assert "untrusted evidence data" in grader_prompt
+    assert "relevance, authority, freshness" in grader_prompt
+    assert "Judge authority from the URL, domain, provider" in grader_prompt
 
 
 def test_source_id_resolution_rejects_ambiguous_retrieved_versions():
@@ -891,8 +1174,8 @@ def test_reciprocal_rank_fusion_deduplicates_versions_and_rewards_recurrence():
     )
 
     assert len(fused) == 2
-    assert fused[0]["arxiv_id"] == "2001.03488v1"
-    assert fused[0]["_rrf_score"] > fused[1]["_rrf_score"]
+    assert fused[0].source_id == "arXiv:2001.03488v1"
+    assert fused[0].rrf_score > fused[1].rrf_score
 
 
 def test_multi_query_retrieval_filters_irrelevant_history_papers():
@@ -1050,6 +1333,243 @@ def test_retrieval_tries_original_goal_in_semantic_scholar_before_rewritten_quer
     assert documents[0].metadata["source_id"] == "s2:direct-paper"
 
 
+def test_web_retrieval_uses_web_schema_without_paper_identifiers():
+    web_result = {
+        "source_id": "web:official-guidance",
+        "source_type": "web",
+        "provider": "tavily",
+        "title": "Official MEC security guidance",
+        "url": "https://example.org/mec-security",
+        "canonical_url": "https://example.org/mec-security",
+        "domain": "example.org",
+        "page_type": "technical_guidance",
+        "snippet": "Lightweight monitoring guidance for constrained MEC nodes.",
+        "content": "Lightweight monitoring guidance for constrained MEC nodes.",
+        "published_at": "2026-01-10",
+        "updated_at": "2026-02-12",
+        "search_score": 0.9,
+        "pdf_url": None,
+    }
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1, minimum_relevant_sources=1)
+    retriever.arxiv = Mock()
+    retriever.arxiv.search_papers.return_value = []
+    retriever.semantic_scholar = None
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.tavily = Mock(is_configured=True, last_error_status=None)
+    retriever.tavily.search.return_value = [web_result]
+    retriever.tavily.extract.return_value = {
+        "https://example.org/mec-security": (
+            "Extracted lightweight monitoring evidence for constrained MEC nodes."
+        )
+    }
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
+        documents = retriever.retrieve(
+            "lightweight MEC security",
+            SearchQueryPlan(
+                queries=(
+                    SearchQuery(
+                        query="MEC security guidance",
+                        purpose="Find first-party operational guidance",
+                        sub_question="What does the official guidance recommend?",
+                        source_type="official",
+                        preferred_domains=("example.org",),
+                        freshness="year",
+                        evidence_requirement_id="guidance",
+                    ),
+                ),
+                required_terms=(),
+            ),
+        )
+
+    retriever.tavily.search.assert_called_once_with(
+        query="MEC security guidance",
+        include_domains=("example.org",),
+        time_range="year",
+    )
+    retriever.arxiv.search_papers.assert_not_called()
+    retriever.tavily.extract.assert_called_once_with(
+        urls=["https://example.org/mec-security"],
+        query="What does the official guidance recommend?",
+    )
+    assert len(documents) == 1
+    assert documents[0].metadata["source_type"] == "web"
+    assert documents[0].metadata["source_family"] == "web"
+    assert documents[0].metadata["document_type"] == "official_docs"
+    assert documents[0].metadata["source_id"] == "web:official-guidance"
+    assert documents[0].metadata["domain"] == "example.org"
+    assert documents[0].metadata["arxiv_id"] is None
+    assert documents[0].metadata["content_extracted"] is True
+    assert documents[0].metadata["full_text_available"] is True
+    assert documents[0].metadata["document_rerank_score"] == 1.0
+    assert documents[0].metadata["purpose"] == "Find first-party operational guidance"
+    assert documents[0].metadata["planned_source_type"] == "official"
+    assert documents[0].metadata["freshness"] == "year"
+    assert documents[0].metadata["evidence_requirement_id"] == "guidance"
+    assert "Extracted lightweight monitoring evidence" in documents[0].page_content
+    assert "Web content:" in documents[0].page_content
+    serialized = serialize_documents(documents)[0]
+    assert serialized["sub_question"] == "What does the official guidance recommend?"
+    assert serialized["preferred_domains"] == ["example.org"]
+    assert serialized["evidence_requirement_id"] == "guidance"
+    assert serialized["document_type"] == "official_docs"
+    assert serialized["full_text_available"] is True
+    assert serialized["chunk_rerank_score"] == 1.0
+
+
+def test_open_web_documents_extracts_known_url_for_find_in_page_target():
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1)
+    retriever.tavily = Mock(is_configured=True)
+    retriever.tavily.extract.return_value = {
+        "https://docs.example.org/model": "The exact supported limit is 128K tokens."
+    }
+    document = Document(
+        page_content="Search discovery",
+        metadata={
+            "source_id": "web:docs",
+            "source_type": "web",
+            "source_family": "web",
+            "document_type": "official_docs",
+            "provider": "tavily",
+            "title": "Model documentation",
+            "url": "https://docs.example.org/model",
+            "canonical_url": "https://docs.example.org/model",
+            "domain": "docs.example.org",
+            "summary": "Model documentation.",
+            "content_extracted": False,
+        },
+    )
+    target = "What exact context limit does the documentation state?"
+
+    opened = retriever.open_web_documents([document], target)
+
+    retriever.tavily.extract.assert_called_once_with(
+        urls=["https://docs.example.org/model"],
+        query=target,
+    )
+    assert len(opened) == 1
+    assert opened[0].metadata["source_id"] == "web:docs"
+    assert opened[0].metadata["sub_question"] == target
+    assert opened[0].metadata["full_text_available"] is True
+    assert "128K tokens" in opened[0].page_content
+
+
+def test_extracted_web_chunks_are_reranked_by_sub_question_and_globally_bounded():
+    retriever = ArxivRAGRetriever(query_count=1, top_k=2)
+    retriever.max_web_evidence_chunks = 2
+    retriever.tavily = Mock(is_configured=True)
+    retriever.tavily.extract.return_value = {
+        "https://example.org/one": (
+            "<chunk 1> background noise\n"
+            "<chunk 2> alpha mechanism directly answers the question"
+        ),
+        "https://example.org/two": (
+            "<chunk 1> unrelated navigation\n"
+            "<chunk 2> alpha benchmark provides decisive evidence"
+        ),
+    }
+    selected = [
+        Document(
+            page_content="Search snippet",
+            metadata={
+                "source_id": f"web:{index}",
+                "source_type": "web",
+                "source_family": "web",
+                "document_type": "official_docs",
+                "provider": "tavily",
+                "title": f"Source {index}",
+                "url": url,
+                "canonical_url": url,
+                "domain": "example.org",
+                "summary": "Discovery snippet",
+                "content": "",
+                "content_extracted": False,
+                "sub_question": "Which alpha evidence answers the question?",
+                "retrieval_query": "alpha evidence",
+                "document_rerank_score": 0.8 - index / 10,
+            },
+        )
+        for index, url in enumerate(
+            ("https://example.org/one", "https://example.org/two"),
+            start=1,
+        )
+    ]
+
+    class ChunkVectorStore:
+        def __init__(self, *args, **kwargs):
+            self.documents = []
+
+        def add_documents(self, documents, ids):
+            self.documents = list(documents)
+
+        def similarity_search_with_score(self, query, k):
+            assert query == "Which alpha evidence answers the question?"
+            return sorted(
+                (
+                    (document, 0.95 if "alpha" in document.page_content else 0.1)
+                    for document in self.documents
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:k]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", ChunkVectorStore):
+        chunks = retriever._extract_selected_web_documents(
+            selected,
+            "original research goal",
+        )
+
+    assert len(chunks) == 2
+    assert all("alpha" in chunk.metadata["content"] for chunk in chunks)
+    assert all(chunk.metadata["chunk_rerank_score"] == 0.95 for chunk in chunks)
+    assert all(chunk.metadata["full_text_available"] is True for chunk in chunks)
+    assert {chunk.metadata["parent_source_id"] for chunk in chunks} == {
+        "web:1",
+        "web:2",
+    }
+    assert all(chunk.metadata["document_type"] == "official_docs" for chunk in chunks)
+
+
+def test_web_search_snippet_is_not_evidence_when_extract_fails():
+    web_result = {
+        "source_id": "web:search-only",
+        "source_type": "web",
+        "provider": "tavily",
+        "title": "Search-only result",
+        "url": "https://example.org/search-only",
+        "canonical_url": "https://example.org/search-only",
+        "domain": "example.org",
+        "snippet": "A promising but unverified search snippet.",
+        "content": "",
+        "content_extracted": False,
+    }
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1)
+    retriever.tavily = Mock(is_configured=True)
+    retriever.tavily.extract.return_value = {}
+    fake_store = Mock()
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: (
+        fake_store.add_documents.call_args.kwargs["documents"]
+    )
+
+    with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
+        documents = retriever._rank_documents(
+            "research goal",
+            SearchQueryPlan(queries=("query",), required_terms=()),
+            [[web_result]],
+        )
+
+    assert documents == []
+    retriever.tavily.extract.assert_called_once_with(
+        urls=["https://example.org/search-only"],
+        query="research goal",
+    )
+
+
 def test_expanded_retrieval_searches_different_sources_concurrently():
     both_sources_started = threading.Event()
     start_lock = threading.Lock()
@@ -1098,7 +1618,53 @@ def test_expanded_retrieval_searches_different_sources_concurrently():
     assert all(stat["status"] == "ok" for stat in retriever.last_search_stats)
 
 
-def test_reranking_promotes_a_downloadable_pdf_into_the_top_k():
+def test_structured_queries_route_to_academic_and_news_providers():
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.arxiv = Mock(last_error_status=None)
+    retriever.arxiv.search_papers.return_value = []
+    retriever.semantic_scholar = Mock(last_error_status=None)
+    retriever.semantic_scholar.search_papers.return_value = []
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.tavily = Mock(is_configured=True, last_error_status=None)
+    retriever.tavily.search.return_value = []
+    query_plan = SearchQueryPlan(
+        queries=(
+            SearchQuery(
+                query="hierarchical retrieval long context paper",
+                sub_question="Which mechanisms have academic support?",
+                purpose="Prior academic evidence",
+                source_type="academic",
+            ),
+            SearchQuery(
+                query="Qwen long context benchmark update",
+                sub_question="What changed in recent benchmark reporting?",
+                purpose="Recent competing evidence",
+                source_type="news",
+                freshness="month",
+            ),
+        ),
+        required_terms=(),
+    )
+
+    assert retriever.retrieve("Qwen long-context degradation", query_plan) == []
+
+    retriever.arxiv.search_papers.assert_called_once_with(
+        query="hierarchical retrieval long context paper",
+        max_results=retriever.results_per_query,
+        sort_by="relevance",
+    )
+    retriever.semantic_scholar.search_papers.assert_called_once_with(
+        query="hierarchical retrieval long context paper"
+    )
+    retriever.tavily.search.assert_called_once_with(
+        query="Qwen long context benchmark update",
+        time_range="month",
+        topic="news",
+    )
+
+
+def test_pdf_promotion_does_not_evict_direct_web_evidence():
     web_result = _paper(
         "tavily:web-result",
         "Web result",
@@ -1113,6 +1679,10 @@ def test_reranking_promotes_a_downloadable_pdf_into_the_top_k():
     arxiv_result["source"] = "arxiv"
     retriever = ArxivRAGRetriever(query_count=1, top_k=1, minimum_relevant_sources=1)
     retriever.minimum_downloadable_sources = 1
+    retriever.tavily = Mock(is_configured=True)
+    retriever.tavily.extract.return_value = {
+        web_result["arxiv_url"]: "Extracted directly relevant web evidence."
+    }
     fake_store = Mock()
     fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
         "documents"
@@ -1125,18 +1695,44 @@ def test_reranking_promotes_a_downloadable_pdf_into_the_top_k():
             [[web_result, arxiv_result]],
         )
 
-    assert [document.metadata["source_id"] for document in documents] == ["arXiv:2401.00001v1"]
-    assert documents[0].metadata["source"] == "arxiv"
+    assert [document.metadata["source_id"] for document in documents] == ["tavily:web-result"]
+    assert documents[0].metadata["source_type"] == "web"
 
 
-def test_strict_generation_evidence_gate_keeps_only_chroma_indexed_sources():
+def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_sources():
     indexed = Document(
         page_content="Indexed evidence",
-        metadata={"source_id": "arXiv:1111.1111", "full_text_indexed": True},
+        metadata={
+            "source_id": "arXiv:1111.1111",
+            "source_type": "academic",
+            "full_text_indexed": True,
+        },
     )
-    abstract_only = Document(
-        page_content="Abstract-only evidence",
-        metadata={"source_id": "tavily:web", "full_text_indexed": False},
+    web_content = Document(
+        page_content="Web content",
+        metadata={
+            "source_id": "web:guidance",
+            "source_type": "web",
+            "content_extracted": True,
+            "full_text_indexed": False,
+        },
+    )
+    search_only_web = Document(
+        page_content="Search snippet only",
+        metadata={
+            "source_id": "web:search-only",
+            "source_type": "web",
+            "content_extracted": False,
+            "full_text_indexed": False,
+        },
+    )
+    academic_abstract_only = Document(
+        page_content="Academic abstract only",
+        metadata={
+            "source_id": "arXiv:2222.2222",
+            "source_type": "academic",
+            "full_text_indexed": False,
+        },
     )
 
     class StrictPaperLibrary:
@@ -1150,9 +1746,9 @@ def test_strict_generation_evidence_gate_keeps_only_chroma_indexed_sources():
     agent = GenerationAgent(paper_library=StrictPaperLibrary())
 
     assert agent._prepare_candidate_documents(
-        [indexed, abstract_only],
+        [indexed, web_content, search_only_web, academic_abstract_only],
         ResearchGoal("Use downloadable evidence"),
-    ) == [indexed]
+    ) == [indexed, web_content]
 
 
 def test_retrieval_stops_arxiv_batch_after_rate_limit():
@@ -1842,11 +2438,9 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "arXiv:2222.2222",
     ]
     assert mock_retrieve.call_count == 2
-    assert mock_retrieve.call_args_list[1].kwargs["rerank_query"] == (
-        "targeted requested outcome evidence scientific goal"
-    )
+    assert mock_retrieve.call_args_list[1].kwargs["rerank_query"] == "scientific goal"
     gap_plan = mock_retrieve.call_args_list[1].args[1]
-    assert gap_plan.queries == (
+    assert gap_plan.query_texts == (
         "targeted requested outcome evidence",
         "scientific goal",
     )
@@ -1934,7 +2528,7 @@ def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
     assert context.last_retrieved_sources == []
     assert mock_llm.call_count == 1
     gap_plan = mock_retrieve.call_args_list[1].args[1]
-    assert gap_plan.queries == ("scientific goal",)
+    assert gap_plan.query_texts == ("scientific goal",)
     assert gap_plan.required_terms == ()
     mock_fallback.assert_called_once()
 
@@ -2044,7 +2638,7 @@ def test_semantic_scholar_fallback_can_fill_gap_after_arxiv_is_exhausted():
     assert errors == []
     assert hypotheses[0].evidence_source_ids == ["arXiv:1111.1111", "s2:outcome"]
     fallback_plan = mock_fallback.call_args.args[1]
-    assert fallback_plan.queries == (
+    assert fallback_plan.query_texts == (
         "targeted outcome evidence",
         "scientific goal",
     )

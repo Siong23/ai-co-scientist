@@ -127,6 +127,7 @@ def test_web_search_pdf_is_automatically_downloaded_and_indexed(tmp_path, monkey
 
     assert download_calls == ["https://dspace.networks.imdea.org/bitstream/handle/paper.pdf"]
     assert enriched[0].metadata["full_text_indexed"] is True
+    assert enriched[0].metadata["full_text_available"] is True
     assert library.has_indexed_source("tavily:open-paper") is True
 
 
