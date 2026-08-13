@@ -23,6 +23,11 @@ num_hypotheses: 4
 # whole Gradio cycle budget before fallback can try another model.
 llm_request_timeout_seconds: 180
 
+# Absorb a transient LM Studio inference-engine 5xx without changing endpoints
+# or losing the native API's explicit reasoning="off" control.
+lmstudio_native_server_error_retries: 1
+lmstudio_native_retry_backoff_seconds: 1.0
+
 # Prevent reasoning-capable local models from consuming the entire context
 # window when a prompt requests a small structured response.
 llm_default_max_tokens: 2048
@@ -35,6 +40,22 @@ llm_max_tokens:
   generation: 3072
   format_repair: 2048
   hypothesis_audit: 3072
+  evolution: 2048
+
+# The Evolution agent follows a rotating library of refinement strategies.
+# It creates new tournament candidates and never overwrites top-ranked parents.
+evolution:
+  strategies:
+    - combination
+    - feasibility
+    - simplification
+    - grounding
+    - inspiration
+    - out_of_box
+  max_candidates_per_cycle: 3
+  # Retry once only when a syntactically valid child fails the Evolution
+  # quality gate (near-copy, multiple hypotheses, or stitched combination).
+  quality_repair_attempts: 1
 
 # Elo K-factor
 elo_k_factor: 32

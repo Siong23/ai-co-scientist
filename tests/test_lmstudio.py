@@ -153,6 +153,63 @@ def test_call_llm_uses_native_api_to_disable_reasoning(monkeypatch):
     mock_openai.assert_not_called()
 
 
+def test_call_llm_retries_one_transient_native_server_error(monkeypatch):
+    monkeypatch.setitem(utils.config, "lmstudio_native_server_error_retries", 1)
+    monkeypatch.setitem(utils.config, "lmstudio_native_retry_backoff_seconds", 0.25)
+    server_error_response = MagicMock(status_code=500)
+    failed_response = MagicMock()
+    failed_response.raise_for_status.side_effect = utils.requests.HTTPError(
+        "500 Server Error",
+        response=server_error_response,
+    )
+    successful_response = MagicMock()
+    successful_response.json.return_value = {
+        "output": [{"type": "message", "content": '{"ok": true}'}],
+    }
+
+    with (
+        patch.object(
+            utils.requests,
+            "post",
+            side_effect=[failed_response, successful_response],
+        ) as mock_post,
+        patch.object(utils.time, "sleep") as mock_sleep,
+    ):
+        result = call_llm(
+            "return JSON",
+            model="selected-model",
+            reasoning="off",
+        )
+
+    assert result == '{"ok": true}'
+    assert mock_post.call_count == 2
+    mock_sleep.assert_called_once_with(0.25)
+
+
+def test_call_llm_does_not_retry_native_client_errors(monkeypatch):
+    monkeypatch.setitem(utils.config, "lmstudio_native_server_error_retries", 1)
+    client_error_response = MagicMock(status_code=400)
+    failed_response = MagicMock()
+    failed_response.raise_for_status.side_effect = utils.requests.HTTPError(
+        "400 Client Error",
+        response=client_error_response,
+    )
+
+    with (
+        patch.object(utils.requests, "post", return_value=failed_response) as mock_post,
+        patch.object(utils.time, "sleep") as mock_sleep,
+    ):
+        result = call_llm(
+            "return JSON",
+            model="selected-model",
+            reasoning="off",
+        )
+
+    assert "400 Client Error" in result
+    mock_post.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
 def test_missing_model_short_circuits_without_network(monkeypatch):
     monkeypatch.delenv("LMSTUDIO_MODEL", raising=False)
     monkeypatch.setitem(utils.config, "llm_model", "")

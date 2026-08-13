@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -186,23 +187,50 @@ def call_llm(
             }
             if system_prompt:
                 payload["system_prompt"] = system_prompt
-            response = requests.post(
-                get_lmstudio_native_chat_url(),
-                headers=_lmstudio_headers(),
-                json=payload,
-                timeout=config.get("llm_request_timeout_seconds", 180),
+            retry_count = max(
+                0,
+                int(config.get("lmstudio_native_server_error_retries", 1)),
             )
-            response.raise_for_status()
-            response_payload = response.json()
-            output = response_payload.get("output", []) if isinstance(response_payload, dict) else []
-            content = "\n".join(
-                str(item.get("content", ""))
-                for item in output
-                if isinstance(item, dict) and item.get("type") == "message" and item.get("content")
-            ).strip()
-            if not content:
-                return "Error: LM Studio returned an empty response."
-            return content
+            for attempt in range(retry_count + 1):
+                try:
+                    response = requests.post(
+                        get_lmstudio_native_chat_url(),
+                        headers=_lmstudio_headers(),
+                        json=payload,
+                        timeout=config.get("llm_request_timeout_seconds", 180),
+                    )
+                    response.raise_for_status()
+                    response_payload = response.json()
+                    output = response_payload.get("output", []) if isinstance(response_payload, dict) else []
+                    content = "\n".join(
+                        str(item.get("content", ""))
+                        for item in output
+                        if isinstance(item, dict) and item.get("type") == "message" and item.get("content")
+                    ).strip()
+                    if not content:
+                        return "Error: LM Studio returned an empty response."
+                    return content
+                except Exception as exc:
+                    response = getattr(exc, "response", None)
+                    status_code = getattr(response, "status_code", None)
+                    retryable = isinstance(status_code, int) and 500 <= status_code < 600 and attempt < retry_count
+                    if not retryable:
+                        raise
+                    logger.warning(
+                        "LM Studio native chat returned HTTP %d; retrying once.",
+                        status_code,
+                    )
+                    time.sleep(
+                        max(
+                            0.0,
+                            float(
+                                config.get(
+                                    "lmstudio_native_retry_backoff_seconds",
+                                    1.0,
+                                )
+                            ),
+                        )
+                    )
 
         client = OpenAI(
             base_url=get_lmstudio_base_url(),

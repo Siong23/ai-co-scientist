@@ -2180,6 +2180,9 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
         "arXiv:2103.00003v1",
         "arXiv:2104.00004v3",
     ]
+    assert [
+        source["source_id"] for source in hypotheses[0].evidence_sources
+    ] == hypotheses[0].evidence_source_ids
     assert "IRRELEVANT_UNIQUE" in candidate_contexts[0]
     synthesis_prompt = mock_llm.call_args_list[1].args[0]
     generation_prompt = mock_llm.call_args_list[2].args[0]
