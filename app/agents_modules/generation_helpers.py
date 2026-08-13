@@ -10,10 +10,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Callable, Dict, List
 
 from ..config import config
-from ..rag_retriever import EvidenceAspect, SearchQuery, SearchQueryPlan
+from ..rag_retriever import (
+    EvidenceAspect,
+    ProvisionalHypothesis,
+    SearchQuery,
+    SearchQueryPlan,
+)
 from ..utils import logger
 
 
@@ -395,8 +400,13 @@ def call_llm_for_search_queries(
     query_count: int = 5,
     research_planner_prompt: str | None = None,
     query_rewriter_prompt: str | None = None,
+    query_fidelity_validator: (
+        Callable[[SearchQueryPlan], tuple[bool, str]] | None
+    ) = None,
 ) -> tuple[SearchQueryPlan | None, str | None]:
     """Plan the research first, then rewrite the plan into search queries."""
+
+    query_count = max(1, int(query_count))
 
     if research_planner_prompt is None or query_rewriter_prompt is None:
         from .generation import (
@@ -421,6 +431,61 @@ def call_llm_for_search_queries(
             raise ValueError("Expected a JSON object.")
         return payload
 
+    provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
+
+    def parse_provisional_hypotheses(
+        payload: dict,
+    ) -> tuple[ProvisionalHypothesis, ...]:
+        raw_hypotheses = payload.get("provisional_hypotheses")
+        if not isinstance(raw_hypotheses, list):
+            raise ValueError(
+                "Research Planner must return provisional_hypotheses."
+            )
+
+        normalized_goal = " ".join(research_goal.casefold().split())
+        hypotheses: list[ProvisionalHypothesis] = []
+        seen_ids: set[str] = set()
+        seen_roles: set[str] = set()
+        for raw_hypothesis in raw_hypotheses:
+            if not isinstance(raw_hypothesis, dict):
+                continue
+            hypothesis_id = str(
+                raw_hypothesis.get("hypothesis_id", "")
+            ).strip()
+            role = str(raw_hypothesis.get("role", "")).strip().casefold()
+            statement = str(raw_hypothesis.get("statement", "")).strip()
+            goal_quote = str(raw_hypothesis.get("goal_quote", "")).strip()
+            normalized_quote = " ".join(goal_quote.casefold().split())
+            if (
+                not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", hypothesis_id)
+                or role not in {"primary", "alternative", "null"}
+                or not statement
+                or len(statement.split()) > 60
+                or not normalized_quote
+                or normalized_quote not in normalized_goal
+                or len(goal_quote.split()) > 16
+                or hypothesis_id in seen_ids
+                or role in seen_roles
+            ):
+                continue
+            seen_ids.add(hypothesis_id)
+            seen_roles.add(role)
+            hypotheses.append(
+                ProvisionalHypothesis(
+                    hypothesis_id=hypothesis_id,
+                    role=role,
+                    statement=statement,
+                    goal_quote=goal_quote,
+                )
+            )
+
+        if seen_roles != {"primary", "alternative", "null"}:
+            raise ValueError(
+                "Expected one goal-anchored primary, alternative, and null "
+                "provisional hypothesis."
+            )
+        return tuple(hypotheses)
+
     def parse_research_plan(response: str) -> dict:
         payload = parse_json_object(response)
         string_fields = (
@@ -435,11 +500,13 @@ def call_llm_for_search_queries(
             "sub_questions",
             "evidence_requirements",
             "ambiguities",
+            "provisional_hypotheses",
         )
         if any(not isinstance(payload.get(field), str) for field in string_fields) or any(
             not isinstance(payload.get(field), list) for field in list_fields
         ):
             raise ValueError("Research Planner returned an incomplete plan schema.")
+        parse_provisional_hypotheses(payload)
         return payload
 
     def parse_response(response: str) -> SearchQueryPlan:
@@ -494,12 +561,16 @@ def call_llm_for_search_queries(
                     # than an imperative such as "develop a framework", which
                     # no retrieved paper can literally satisfy.
                     description=evidence_need or goal_quote,
+                    goal_quote=goal_quote,
                 )
             )
         if not 1 <= len(explicit_requirements) <= 5:
             raise ValueError("Expected 1 to 5 unique explicit requirements with verbatim goal quotes.")
 
         valid_requirement_ids = {aspect.aspect_id for aspect in explicit_requirements}
+        valid_hypothesis_ids = {
+            hypothesis.hypothesis_id for hypothesis in provisional_hypotheses
+        }
 
         def normalize_domain(value: object) -> str:
             candidate = str(value or "").strip().casefold()
@@ -578,6 +649,14 @@ def call_llm_for_search_queries(
                     raise ValueError(
                         f"Unknown evidence_requirement_id {requirement_id!r}."
                     )
+                hypothesis_id = str(
+                    raw_query.get("hypothesis_id") or ""
+                ).strip() or None
+                if hypothesis_id and hypothesis_id not in valid_hypothesis_ids:
+                    raise ValueError(f"Unknown hypothesis_id {hypothesis_id!r}.")
+                search_intent = str(
+                    raw_query.get("search_intent") or "goal"
+                ).strip().casefold()
                 search_query = SearchQuery(
                     query=query_text,
                     sub_question=str(raw_query.get("sub_question") or ""),
@@ -586,6 +665,8 @@ def call_llm_for_search_queries(
                     preferred_domains=preferred_domains,
                     freshness=normalize_freshness(raw_query.get("freshness")),
                     evidence_requirement_id=requirement_id,
+                    hypothesis_id=hypothesis_id,
+                    search_intent=search_intent,
                 )
             else:
                 continue
@@ -595,8 +676,14 @@ def call_llm_for_search_queries(
             seen_queries.add(normalized_key)
             normalized_queries.append(search_query)
 
-        if len(normalized_queries) != query_count:
-            raise ValueError(f"Expected exactly {query_count} unique search queries.")
+        minimum_query_count = min(
+            query_count,
+            3 if provisional_hypotheses else 2,
+        )
+        if not minimum_query_count <= len(normalized_queries) <= query_count:
+            raise ValueError(
+                f"Expected {minimum_query_count} to {query_count} unique search queries."
+            )
         exploration_directions = tuple(
             dict.fromkeys(
                 direction.strip() for direction in raw_directions if isinstance(direction, str) and direction.strip()
@@ -604,12 +691,23 @@ def call_llm_for_search_queries(
         )
         if len(exploration_directions) > 5:
             raise ValueError("Expected no more than 5 exploration directions.")
+        if provisional_hypotheses and query_count >= 3:
+            search_intents = {
+                query.search_intent for query in normalized_queries
+            }
+            required_intents = {"support", "counterevidence", "prior_art"}
+            if not required_intents.issubset(search_intents):
+                raise ValueError(
+                    "Hypothesis-guided retrieval requires support, "
+                    "counterevidence, and prior_art queries."
+                )
 
         return SearchQueryPlan(
             queries=tuple(normalized_queries),
             required_terms=normalized_terms,
             explicit_requirements=tuple(explicit_requirements),
             exploration_directions=exploration_directions,
+            provisional_hypotheses=provisional_hypotheses,
         )
 
     planner_prompt = f"""
@@ -642,6 +740,9 @@ USER RESEARCH GOAL
     if legacy_query_response is None:
         try:
             research_plan = parse_research_plan(planner_response)
+            provisional_hypotheses = parse_provisional_hypotheses(
+                research_plan
+            )
         except (json.JSONDecodeError, ValueError) as exc:
             logger.error("Could not parse Research Planner response: %s", planner_response, exc_info=True)
             return None, f"Query rewriting failed: Research planning failed: {exc}"
@@ -650,16 +751,19 @@ USER RESEARCH GOAL
             f'{{"query": "query {index}", "purpose": "...", '
             '"sub_question": "...", "source_type": "academic|web|official|news", '
             '"preferred_domains": [], "freshness": null, '
-            '"evidence_requirement_id": "short_id"}'
+            '"evidence_requirement_id": "short_id", '
+            '"hypothesis_id": "provisional_id|null", '
+            '"search_intent": "goal|support|counterevidence|prior_art"}'
             for index in range(1, query_count + 1)
         )
         rewriter_system_prompt = f"""
 {query_rewriter_prompt}
 
-Generate exactly {query_count} distinct queries. In addition to the fields in
-the Query Rewriter prompt, include the evidence-control fields below so the
-retrieval system can validate coverage without turning optional ideas into
-hard requirements.
+Generate between {min(query_count, 3)} and {query_count} distinct queries, using
+the fewest queries that cover the research goal and required retrieval intents.
+In addition to the fields in the Query Rewriter prompt, include the
+evidence-control fields below so the retrieval system can validate coverage
+without turning optional ideas into hard requirements.
 
 - required_terms: only indispensable named entities, locations, organisms,
   materials, diseases, or technologies (and close synonyms).
@@ -679,6 +783,10 @@ hard requirements.
   only. freshness is day, week, month, year, or null. Link a query to one of
   the explicit_requirements using evidence_requirement_id when applicable;
   otherwise use null.
+- Provisional hypotheses are unverified retrieval scaffolds, never evidence or
+  conclusions. Use hypothesis_id to link hypothesis-guided queries. Include at
+  least one support query, one counterevidence query, and one prior_art query;
+  label each with search_intent. Preserve the original goal as the authority.
 
 Return only valid JSON with this extended shape:
 {{
@@ -724,7 +832,16 @@ STRUCTURED RESEARCH PLAN
         if response.startswith("Error:"):
             return None, f"Query rewriting failed: {response}"
         try:
-            return parse_response(response), None
+            query_plan = parse_response(response)
+            if query_fidelity_validator is not None:
+                fidelity_valid, fidelity_reason = query_fidelity_validator(
+                    query_plan
+                )
+                if not fidelity_valid:
+                    raise ValueError(
+                        "Query fidelity validation failed: " + fidelity_reason
+                    )
+            return query_plan, None
         except (json.JSONDecodeError, AttributeError, ValueError) as exc:
             logger.warning(
                 "Query plan attempt %d was invalid: %s",

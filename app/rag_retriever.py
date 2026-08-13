@@ -4,6 +4,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from math import sqrt
 from typing import Any, Literal, Sequence, cast
 from urllib.parse import urlparse
 
@@ -38,6 +39,21 @@ class EvidenceAspect:
 
     aspect_id: str
     description: str
+    goal_quote: str = ""
+
+
+HypothesisRole = Literal["primary", "alternative", "null"]
+SearchIntent = Literal["goal", "support", "counterevidence", "prior_art"]
+
+
+@dataclass(frozen=True)
+class ProvisionalHypothesis:
+    """Unverified retrieval scaffold that must never be treated as evidence."""
+
+    hypothesis_id: str
+    role: HypothesisRole
+    statement: str
+    goal_quote: str
 
 
 SearchRoute = Literal["academic", "web", "official", "news", "all"]
@@ -54,6 +70,8 @@ class SearchQuery:
     preferred_domains: tuple[str, ...] = ()
     freshness: str | None = None
     evidence_requirement_id: str | None = None
+    hypothesis_id: str | None = None
+    search_intent: SearchIntent = "goal"
 
     def __post_init__(self) -> None:
         source_type = str(self.source_type).strip().casefold()
@@ -62,6 +80,9 @@ class SearchQuery:
         freshness = self.freshness.strip().casefold() if self.freshness else None
         if freshness not in {None, "day", "week", "month", "year"}:
             raise ValueError(f"Unsupported search freshness: {self.freshness!r}")
+        search_intent = str(self.search_intent).strip().casefold()
+        if search_intent not in {"goal", "support", "counterevidence", "prior_art"}:
+            raise ValueError(f"Unsupported search intent: {self.search_intent!r}")
         object.__setattr__(self, "query", self.query.strip())
         object.__setattr__(self, "sub_question", self.sub_question.strip())
         object.__setattr__(self, "purpose", self.purpose.strip())
@@ -77,6 +98,12 @@ class SearchQuery:
             "evidence_requirement_id",
             self.evidence_requirement_id.strip() if self.evidence_requirement_id else None,
         )
+        object.__setattr__(
+            self,
+            "hypothesis_id",
+            self.hypothesis_id.strip() if self.hypothesis_id else None,
+        )
+        object.__setattr__(self, "search_intent", search_intent)
 
 
 @dataclass(frozen=True)
@@ -87,6 +114,7 @@ class SearchQueryPlan:
     required_terms: tuple[str, ...]
     explicit_requirements: tuple[EvidenceAspect, ...] = ()
     exploration_directions: tuple[str, ...] = ()
+    provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -174,6 +202,8 @@ def reciprocal_rank_fusion(
                         context.get("purpose"),
                         context.get("source_type"),
                         context.get("evidence_requirement_id"),
+                        context.get("hypothesis_id"),
+                        context.get("search_intent"),
                     )
                     if context_key not in seen_contexts:
                         seen_contexts.add(context_key)
@@ -232,6 +262,25 @@ class ResearchRetriever:
         self.top_k = max(self.top_k, self.minimum_relevant_sources)
         self.rrf_k = rrf_k or int(rag_config.get("rrf_k", 60))
         self.max_abstract_chars = max_abstract_chars or int(rag_config.get("max_abstract_chars", 4000))
+        self.query_fidelity_enabled = bool(
+            rag_config.get("query_fidelity_enabled", True)
+        )
+        self.query_fidelity_min_similarity = max(
+            0.0,
+            min(1.0, float(rag_config.get("query_fidelity_min_similarity", 0.35))),
+        )
+        self.provisional_hypothesis_min_similarity = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    rag_config.get(
+                        "provisional_hypothesis_min_similarity",
+                        0.30,
+                    )
+                ),
+            ),
+        )
 
         library_config = config.get("paper_library", {})
         require_indexed_sources = bool(library_config.get("enabled", True)) and bool(
@@ -253,6 +302,8 @@ class ResearchRetriever:
             str(host).strip().casefold() for host in configured_pdf_hosts if str(host).strip()
         }
         self.last_search_stats: list[dict[str, Any]] = []
+        self.last_query_fidelity: list[dict[str, Any]] = []
+        self.last_query_plan: SearchQueryPlan | None = None
         self._search_round = 0
 
         self.arxiv = ArxivSearchTool(max_results=self.results_per_query)
@@ -308,7 +359,163 @@ class ResearchRetriever:
         """Clear provider-call telemetry at the start of one generation run."""
 
         self.last_search_stats = []
+        self.last_query_fidelity = []
+        self.last_query_plan = None
         self._search_round = 0
+
+    @staticmethod
+    def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
+        """Return bounded cosine similarity without another ML dependency."""
+
+        if len(left) != len(right) or not left:
+            return 0.0
+        numerator = sum(float(a) * float(b) for a, b in zip(left, right))
+        left_norm = sqrt(sum(float(value) ** 2 for value in left))
+        right_norm = sqrt(sum(float(value) ** 2 for value in right))
+        if not left_norm or not right_norm:
+            return 0.0
+        return max(-1.0, min(1.0, numerator / (left_norm * right_norm)))
+
+    def validate_query_plan_fidelity(
+        self,
+        original_goal: str,
+        query_plan: SearchQueryPlan,
+    ) -> tuple[bool, str]:
+        """Reject provisional hypotheses or queries that drift from goal anchors."""
+
+        if not self.query_fidelity_enabled:
+            return True, "Query fidelity validation is disabled."
+
+        goal = original_goal.strip()
+        if not goal or not query_plan.queries:
+            return False, "The research goal and at least one query are required."
+
+        requirements = {
+            requirement.aspect_id: requirement
+            for requirement in query_plan.explicit_requirements
+        }
+        hypotheses = {
+            hypothesis.hypothesis_id: hypothesis
+            for hypothesis in query_plan.provisional_hypotheses
+        }
+        anchor_texts: dict[str, str] = {"goal": goal}
+        for requirement in requirements.values():
+            anchor_texts[f"requirement:{requirement.aspect_id}"] = " ".join(
+                value
+                for value in (
+                    requirement.goal_quote,
+                    requirement.description,
+                )
+                if value
+            )
+        for hypothesis in hypotheses.values():
+            anchor_texts[f"hypothesis:{hypothesis.hypothesis_id}"] = (
+                hypothesis.statement
+            )
+            anchor_texts[f"hypothesis_anchor:{hypothesis.hypothesis_id}"] = (
+                " ".join(
+                    value for value in (goal, hypothesis.goal_quote) if value
+                )
+            )
+
+        query_texts = {
+            f"query:{index}": query.query
+            for index, query in enumerate(query_plan.queries)
+        }
+        texts = {**anchor_texts, **query_texts}
+        try:
+            vectors = self.embeddings.embed_documents(list(texts.values()))
+            if len(vectors) != len(texts):
+                raise ValueError("Embedding model returned an incomplete batch.")
+        except Exception as exc:
+            logger.warning(
+                "Query fidelity embedding check unavailable; preserving the query plan: %s",
+                redact_secrets(str(exc)),
+            )
+            self.last_query_fidelity = [
+                {
+                    "status": "unavailable",
+                    "reason": redact_secrets(str(exc)),
+                }
+            ]
+            return True, "Embedding validation was unavailable; the query plan was preserved."
+
+        vector_by_key = dict(zip(texts, vectors))
+        goal_vector = vector_by_key["goal"]
+        rejected_hypotheses: set[str] = set()
+        report: list[dict[str, Any]] = []
+        for hypothesis in hypotheses.values():
+            score = self._cosine_similarity(
+                vector_by_key[f"hypothesis:{hypothesis.hypothesis_id}"],
+                vector_by_key[
+                    f"hypothesis_anchor:{hypothesis.hypothesis_id}"
+                ],
+            )
+            accepted = score >= self.provisional_hypothesis_min_similarity
+            if not accepted:
+                rejected_hypotheses.add(hypothesis.hypothesis_id)
+            report.append(
+                {
+                    "kind": "provisional_hypothesis",
+                    "id": hypothesis.hypothesis_id,
+                    "role": hypothesis.role,
+                    "score": round(score, 4),
+                    "accepted": accepted,
+                }
+            )
+
+        rejected_queries: list[str] = []
+        for index, query in enumerate(query_plan.queries):
+            anchor_vectors = [goal_vector]
+            if query.evidence_requirement_id in requirements:
+                anchor_vectors.append(
+                    vector_by_key[
+                        f"requirement:{query.evidence_requirement_id}"
+                    ]
+                )
+            if query.hypothesis_id in hypotheses:
+                anchor_vectors.append(
+                    vector_by_key[f"hypothesis:{query.hypothesis_id}"]
+                )
+            score = max(
+                self._cosine_similarity(
+                    vector_by_key[f"query:{index}"],
+                    anchor_vector,
+                )
+                for anchor_vector in anchor_vectors
+            )
+            accepted = (
+                score >= self.query_fidelity_min_similarity
+                and query.hypothesis_id not in rejected_hypotheses
+            )
+            if not accepted:
+                rejected_queries.append(query.query)
+            report.append(
+                {
+                    "kind": "query",
+                    "query": query.query,
+                    "hypothesis_id": query.hypothesis_id,
+                    "evidence_requirement_id": query.evidence_requirement_id,
+                    "search_intent": query.search_intent,
+                    "score": round(score, 4),
+                    "accepted": accepted,
+                }
+            )
+
+        self.last_query_fidelity = report
+        if rejected_hypotheses or rejected_queries:
+            details = []
+            if rejected_hypotheses:
+                details.append(
+                    "misaligned provisional hypotheses: "
+                    + ", ".join(sorted(rejected_hypotheses))
+                )
+            if rejected_queries:
+                details.append(
+                    "misaligned queries: " + "; ".join(rejected_queries)
+                )
+            return False, ". ".join(details)
+        return True, "All provisional hypotheses and queries passed fidelity checks."
 
     def _academic_sources(self):
         return (
@@ -373,6 +580,8 @@ class ResearchRetriever:
                 "preferred_domains": search_query.preferred_domains,
                 "freshness": search_query.freshness,
                 "evidence_requirement_id": search_query.evidence_requirement_id,
+                "hypothesis_id": search_query.hypothesis_id,
+                "search_intent": search_query.search_intent,
             }
             normalized_results = []
             for result in raw_results:
@@ -400,6 +609,8 @@ class ResearchRetriever:
                         "preferred_domains": search_query.preferred_domains,
                         "freshness": search_query.freshness,
                         "evidence_requirement_id": search_query.evidence_requirement_id,
+                        "hypothesis_id": search_query.hypothesis_id,
+                        "search_intent": search_query.search_intent,
                         "query_contexts": (query_context,),
                     }
                 )
@@ -566,6 +777,8 @@ class ResearchRetriever:
                 "preferred_domains": search_query.preferred_domains,
                 "freshness": search_query.freshness,
                 "evidence_requirement_id": search_query.evidence_requirement_id,
+                "hypothesis_id": search_query.hypothesis_id,
+                "search_intent": search_query.search_intent,
             }
             normalized_results = []
             for result in raw_results:
@@ -587,6 +800,8 @@ class ResearchRetriever:
                         "preferred_domains": search_query.preferred_domains,
                         "freshness": search_query.freshness,
                         "evidence_requirement_id": search_query.evidence_requirement_id,
+                        "hypothesis_id": search_query.hypothesis_id,
+                        "search_intent": search_query.search_intent,
                         "query_contexts": (query_context,),
                     }
                 )

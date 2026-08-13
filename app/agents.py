@@ -50,6 +50,7 @@ from .models import ContextMemory, Hypothesis, ResearchGoal
 from .rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
+    ProvisionalHypothesis,
     ResearchRetriever,
     SearchQuery,
     SearchQueryPlan,
@@ -81,6 +82,7 @@ __all__ = [
     "LiteratureSynthesis",
     "MetaReviewAgent",
     "ProximityAgent",
+    "ProvisionalHypothesis",
     "RankingAgent",
     "ReflectionAgent",
     "ResearchGoal",

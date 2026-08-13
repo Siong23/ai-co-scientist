@@ -47,6 +47,14 @@ Determine:
    fact verification, discovery, or multi-hop research.
 7. What evidence would constitute a satisfactory answer.
 8. Any ambiguity that could materially affect the research.
+9. Three provisional retrieval hypotheses: one plausible primary hypothesis,
+   one materially different alternative explanation, and one null hypothesis
+   or falsifying account. These are search scaffolds only, not conclusions.
+   Anchor each with a verbatim goal_quote of at most 16 words, and keep each
+   statement concise enough to guide retrieval without inventing specifics.
+   Keep the primary hypothesis minimal: do not add an algorithm, mechanism,
+   dataset, metric, protocol, or architecture absent from the user's goal.
+   Put optional mechanisms in search angles instead of assuming them here.
 
 Do not provide the final answer.
 Do not generate search queries.
@@ -63,7 +71,27 @@ Return only the following JSON:
   "evidence_requirements": [],
   "freshness_requirement": "...",
   "ambiguities": [],
-  "search_strategy": "..."
+  "search_strategy": "...",
+  "provisional_hypotheses": [
+    {
+      "hypothesis_id": "primary_hypothesis",
+      "role": "primary",
+      "statement": "one concise, testable provisional statement",
+      "goal_quote": "verbatim span from the user request"
+    },
+    {
+      "hypothesis_id": "alternative_hypothesis",
+      "role": "alternative",
+      "statement": "a materially different explanation",
+      "goal_quote": "verbatim span from the user request"
+    },
+    {
+      "hypothesis_id": "null_hypothesis",
+      "role": "null",
+      "statement": "a null result or falsifying account",
+      "goal_quote": "verbatim span from the user request"
+    }
+  ]
 }"""
 
 
@@ -92,6 +120,12 @@ For each research sub-question:
 - Do not combine unrelated sub-questions into one query.
 - Route scholarly literature to academic, general pages to web, first-party
   sources to official, and time-sensitive reporting to news.
+- Treat provisional hypotheses as unverified retrieval scaffolds. Search for
+  supporting evidence, counterevidence, and the closest prior art; never assume
+  a provisional statement is true or present it as evidence.
+- Do not narrow the primary query to an algorithm, mechanism, dataset, metric,
+  or protocol absent from the original request. Such concepts may appear only
+  as optional additional queries when needed for recall.
 
 Return JSON:
 
@@ -104,7 +138,9 @@ Return JSON:
       "source_type": "academic | web | official | news",
       "preferred_domains": [],
       "freshness": "day | week | month | year | null",
-      "evidence_requirement_id": "... | null"
+      "evidence_requirement_id": "... | null",
+      "hypothesis_id": "... | null",
+      "search_intent": "goal | support | counterevidence | prior_art"
     }
   ]
 }"""
@@ -351,6 +387,7 @@ class GenerationAgent:
                 EvidenceAspect(
                     aspect_id="goal_scope",
                     description=normalized_goal,
+                    goal_quote=normalized_goal,
                 ),
             ),
         )
@@ -378,6 +415,22 @@ class GenerationAgent:
                 merged.append(document)
 
         return merged
+
+    def _bounded_missing_evidence_queries(
+        self,
+        coverage,
+        missing_aspects,
+    ) -> tuple[str, ...]:
+        """Prioritize missing goal requirements and cap one retrieval round."""
+
+        return tuple(
+            dict.fromkeys(
+                [
+                    *(aspect.description for aspect in missing_aspects),
+                    *coverage.gap_queries,
+                ]
+            )
+        )[: self.rag_retriever.query_count]
 
     def _run_scientific_debate(
         self,
@@ -710,6 +763,12 @@ Your refined contribution:
             query_count=self.rag_retriever.query_count,
             research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
             query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
+            query_fidelity_validator=lambda plan: (
+                self.rag_retriever.validate_query_plan_fidelity(
+                    research_goal.description,
+                    plan,
+                )
+            ),
         )
 
         # First retrieval always uses the user's unmodified research goal.
@@ -741,11 +800,14 @@ Your refined contribution:
                 research_goal.description
             )
 
+        self.rag_retriever.last_query_plan = query_plan
         _legacy.logger.info(
-            "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s exploration_directions=%s",
+            "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s "
+            "provisional_hypotheses=%s exploration_directions=%s",
             query_plan.queries,
             query_plan.required_terms,
             query_plan.explicit_requirements,
+            query_plan.provisional_hypotheses,
             query_plan.exploration_directions,
         )
 
@@ -890,22 +952,19 @@ Your refined contribution:
                         if aspect.aspect_id in coverage.missing_aspect_ids
                     ]
 
-                    fallback_queries = tuple(
-                        dict.fromkeys(
-                            [
-                                *coverage.gap_queries,
-                                *(
-                                    aspect.description
-                                    for aspect in missing_aspects
-                                ),
-                            ]
+                    fallback_queries = (
+                        self._bounded_missing_evidence_queries(
+                            coverage,
+                            missing_aspects,
                         )
                     )
 
                     fallback_plan = SearchQueryPlan(
                         queries=(
                             fallback_queries
-                            or query_plan.queries
+                            or query_plan.queries[
+                                : self.rag_retriever.query_count
+                            ]
                         ),
                         required_terms=(),
                         explicit_requirements=(
@@ -965,16 +1024,9 @@ Your refined contribution:
                 if aspect.aspect_id in coverage.missing_aspect_ids
             ]
 
-            corrective_queries = tuple(
-                dict.fromkeys(
-                    [
-                        *coverage.gap_queries,
-                        *(
-                            aspect.description
-                            for aspect in missing_aspects
-                        ),
-                    ]
-                )
+            corrective_queries = self._bounded_missing_evidence_queries(
+                coverage,
+                missing_aspects,
             )
 
             gap_plan = SearchQueryPlan(

@@ -209,6 +209,28 @@ def test_generation_results_show_every_search_provider_call(gradio_app_module):
                         "status": "ok",
                     },
                 ],
+                "query_plan": {
+                    "provisional_hypotheses": [
+                        {
+                            "role": "primary",
+                            "statement": "A <provisional> mechanism may help.",
+                        }
+                    ],
+                    "queries": [
+                        {
+                            "query": "targeted <query>",
+                            "search_intent": "counterevidence",
+                            "source_type": "academic",
+                        }
+                    ],
+                },
+                "query_fidelity": [
+                    {
+                        "kind": "query",
+                        "query": "targeted <query>",
+                        "accepted": True,
+                    }
+                ],
             }
         },
     }
@@ -226,6 +248,10 @@ def test_generation_results_show_every_search_provider_call(gradio_app_module):
     assert "arXiv" in html
     assert "5/5 queries, 20 results" in html
     assert "Tavily" in html
+    assert "Provisional retrieval hypotheses (not evidence)" in html
+    assert "A &lt;provisional&gt; mechanism may help." in html
+    assert "counterevidence · academic: targeted &lt;query&gt;" in html
+    assert "Query fidelity:</strong> 1/1 accepted" in html
 
 
 def test_generation_results_explain_quality_gate_outcomes(gradio_app_module):

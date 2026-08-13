@@ -148,11 +148,50 @@ class SupervisorAgent:
             context.add_hypothesis(nh)  # Add to central context
         generation_sources = list(context.last_retrieved_sources)
         generation_audits = list(context.last_hypothesis_audits)
+        query_plan = getattr(
+            self.generation_agent.rag_retriever,
+            "last_query_plan",
+            None,
+        )
+        if not isinstance(getattr(query_plan, "queries", None), (list, tuple)):
+            query_plan = None
+        query_fidelity = getattr(
+            self.generation_agent.rag_retriever,
+            "last_query_fidelity",
+            [],
+        )
+        if not isinstance(query_fidelity, list):
+            query_fidelity = []
+        query_plan_details = {
+            "provisional_hypotheses": [
+                {
+                    "hypothesis_id": item.hypothesis_id,
+                    "role": item.role,
+                    "statement": item.statement,
+                    "goal_quote": item.goal_quote,
+                }
+                for item in (query_plan.provisional_hypotheses if query_plan else ())
+            ],
+            "queries": [
+                {
+                    "query": item.query,
+                    "purpose": item.purpose,
+                    "sub_question": item.sub_question,
+                    "source_type": item.source_type,
+                    "evidence_requirement_id": item.evidence_requirement_id,
+                    "hypothesis_id": item.hypothesis_id,
+                    "search_intent": item.search_intent,
+                }
+                for item in (query_plan.queries if query_plan else ())
+            ],
+        }
         cycle_details["steps"]["generation"] = {
             "hypotheses": [h.to_dict() for h in new_hypotheses],
             "sources": generation_sources,
             "audits": generation_audits,
             "search_stats": list(self.generation_agent.rag_retriever.last_search_stats),
+            "query_plan": query_plan_details,
+            "query_fidelity": list(query_fidelity),
         }
 
         audit_counts: Dict[str, int] = {}
@@ -160,6 +199,12 @@ class SupervisorAgent:
             verdict = str(audit.get("verdict") or audit.get("status") or "unknown").upper()
             audit_counts[verdict] = audit_counts.get(verdict, 0) + 1
         generation_details = _source_details(generation_sources)
+        for hypothesis in query_plan_details["provisional_hypotheses"]:
+            generation_details.append(
+                "Provisional "
+                f"{hypothesis['role']} retrieval hypothesis: "
+                f"{hypothesis['statement']}"
+            )
         if audit_counts:
             audit_summary = ", ".join(f"{name}: {count}" for name, count in sorted(audit_counts.items()))
             generation_details.append(f"Candidate audits: {audit_summary}")

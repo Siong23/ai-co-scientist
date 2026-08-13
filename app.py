@@ -580,13 +580,79 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         if step_name == "generation":
             hypotheses = step_data.get("hypotheses", [])
             search_stats = step_data.get("search_stats", [])
-            if isinstance(search_stats, list) and search_stats:
+            query_plan = step_data.get("query_plan", {})
+            if not isinstance(query_plan, dict):
+                query_plan = {}
+            provisional_hypotheses = query_plan.get(
+                "provisional_hypotheses",
+                [],
+            )
+            planned_queries = query_plan.get("queries", [])
+            query_fidelity = step_data.get("query_fidelity", [])
+            has_search_details = any(
+                isinstance(items, list) and items
+                for items in (
+                    search_stats,
+                    provisional_hypotheses,
+                    planned_queries,
+                    query_fidelity,
+                )
+            )
+            if has_search_details:
                 html += """
                 <details style="margin: 5px 0 10px;">
                     <summary style="cursor: pointer; font-size: 0.9em;">Search details</summary>
-                    <p><strong>Search providers called:</strong></p><ul>
                 """
-                for stat in search_stats:
+                if isinstance(provisional_hypotheses, list) and provisional_hypotheses:
+                    html += (
+                        "<p><strong>Provisional retrieval hypotheses "
+                        "(not evidence):</strong></p><ul>"
+                    )
+                    for provisional in provisional_hypotheses:
+                        if not isinstance(provisional, dict):
+                            continue
+                        role = html_lib.escape(str(provisional.get("role", "unknown")))
+                        statement = html_lib.escape(
+                            str(provisional.get("statement", ""))
+                        )
+                        html += f"<li>{role}: {statement}</li>"
+                    html += "</ul>"
+                if isinstance(planned_queries, list) and planned_queries:
+                    html += "<p><strong>Planned queries:</strong></p><ul>"
+                    for query in planned_queries:
+                        if not isinstance(query, dict):
+                            continue
+                        query_text = html_lib.escape(str(query.get("query", "")))
+                        intent = html_lib.escape(
+                            str(query.get("search_intent", "goal"))
+                        )
+                        source_type = html_lib.escape(
+                            str(query.get("source_type", "all"))
+                        )
+                        html += (
+                            f"<li>{intent} · {source_type}: {query_text}</li>"
+                        )
+                    html += "</ul>"
+                if isinstance(query_fidelity, list) and query_fidelity:
+                    checked_queries = [
+                        item
+                        for item in query_fidelity
+                        if isinstance(item, dict) and item.get("kind") == "query"
+                    ]
+                    if checked_queries:
+                        accepted = sum(
+                            item.get("accepted") is True
+                            for item in checked_queries
+                        )
+                        html += (
+                            "<p><strong>Query fidelity:</strong> "
+                            f"{accepted}/{len(checked_queries)} accepted</p>"
+                        )
+                if isinstance(search_stats, list) and search_stats:
+                    html += "<p><strong>Search providers called:</strong></p><ul>"
+                for stat in (
+                    search_stats if isinstance(search_stats, list) else []
+                ):
                     if not isinstance(stat, dict):
                         continue
                     provider = html_lib.escape(str(stat.get("source", "Unknown")))
@@ -597,7 +663,9 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         f"queries, {int(stat.get('results', 0))} results, "
                         f"{int(stat.get('elapsed_ms', 0))} ms ({status})</li>"
                     )
-                html += "</ul></details>"
+                if isinstance(search_stats, list) and search_stats:
+                    html += "</ul>"
+                html += "</details>"
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
             for i, hypo in enumerate(hypotheses):
                 audit = hypo.get("audit_report", {})
