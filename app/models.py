@@ -221,21 +221,21 @@ class ClaimAssessment(BaseModel):
 
 
 class ReflectionReport(BaseModel):
-    claims: List[ClaimAssessment] = []
-
+    alignment_score: float = 0.0
     novelty_score: float = 0.0
     feasibility_score: float = 0.0
     plausibility_score: float = 0.0
     testability_score: float = 0.0
     evidence_quality_score: float = 0.0
     expected_research_value_score: float = 0.0
+    review_comments: List[str] = []
 
+    #unused variables(keeping for potential future use)
+    claims: List[ClaimAssessment] = []
     strengths: List[str] = []
     weaknesses: List[str] = []
     contradictions: List[str] = []
-
     recommendation: str = ""
-
     confidence: float = 0.0
 
 

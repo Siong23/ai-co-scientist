@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import List
 
-from ..models import ContextMemory, Hypothesis, ResearchGoal
+from ..models import ContextMemory, Hypothesis, ResearchGoal, ReflectionReport
 from ._compat import _legacy
+
 
 
 class ReflectionAgent:
@@ -28,6 +29,20 @@ class ReflectionAgent:
                 h.review_comments.append(result["comment"])
             if result["references"]:
                 h.references.extend(result["references"])
+            
+            # Create and store ReflectionReport with all scores
+            reflection_report = ReflectionReport(
+                alignment_score=result.get("alignment_score", 0),
+                novelty_score=result.get("novelty_score", 0),
+                feasibility_score=result.get("feasibility_score", 0),
+                plausibility_score=result.get("plausibility_score", 0),
+                testability_score=result.get("testability_score", 0),
+                evidence_quality_score=result.get("evidence_quality_score", 0),
+                expected_research_value_score=result.get("expected_research_value_score", 0),
+                review_comments=[result["comment"]] if result.get("comment") else [],
+            )
+            h.reflection_report = reflection_report
+            
             _legacy.logger.info(
                 "Reviewed hypothesis: %s, Novelty: %s, Feasibility: %s",
                 h.hypothesis_id,
