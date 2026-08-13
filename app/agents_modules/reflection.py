@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import List
 
-from ..models import ContextMemory, Hypothesis, ResearchGoal, ReflectionReport
+from ..models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 from ._compat import _legacy
-
 
 
 class ReflectionAgent:
