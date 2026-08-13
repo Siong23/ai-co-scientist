@@ -57,6 +57,13 @@ class RankingAgent:
             _legacy.logger.info("No new hypotheses require ranking comparisons.")
             return
 
+        for h in active_hypotheses:
+            _legacy.logger.info(
+                "Ranking input: %s | reflection_report=%s",
+                h.hypothesis_id,
+                h.reflection_report is not None,
+            )
+
         _legacy.logger.info(f"Running tournament with {len(pairs)} pairs.")
 
         # ---- Parallel LLM Debates ----
@@ -94,6 +101,31 @@ class RankingAgent:
 
             hA, hB, decision = result
 
+            # ------------------------------------------------------------
+            # Safety gate: never update Elo without valid Reflection scores
+            # ------------------------------------------------------------
+            if decision.outcome in {"A", "B", "TIE"}:
+                if not decision.scores_a or not decision.scores_b:
+                    _legacy.logger.warning(
+                        "Skipping Elo update for %s vs %s because ranking "
+                        "scores are missing.",
+                        hA.hypothesis_id,
+                        hB.hypothesis_id,
+                    )
+
+                    decision.outcome = "ABSTAIN"
+
+                    if not decision.reasoning:
+                        decision.reasoning = (
+                            "Elo update skipped because one or both hypotheses "
+                            "lack valid Reflection-based ranking scores."
+                        )
+
+                    continue
+
+            # ------------------------------------------------------------
+            # Elo update
+            # ------------------------------------------------------------
             if decision.outcome == "A":
                 _legacy.update_elo(
                     hA,
