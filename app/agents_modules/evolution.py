@@ -4,33 +4,106 @@ from __future__ import annotations
 
 from typing import List
 
+from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ._compat import _legacy
+from .evolution_helpers import (
+    EVOLUTION_STRATEGIES,
+    EvolutionStrategy,
+    call_llm_for_evolution,
+    create_evolved_hypothesis,
+    resolve_parent_evidence,
+)
 
 
 class EvolutionAgent:
+    """Iteratively create new tournament candidates from top-ranked parents."""
+
+    def __init__(
+        self,
+        strategies: tuple[EvolutionStrategy, ...] | None = None,
+        max_candidates_per_cycle: int | None = None,
+        quality_repair_attempts: int | None = None,
+    ):
+        evolution_config = config.get("evolution", {})
+        configured = tuple(evolution_config.get("strategies", EVOLUTION_STRATEGIES))
+        valid_strategies = tuple(strategy for strategy in configured if strategy in EVOLUTION_STRATEGIES)
+        self.strategies = strategies or valid_strategies or EVOLUTION_STRATEGIES
+        configured_limit = evolution_config.get("max_candidates_per_cycle", 3)
+        self.max_candidates_per_cycle = max(1, int(max_candidates_per_cycle or configured_limit))
+        configured_repairs = evolution_config.get("quality_repair_attempts", 1)
+        self.quality_repair_attempts = max(
+            0,
+            int(configured_repairs if quality_repair_attempts is None else quality_repair_attempts),
+        )
+        self.max_tokens = int(config.get("llm_max_tokens", {}).get("evolution", 2048))
+
+    def _strategies_for_cycle(self, context: ContextMemory, parent_count: int) -> list[EvolutionStrategy]:
+        """Rotate through the strategy library while respecting parent-count requirements."""
+        if not self.strategies:
+            return []
+        start = (context.iteration_number * self.max_candidates_per_cycle) % len(self.strategies)
+        ordered = self.strategies[start:] + self.strategies[:start]
+        selected = []
+        for strategy in ordered:
+            if parent_count < 2 and strategy in {"combination", "inspiration", "out_of_box"}:
+                continue
+            selected.append(strategy)
+            if len(selected) >= self.max_candidates_per_cycle:
+                break
+        return selected
+
     def evolve_hypotheses(self, context: ContextMemory, research_goal: ResearchGoal) -> List[Hypothesis]:
-        """Evolves hypotheses by combining top candidates, using research_goal settings."""
-        # Use top_k from research_goal
-        top_k = research_goal.top_k_hypotheses
+        """Create independently reviewable children without replacing their parents."""
+        context.last_evolution_attempts = []
         active = context.get_active_hypotheses()
-        if len(active) < 2:
-            _legacy.logger.info("Not enough active hypotheses to perform evolution.")
+        if not active:
+            _legacy.logger.info("No active hypotheses to evolve.")
             return []
 
         sorted_by_elo = sorted(active, key=lambda h: h.elo_score, reverse=True)
-        top_candidates = sorted_by_elo[:top_k]
-
+        parent_count = max(1, int(research_goal.top_k_hypotheses))
+        top_candidates = sorted_by_elo[:parent_count]
+        strategies = self._strategies_for_cycle(context, len(top_candidates))
         new_hypotheses = []
-        # Combine the top two for now, could be extended
-        if len(top_candidates) >= 2:
-            # Optional: Add check to prevent combining very similar hypotheses
-            # sim = similarity_score(top_candidates[0].text, top_candidates[1].text)
-            # if sim < 0.8: # Example threshold
-            new_h = _legacy.combine_hypotheses(top_candidates[0], top_candidates[1])
-            _legacy.logger.info("Evolved hypothesis created: %s from parents %s", new_h.hypothesis_id, new_h.parent_ids)
-            new_hypotheses.append(new_h)
-            # else:
-            #     _legacy.logger.info("Skipping evolution: Top 2 hypotheses are too similar (score: %.2f)", sim)
+        for strategy in strategies:
+            parents = top_candidates if strategy in {"combination", "inspiration", "out_of_box"} else top_candidates[:1]
+            evidence_sources = resolve_parent_evidence(
+                parents,
+                context.last_retrieved_sources,
+            )
+            candidate = call_llm_for_evolution(
+                strategy,
+                parents,
+                research_goal,
+                max_tokens=self.max_tokens,
+                evidence_sources=evidence_sources,
+                diagnostics=context.last_evolution_attempts,
+                quality_repair_attempts=self.quality_repair_attempts,
+            )
+            if candidate is None:
+                continue
+            evolved = create_evolved_hypothesis(
+                candidate,
+                parents,
+                strategy,
+                evidence_sources=evidence_sources,
+            )
+            _legacy.logger.info(
+                "Evolved hypothesis %s created with strategy %s from parents %s",
+                evolved.hypothesis_id,
+                strategy,
+                evolved.parent_ids,
+            )
+            new_hypotheses.append(evolved)
+
+        # A stitched fallback is not a new scientific hypothesis and can receive an
+        # artificial ranking advantage from its length. Keep the parents unchanged
+        # when every strategy fails instead of adding a misleading tournament entry.
+        if not new_hypotheses and len(top_candidates) >= 2:
+            _legacy.logger.warning(
+                "All Evolution strategies failed; no evolved hypothesis was created from parents %s.",
+                [parent.hypothesis_id for parent in top_candidates],
+            )
 
         return new_hypotheses

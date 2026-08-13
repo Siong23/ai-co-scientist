@@ -51,6 +51,7 @@ class Hypothesis:
         self.references: List[Dict] = []
         self.is_active: bool = True
         self.parent_ids: List[str] = []
+        self.evolution_strategy: Optional[str] = None
         self.reflection_report = None  # keep same shape as before
         self.evidence_source_ids: List[str] = []
         self.evidence_sources: List[Dict] = []
@@ -70,6 +71,7 @@ class Hypothesis:
             "references": self.references,
             "is_active": self.is_active,
             "parent_ids": self.parent_ids,  # Include parent IDs
+            "evolution_strategy": self.evolution_strategy,
             "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs
             "evidence_sources": self.evidence_sources,  # Include the actual source documents
             "audit_score": self.audit_score,
@@ -134,6 +136,8 @@ class ContextMemory:
         self.iteration_number: int = 0
         # Sources retrieved before generation in the latest cycle.
         self.last_retrieved_sources: List[Dict] = []
+        # Parse status and redacted excerpts for each Evolution strategy call.
+        self.last_evolution_attempts: List[Dict] = []
         # Quality-gate reports for every generated candidate, including rejects.
         self.last_hypothesis_audits: List[Dict] = []
 

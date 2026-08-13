@@ -1367,6 +1367,16 @@ Your refined contribution:
             hypothesis.evidence_source_ids = (
                 valid_source_ids
             )
+            source_by_id = {
+                str(source.get("source_id")): source
+                for source in context.last_retrieved_sources
+                if isinstance(source, dict) and source.get("source_id")
+            }
+            hypothesis.evidence_sources = [
+                dict(source_by_id[source_id])
+                for source_id in valid_source_ids
+                if source_id in source_by_id
+            ]
 
             audit_report = idea.get(
                 "_audit_report"
