@@ -26,6 +26,7 @@ from app.models import ContextMemory, Hypothesis, ResearchGoal
 from app.rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
+    ProvisionalHypothesis,
     SearchQuery,
     SearchQueryPlan,
     format_documents_for_grading,
@@ -192,6 +193,7 @@ def _query_plan_payload(
     goal: str = "brief describe the malaysia history",
     requirements: list[dict] | None = None,
     query_count: int = 5,
+    hypothesis_guided: bool = False,
 ) -> str:
     if requirements is None:
         requirements = [
@@ -200,18 +202,49 @@ def _query_plan_payload(
                 "goal_quote": goal.strip(),
             }
         ]
+    query_texts = [
+        "Malaysia colonial history",
+        "British Malaya decolonization",
+        "Malaysia independence history",
+        "Malaysia post-independence development",
+        "Malaya political economic history",
+        "Malaysia social history",
+        "Malaysia economic development history",
+        "Malaysia political institutions history",
+    ][:query_count]
+    queries: list[str | dict] = query_texts
+    if hypothesis_guided:
+        requirement_ids = [
+            str(requirement["id"])
+            for requirement in requirements
+            if requirement.get("id")
+        ]
+        intents = [
+            ("primary_hypothesis", "support"),
+            ("alternative_hypothesis", "counterevidence"),
+            ("primary_hypothesis", "prior_art"),
+            ("null_hypothesis", "counterevidence"),
+            (None, "goal"),
+        ]
+        queries = [
+            {
+                "query": query,
+                "purpose": f"Run {intent} retrieval",
+                "sub_question": "What evidence addresses the goal?",
+                "source_type": "academic",
+                "preferred_domains": [],
+                "freshness": None,
+                "evidence_requirement_id": requirement_ids[index % len(requirement_ids)],
+                "hypothesis_id": hypothesis_id,
+                "search_intent": intent,
+            }
+            for index, (query, (hypothesis_id, intent)) in enumerate(
+                zip(query_texts, intents)
+            )
+        ]
     return json.dumps(
         {
-            "queries": [
-                "Malaysia colonial history",
-                "British Malaya decolonization",
-                "Malaysia independence history",
-                "Malaysia post-independence development",
-                "Malaya political economic history",
-                "Malaysia social history",
-                "Malaysia economic development history",
-                "Malaysia political institutions history",
-            ][:query_count],
+            "queries": queries,
             "required_terms": ["Malaysia", "Malaya"],
             "explicit_requirements": requirements,
             "exploration_directions": ["Compare alternative historical interpretations."],
@@ -231,6 +264,26 @@ def _research_plan_payload(goal: str = "brief describe the malaysia history") ->
             "freshness_requirement": "No special freshness requirement",
             "ambiguities": [],
             "search_strategy": "Search primary and scholarly historical sources.",
+            "provisional_hypotheses": [
+                {
+                    "hypothesis_id": "primary_hypothesis",
+                    "role": "primary",
+                    "statement": "Malaysia's history reflects interacting colonial and post-independence institutions.",
+                    "goal_quote": goal,
+                },
+                {
+                    "hypothesis_id": "alternative_hypothesis",
+                    "role": "alternative",
+                    "statement": "Malaysia's historical development is better explained by regional economic change.",
+                    "goal_quote": goal,
+                },
+                {
+                    "hypothesis_id": "null_hypothesis",
+                    "role": "null",
+                    "statement": "No single institutional account adequately explains Malaysia's history.",
+                    "goal_quote": goal,
+                },
+            ],
         }
     )
 
@@ -285,7 +338,7 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
         "app.agents.call_llm",
         side_effect=[
             _research_plan_payload(),
-            _query_plan_payload(query_count=5),
+            _query_plan_payload(query_count=5, hypothesis_guided=True),
         ],
     ) as mock_call:
         plan, error = call_llm_for_search_queries(
@@ -300,6 +353,9 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["goal_scope"]
     assert [aspect.description for aspect in plan.explicit_requirements] == ["brief describe the malaysia history"]
     assert plan.exploration_directions == ("Compare alternative historical interpretations.",)
+    assert [
+        hypothesis.role for hypothesis in plan.provisional_hypotheses
+    ] == ["primary", "alternative", "null"]
     assert mock_call.call_count == 2
     assert all(call.kwargs["temperature"] == 0.0 for call in mock_call.call_args_list)
     assert all(call.kwargs["model"] == "chosen-model" for call in mock_call.call_args_list)
@@ -319,19 +375,116 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert "must never become evidence gates" in " ".join(rewriter_system_prompt.split())
 
 
+def test_query_fidelity_failure_rewrites_once_before_search():
+    validator = Mock(
+        side_effect=[
+            (False, "misaligned queries: unrelated query"),
+            (True, "all aligned"),
+        ]
+    )
+    query_payload = _query_plan_payload(
+        query_count=5,
+        hypothesis_guided=True,
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            _research_plan_payload(),
+            query_payload,
+            query_payload,
+        ],
+    ) as mock_call:
+        plan, error = call_llm_for_search_queries(
+            "brief describe the malaysia history",
+            query_fidelity_validator=validator,
+        )
+
+    assert error is None
+    assert plan is not None
+    assert validator.call_count == 2
+    assert mock_call.call_count == 3
+    repair_prompt = " ".join(mock_call.call_args_list[2].args[0].split())
+    assert "Query fidelity validation failed" in repair_prompt
+    assert "unrelated query" in repair_prompt
+
+
+def test_query_rewriter_accepts_dynamic_query_count_up_to_configured_maximum():
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            _research_plan_payload(),
+            _query_plan_payload(
+                query_count=3,
+                hypothesis_guided=True,
+            ),
+        ],
+    ) as mock_call:
+        plan, error = call_llm_for_search_queries(
+            "brief describe the malaysia history",
+            query_count=5,
+        )
+
+    assert error is None
+    assert plan is not None
+    assert len(plan.queries) == 3
+    rewriter_system_prompt = mock_call.call_args_list[1].kwargs[
+        "system_prompt"
+    ]
+    assert "between 3 and 5 distinct queries" in rewriter_system_prompt
+
+
+def test_corrective_query_round_prioritizes_missing_requirements_and_caps_count():
+    agent = GenerationAgent(agentic_research_enabled=False)
+    agent.rag_retriever.query_count = 2
+    coverage = EvidenceCoverage(
+        aspect_source_ids={"architecture": (), "metrics": ()},
+        missing_aspect_ids=("architecture", "metrics"),
+        gap_queries=("gap one", "gap two", "gap three"),
+        reason="Two requirements are missing.",
+    )
+    missing_aspects = [
+        EvidenceAspect("architecture", "telecom multi-agent architecture"),
+        EvidenceAspect("metrics", "autonomous monitoring metrics"),
+    ]
+
+    queries = agent._bounded_missing_evidence_queries(
+        coverage,
+        missing_aspects,
+    )
+
+    assert queries == (
+        "telecom multi-agent architecture",
+        "autonomous monitoring metrics",
+    )
+
+
 def test_query_rewriter_accepts_structured_query_objects():
-    rewritten = json.loads(_query_plan_payload(query_count=5))
+    rewritten = json.loads(
+        _query_plan_payload(query_count=5, hypothesis_guided=True)
+    )
+    hypothesis_metadata = [
+        ("primary_hypothesis", "support"),
+        ("alternative_hypothesis", "counterevidence"),
+        ("primary_hypothesis", "prior_art"),
+        ("null_hypothesis", "counterevidence"),
+        (None, "goal"),
+    ]
     rewritten["queries"] = [
         {
-            "query": query,
+            "query": query["query"],
             "purpose": "Find supporting evidence",
             "sub_question": "What evidence addresses the goal?",
             "source_type": "official",
             "preferred_domains": ["https://Example.org/docs"],
             "freshness": "year",
             "evidence_requirement_id": "goal_scope",
+            "hypothesis_id": hypothesis_id,
+            "search_intent": intent,
         }
-        for query in rewritten["queries"]
+        for query, (hypothesis_id, intent) in zip(
+            rewritten["queries"], hypothesis_metadata
+        )
     ]
 
     with patch(
@@ -353,6 +506,8 @@ def test_query_rewriter_accepts_structured_query_objects():
         preferred_domains=("example.org",),
         freshness="year",
         evidence_requirement_id="goal_scope",
+        hypothesis_id="primary_hypothesis",
+        search_intent="support",
     )
     assert len(plan.queries) == 5
 
@@ -379,7 +534,12 @@ def test_query_rewriter_uses_literature_oriented_evidence_needs():
         "app.agents.call_llm",
         side_effect=[
             _research_plan_payload(goal),
-            _query_plan_payload(goal, requirements=requirements, query_count=5),
+            _query_plan_payload(
+                goal,
+                requirements=requirements,
+                query_count=5,
+                hypothesis_guided=True,
+            ),
         ],
     ):
         plan, error = call_llm_for_search_queries(goal, query_count=5)
@@ -1317,7 +1477,11 @@ def test_retrieval_tries_original_goal_in_semantic_scholar_before_rewritten_quer
     retriever = ArxivRAGRetriever(query_count=2, top_k=1)
     retriever.semantic_scholar = Mock()
     retriever.semantic_scholar.search_papers.return_value = [direct_paper]
-    retriever.springer = None
+    retriever.springer = Mock(is_configured=True)
+    retriever.springer.search_papers.return_value = []
+    retriever.elsevier = Mock(is_configured=True)
+    retriever.elsevier.search_papers.return_value = []
+    retriever.tavily = Mock(is_configured=True)
     retriever.arxiv = Mock()
     retriever.arxiv.search_papers.return_value = []
     fake_store = Mock()
@@ -1329,8 +1493,132 @@ def test_retrieval_tries_original_goal_in_semantic_scholar_before_rewritten_quer
         documents = retriever.retrieve_original_goal("lightweight security monitoring 5G MEC")
 
     retriever.semantic_scholar.search_papers.assert_called_once_with(query="lightweight security monitoring 5G MEC")
+    retriever.springer.search_papers.assert_called_once_with(query="lightweight security monitoring 5G MEC")
+    retriever.elsevier.search_papers.assert_called_once_with(query="lightweight security monitoring 5G MEC")
     retriever.arxiv.search_papers.assert_called_once()
+    retriever.tavily.search.assert_not_called()
+    retriever.tavily.extract.assert_not_called()
     assert documents[0].metadata["source_id"] == "s2:direct-paper"
+
+
+def test_query_fidelity_rejects_semantically_drifted_query():
+    goal = "Improve robust graph intrusion detection in 5G networks"
+    retriever = ArxivRAGRetriever(query_count=2)
+    retriever.query_fidelity_min_similarity = 0.5
+    retriever.provisional_hypothesis_min_similarity = 0.5
+    retriever.embeddings = Mock()
+    retriever.embeddings.embed_documents.side_effect = lambda texts: [
+        [0.0, 1.0] if "medieval poetry" in text else [1.0, 0.0]
+        for text in texts
+    ]
+    plan = SearchQueryPlan(
+        queries=(
+            SearchQuery(
+                query="graph intrusion detection adversarial robustness 5G",
+                evidence_requirement_id="goal_scope",
+                hypothesis_id="primary_hypothesis",
+                search_intent="support",
+            ),
+            SearchQuery(
+                query="medieval poetry manuscript provenance",
+                evidence_requirement_id="goal_scope",
+                hypothesis_id="alternative_hypothesis",
+                search_intent="counterevidence",
+            ),
+        ),
+        required_terms=("5G",),
+        explicit_requirements=(
+            EvidenceAspect(
+                aspect_id="goal_scope",
+                description="robust graph intrusion detection in 5G",
+                goal_quote="graph intrusion detection in 5G networks",
+            ),
+        ),
+        provisional_hypotheses=(
+            ProvisionalHypothesis(
+                hypothesis_id="primary_hypothesis",
+                role="primary",
+                statement="Graph structure improves robust intrusion detection in 5G.",
+                goal_quote="graph intrusion detection in 5G networks",
+            ),
+            ProvisionalHypothesis(
+                hypothesis_id="alternative_hypothesis",
+                role="alternative",
+                statement="Training controls explain robust intrusion detection in 5G.",
+                goal_quote="robust graph intrusion detection",
+            ),
+            ProvisionalHypothesis(
+                hypothesis_id="null_hypothesis",
+                role="null",
+                statement="Graph structure does not improve robust 5G intrusion detection.",
+                goal_quote="robust graph intrusion detection",
+            ),
+        ),
+    )
+
+    valid, reason = retriever.validate_query_plan_fidelity(goal, plan)
+
+    assert valid is False
+    assert "medieval poetry manuscript provenance" in reason
+    query_reports = [
+        item
+        for item in retriever.last_query_fidelity
+        if item.get("kind") == "query"
+    ]
+    assert [item["accepted"] for item in query_reports] == [True, False]
+    retriever.embeddings.embed_documents.assert_called_once()
+
+
+def test_query_fidelity_fails_open_when_embeddings_are_unavailable():
+    retriever = ArxivRAGRetriever(query_count=1)
+    retriever.embeddings = Mock()
+    retriever.embeddings.embed_documents.side_effect = RuntimeError(
+        "embedding endpoint unavailable"
+    )
+    plan = SearchQueryPlan(
+        queries=(SearchQuery(query="focused research query"),),
+        required_terms=(),
+    )
+
+    valid, reason = retriever.validate_query_plan_fidelity(
+        "focused research goal",
+        plan,
+    )
+
+    assert valid is True
+    assert "unavailable" in reason
+    assert retriever.last_query_fidelity[0]["status"] == "unavailable"
+
+
+def test_forced_web_fallback_searches_tavily_for_academic_queries():
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1)
+    retriever.arxiv = Mock(last_error_status=None)
+    retriever.arxiv.search_papers.return_value = []
+    retriever.semantic_scholar = None
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.tavily = Mock(is_configured=True, last_error_status=None)
+    retriever.tavily.search.return_value = []
+
+    documents = retriever.retrieve(
+        "academic evidence gap",
+        SearchQueryPlan(
+            queries=(
+                SearchQuery(
+                    query="targeted academic evidence",
+                    source_type="academic",
+                ),
+            ),
+            required_terms=(),
+        ),
+        force_web=True,
+    )
+
+    assert documents == []
+    retriever.arxiv.search_papers.assert_called_once()
+    retriever.tavily.search.assert_called_once_with(
+        query="targeted academic evidence"
+    )
 
 
 def test_web_retrieval_uses_web_schema_without_paper_identifiers():
@@ -2441,11 +2729,15 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "arXiv:2222.2222",
     ]
     assert mock_retrieve.call_count == 2
+    assert all(
+        call.kwargs["force_web"] is True
+        for call in mock_retrieve.call_args_list
+    )
     assert mock_retrieve.call_args_list[1].kwargs["rerank_query"] == "scientific goal"
     gap_plan = mock_retrieve.call_args_list[1].args[1]
     assert gap_plan.query_texts == (
-        "targeted requested outcome evidence",
         "scientific goal",
+        "targeted requested outcome evidence",
     )
     assert gap_plan.required_terms == ()
     assert len(context.last_retrieved_sources) == 2
@@ -2642,8 +2934,8 @@ def test_semantic_scholar_fallback_can_fill_gap_after_arxiv_is_exhausted():
     assert hypotheses[0].evidence_source_ids == ["arXiv:1111.1111", "s2:outcome"]
     fallback_plan = mock_fallback.call_args.args[1]
     assert fallback_plan.query_texts == (
-        "targeted outcome evidence",
         "scientific goal",
+        "targeted outcome evidence",
     )
     assert fallback_plan.required_terms == ()
 

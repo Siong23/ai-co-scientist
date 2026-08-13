@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+from .research_trace import format_research_trace_html
 from .utils import redact_secrets
 
 DEFAULT_RESULTS_DIR = Path("results")
@@ -180,6 +181,7 @@ def render_report(run: Dict[str, Any]) -> str:
     goal = run.get("research_goal", {})
     cycle = run.get("cycle_details", {})
     steps = cycle.get("steps", {})
+    research_trace = cycle.get("research_trace", [])
     final_hypotheses = _final_hypotheses(steps)
 
     html_parts = [
@@ -215,7 +217,19 @@ def render_report(run: Dict[str, Any]) -> str:
     else:
         html_parts.append("<p>No final hypotheses were available for this run.</p>")
 
-    html_parts.append("</section><section><h2>Cycle Steps</h2>")
+    html_parts.append("</section>")
+    if research_trace:
+        html_parts.extend(
+            [
+                "<section><h2>Research Process</h2>",
+                format_research_trace_html(
+                    research_trace,
+                    elapsed_seconds=cycle.get("execution_time"),
+                ),
+                "</section>",
+            ]
+        )
+    html_parts.append("<section><h2>Cycle Steps</h2>")
     # for step_name, step_data in steps.items():
     #     hypotheses = step_data.get("hypotheses", []) if isinstance(step_data, dict) else []
     #     html_parts.append(f"<h3>{_escape(step_name)}</h3>")
