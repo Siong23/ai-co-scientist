@@ -286,8 +286,13 @@ def test_reflection_error_returns_not_reviewed():
 def test_reflection_passes_selected_model_to_llm_boundary():
     payload = json.dumps(
         {
-            "novelty_review": "HIGH",
-            "feasibility_review": "MEDIUM",
+            "alignment_score": 8,
+            "novelty_score": 9,
+            "feasibility_score": 6,
+            "plausibility_score": 8,
+            "testability_score": 7,
+            "evidence_quality_score": 5,
+            "expected_research_value_score": 8,
             "comment": "Looks plausible.",
             "references": [],
         }
@@ -298,23 +303,34 @@ def test_reflection_passes_selected_model_to_llm_boundary():
         context = ContextMemory()
         review = call_llm_for_reflection(hypothesis, research_goal, context, model="selected-local-model")
 
-    assert review["novelty_review"] == "HIGH"
+    assert review["novelty_review"] == "HIGH"  # 9 converts to HIGH
+    assert review["novelty_score"] == 9
     assert mock_call.call_args.kwargs["model"] == "selected-local-model"
 
 
 def test_reflection_retries_invalid_review_values():
     first_payload = json.dumps(
         {
-            "novelty_review": "NOVEL",
-            "feasibility_review": "POSSIBLE",
+            "alignment_score": "invalid",
+            "novelty_score": "not_a_number",
+            "feasibility_score": 6,
+            "plausibility_score": 7,
+            "testability_score": 7,
+            "evidence_quality_score": 5,
+            "expected_research_value_score": 7,
             "comment": "Invalid values.",
             "references": [],
         }
     )
     second_payload = json.dumps(
         {
-            "novelty_review": "LOW",
-            "feasibility_review": "HIGH",
+            "alignment_score": 5,
+            "novelty_score": 2,
+            "feasibility_score": 8,
+            "plausibility_score": 7,
+            "testability_score": 6,
+            "evidence_quality_score": 5,
+            "expected_research_value_score": 7,
             "comment": "Repaired review.",
             "references": [],
         }
@@ -328,6 +344,8 @@ def test_reflection_retries_invalid_review_values():
         context = ContextMemory()
         review = call_llm_for_reflection(hypothesis, research_goal, context)
 
-    assert review["novelty_review"] == "LOW"
-    assert review["feasibility_review"] == "HIGH"
+    assert review["novelty_review"] == "LOW"  # 2 converts to LOW
+    assert review["feasibility_review"] == "HIGH"  # 8 converts to HIGH
+    assert review["novelty_score"] == 2
+    assert review["feasibility_score"] == 8
     assert mock_call.call_count == 2

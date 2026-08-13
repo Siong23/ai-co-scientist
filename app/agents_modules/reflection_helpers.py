@@ -80,10 +80,8 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
     feasibility_review = _convert_score_to_review(scores["feasibility_score"])
 
     review_data = {
-        # Converted review values (for backward compatibility)
         "novelty_review": novelty_review,
         "feasibility_review": feasibility_review,
-        # All numeric scores
         "alignment_score": scores["alignment_score"],
         "novelty_score": scores["novelty_score"],
         "feasibility_score": scores["feasibility_score"],
