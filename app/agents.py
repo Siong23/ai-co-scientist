@@ -6,7 +6,14 @@ downstream callers.
 """
 
 from .agents_modules.evolution import EvolutionAgent
-from .agents_modules.evolution_helpers import combine_hypotheses
+from .agents_modules.evolution_helpers import (
+    EVOLUTION_STRATEGIES,
+    build_evolution_prompt,
+    call_llm_for_evolution,
+    combine_hypotheses,
+    create_evolved_hypothesis,
+    parse_evolution_response,
+)
 from .agents_modules.generation import GenerationAgent
 from .agents_modules.generation_helpers import (
     EvidenceCoverage,
@@ -67,6 +74,7 @@ __all__ = [
     "EvidenceSource",
     "EvidenceCoverage",
     "EvolutionAgent",
+    "EVOLUTION_STRATEGIES",
     "GenerationAgent",
     "Hypothesis",
     "LiteratureFinding",
@@ -83,6 +91,7 @@ __all__ = [
     "call_llm",
     "call_llm_for_debate_refinement",
     "call_llm_for_evidence_coverage",
+    "call_llm_for_evolution",
     "call_llm_for_generation",
     "call_llm_for_hypothesis_audit",
     "call_llm_for_literature_synthesis",
@@ -90,6 +99,8 @@ __all__ = [
     "call_llm_for_reflection",
     "call_llm_for_search_queries",
     "combine_hypotheses",
+    "build_evolution_prompt",
+    "create_evolved_hypothesis",
     "format_documents_for_prompt",
     "format_literature_synthesis",
     "format_references",
@@ -97,6 +108,7 @@ __all__ = [
     "generate_visjs_data",
     "logger",
     "parse_pairwise_result",
+    "parse_evolution_response",
     "redact_secrets",
     "run_pairwise_debate",
     "serialize_documents",

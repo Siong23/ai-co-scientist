@@ -79,11 +79,17 @@ class SupervisorAgent:
             _legacy.logger.info("Step 4a: Reviewing Evolved Hypotheses")
             self.reflection_agent.review_hypotheses(evolved_hypotheses, context, research_goal)  # Pass research_goal
             active_hypos = context.get_active_hypotheses()  # Update active list
-            cycle_details["steps"]["evolution"] = {"hypotheses": [h.to_dict() for h in evolved_hypotheses]}
+            cycle_details["steps"]["evolution"] = {
+                "hypotheses": [h.to_dict() for h in evolved_hypotheses],
+                "attempts": list(context.last_evolution_attempts),
+            }
             # Add explicit step for reviewing evolved hypotheses AFTER evolution
             cycle_details["steps"]["reflection_evolved"] = {"hypotheses": [h.to_dict() for h in evolved_hypotheses]}
         else:
-            cycle_details["steps"]["evolution"] = {"hypotheses": []}
+            cycle_details["steps"]["evolution"] = {
+                "hypotheses": [],
+                "attempts": list(context.last_evolution_attempts),
+            }
 
         # 5. Ranking (Tournament 2 - includes evolved)
         _legacy.logger.info("Step 5: Ranking 2")
