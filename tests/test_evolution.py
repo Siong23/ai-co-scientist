@@ -210,6 +210,7 @@ def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
 
 def test_supervisor_exposes_evolution_attempts_in_cycle_details():
     context, _, _ = _context()
+    progress_events = []
     supervisor = SupervisorAgent()
     supervisor.generation_agent = Mock()
     supervisor.generation_agent.generate_new_hypotheses.return_value = ([], [])
@@ -230,7 +231,7 @@ def test_supervisor_exposes_evolution_attempts_in_cycle_details():
     supervisor.meta_review_agent.summarize_and_feedback.return_value = {}
 
     with patch("app.agents.call_llm", return_value="not json"):
-        details = supervisor.run_cycle(_goal(), context)
+        details = supervisor.run_cycle(_goal(), context, progress_callback=progress_events.append)
 
     assert details["steps"]["evolution"] == {
         "hypotheses": [],
@@ -244,6 +245,19 @@ def test_supervisor_exposes_evolution_attempts_in_cycle_details():
             }
         ],
     }
+    assert [event["step"] for event in details["research_trace"]] == [
+        "generation",
+        "reflection",
+        "ranking1",
+        "evolution",
+        "ranking2",
+        "proximity",
+        "meta_review",
+    ]
+    assert all(event["status"] in {"completed", "warning"} for event in details["research_trace"])
+    assert any(event["status"] == "running" for event in progress_events)
+    assert progress_events[-1]["step"] == "meta_review"
+    assert progress_events[-1]["status"] == "completed"
 
 
 def test_evolution_resolves_parent_evidence_ids_from_context_sources():

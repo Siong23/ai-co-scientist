@@ -1317,7 +1317,11 @@ def test_retrieval_tries_original_goal_in_semantic_scholar_before_rewritten_quer
     retriever = ArxivRAGRetriever(query_count=2, top_k=1)
     retriever.semantic_scholar = Mock()
     retriever.semantic_scholar.search_papers.return_value = [direct_paper]
-    retriever.springer = None
+    retriever.springer = Mock(is_configured=True)
+    retriever.springer.search_papers.return_value = []
+    retriever.elsevier = Mock(is_configured=True)
+    retriever.elsevier.search_papers.return_value = []
+    retriever.tavily = Mock(is_configured=True)
     retriever.arxiv = Mock()
     retriever.arxiv.search_papers.return_value = []
     fake_store = Mock()
@@ -1329,8 +1333,43 @@ def test_retrieval_tries_original_goal_in_semantic_scholar_before_rewritten_quer
         documents = retriever.retrieve_original_goal("lightweight security monitoring 5G MEC")
 
     retriever.semantic_scholar.search_papers.assert_called_once_with(query="lightweight security monitoring 5G MEC")
+    retriever.springer.search_papers.assert_called_once_with(query="lightweight security monitoring 5G MEC")
+    retriever.elsevier.search_papers.assert_called_once_with(query="lightweight security monitoring 5G MEC")
     retriever.arxiv.search_papers.assert_called_once()
+    retriever.tavily.search.assert_not_called()
+    retriever.tavily.extract.assert_not_called()
     assert documents[0].metadata["source_id"] == "s2:direct-paper"
+
+
+def test_forced_web_fallback_searches_tavily_for_academic_queries():
+    retriever = ArxivRAGRetriever(query_count=1, top_k=1)
+    retriever.arxiv = Mock(last_error_status=None)
+    retriever.arxiv.search_papers.return_value = []
+    retriever.semantic_scholar = None
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.tavily = Mock(is_configured=True, last_error_status=None)
+    retriever.tavily.search.return_value = []
+
+    documents = retriever.retrieve(
+        "academic evidence gap",
+        SearchQueryPlan(
+            queries=(
+                SearchQuery(
+                    query="targeted academic evidence",
+                    source_type="academic",
+                ),
+            ),
+            required_terms=(),
+        ),
+        force_web=True,
+    )
+
+    assert documents == []
+    retriever.arxiv.search_papers.assert_called_once()
+    retriever.tavily.search.assert_called_once_with(
+        query="targeted academic evidence"
+    )
 
 
 def test_web_retrieval_uses_web_schema_without_paper_identifiers():
@@ -2441,6 +2480,10 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "arXiv:2222.2222",
     ]
     assert mock_retrieve.call_count == 2
+    assert all(
+        call.kwargs["force_web"] is True
+        for call in mock_retrieve.call_args_list
+    )
     assert mock_retrieve.call_args_list[1].kwargs["rerank_query"] == "scientific goal"
     gap_plan = mock_retrieve.call_args_list[1].args[1]
     assert gap_plan.query_texts == (

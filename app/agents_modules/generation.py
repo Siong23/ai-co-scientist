@@ -258,10 +258,13 @@ class GenerationAgent:
         research_goal: ResearchGoal,
         query_plan: SearchQueryPlan,
         rerank_query: str | None = None,
+        *,
+        force_web: bool = False,
     ):
         return self.rag_retriever.retrieve(
             rerank_query or research_goal.description,
             query_plan,
+            force_web=force_web,
         )
 
     def _retrieve_original_scientific_sources(self, research_goal: ResearchGoal):
@@ -753,6 +756,7 @@ Your refined contribution:
                 candidate_documents = self._retrieve_scientific_sources(
                     research_goal,
                     query_plan,
+                    force_web=True,
                 )
                 expanded_retrieval_attempted = True
             except Exception as exc:
@@ -853,6 +857,7 @@ Your refined contribution:
                         self._retrieve_scientific_sources(
                             research_goal,
                             query_plan,
+                            force_web=True,
                         )
                     )
                 except Exception as exc:
@@ -1003,6 +1008,7 @@ Your refined contribution:
                         # Corrective queries maximize recall. Reranking stays
                         # anchored to one information need, never their join.
                         rerank_query=corrective_rerank_target,
+                        force_web=True,
                     )
                 )
             except Exception as exc:

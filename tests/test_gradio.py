@@ -37,6 +37,12 @@ def test_gradio_interface_constructs_without_network(gradio_app_module):
     assert demo is not None
     # The fetch failed, so the module must have fallen back to a non-empty default model list.
     assert gradio_app_module.available_models
+    research_process = [
+        component
+        for component in demo.config["components"]
+        if component["type"] == "html" and component["props"].get("label") == "Research Process"
+    ]
+    assert len(research_process) == 1
 
 
 def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, monkeypatch, tmp_path):
@@ -349,14 +355,36 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
     gradio_app_module.current_research_goal = ResearchGoal(description="status test")
     gradio_app_module.global_context = ContextMemory()
 
-    def slow_cycle(research_goal, context, cycle_supervisor):
+    def slow_cycle(research_goal, context, cycle_supervisor, progress_callback=None):
+        running_event = {
+            "step": "generation",
+            "status": "running",
+            "title": "Discovering evidence",
+            "summary": "Searching selected literature sources.",
+            "details": [],
+        }
+        if progress_callback:
+            progress_callback(running_event)
         time.sleep(0.02)
         context.iteration_number += 1
+        completed_event = {
+            **running_event,
+            "status": "completed",
+            "summary": "Generated two candidates.",
+            "details": ["Evidence: <unsafe title>"],
+            "elapsed_seconds": 0.02,
+        }
+        if progress_callback:
+            progress_callback(completed_event)
         return {
             "status": "done",
             "results_html": "<p>done</p>",
             "references_html": "<p>refs</p>",
-            "cycle_details": {"iteration": context.iteration_number, "steps": {}},
+            "cycle_details": {
+                "iteration": context.iteration_number,
+                "steps": {},
+                "research_trace": [completed_event],
+            },
             "log_file": "",
         }
 
@@ -366,13 +394,14 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
 
     updates = list(gradio_app_module.run_cycle_with_progress(timeout_seconds=1, poll_seconds=0.001))
 
-    assert any(
-        "Active work: generating, reviewing, ranking, and evolving hypotheses." in update[0] for update in updates
-    )
+    assert any("Active work: Discovering evidence." in update[0] for update in updates)
     assert all("Streamed hypothesis" not in update[1] for update in updates[:-1])
     assert any("Elapsed:" in update[0] for update in updates)
+    assert any("Searching selected literature sources." in update[3] for update in updates[:-1])
     assert updates[-1][0].startswith("done")
-    assert updates[-1][1:] == ("<p>done</p>", "<p>refs</p>")
+    assert updates[-1][1:3] == ("<p>done</p>", "<p>refs</p>")
+    assert "Generated two candidates." in updates[-1][3]
+    assert "&lt;unsafe title&gt;" in updates[-1][3]
     assert gradio_app_module.global_context.iteration_number == 1
 
 
@@ -384,7 +413,17 @@ def test_run_cycle_with_progress_times_out(gradio_app_module, monkeypatch, tmp_p
     gradio_app_module.current_research_goal = ResearchGoal(description="timeout test")
     gradio_app_module.global_context = ContextMemory()
 
-    def stuck_cycle(research_goal, context, cycle_supervisor):
+    def stuck_cycle(research_goal, context, cycle_supervisor, progress_callback=None):
+        if progress_callback:
+            progress_callback(
+                {
+                    "step": "generation",
+                    "status": "running",
+                    "title": "Discovering evidence",
+                    "summary": "Waiting for the model provider.",
+                    "details": [],
+                }
+            )
         time.sleep(0.05)
         context.iteration_number = 99
         return {
@@ -401,6 +440,7 @@ def test_run_cycle_with_progress_times_out(gradio_app_module, monkeypatch, tmp_p
 
     assert "timed out" in updates[-1][0]
     assert "time limit" in updates[-1][1]
+    assert "Cycle time limit reached" in updates[-1][3]
     run_files = list((tmp_path / "runs").glob("*.json"))
     assert len(run_files) == 1
     assert gradio_app_module.global_context.iteration_number == 0

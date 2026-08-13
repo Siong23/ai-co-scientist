@@ -420,8 +420,9 @@ class ResearchRetriever:
         *,
         include_arxiv: bool,
         include_web: bool = True,
+        force_web: bool = False,
     ) -> list[list[EvidenceSource]]:
-        """Search configured providers concurrently while preserving result order."""
+        """Search routed providers, optionally adding web search for every query."""
 
         normalized_queries = tuple(
             query if isinstance(query, SearchQuery) else SearchQuery(query=str(query), source_type="all")
@@ -434,8 +435,14 @@ class ResearchRetriever:
         academic_queries = tuple(
             query for query in normalized_queries if query.source_type in ("academic", "all")
         )
-        web_queries = tuple(
-            query for query in normalized_queries if query.source_type in ("web", "official", "news", "all")
+        web_queries = (
+            normalized_queries
+            if force_web
+            else tuple(
+                query
+                for query in normalized_queries
+                if query.source_type in ("web", "official", "news", "all")
+            )
         )
 
         tasks = []
@@ -523,13 +530,17 @@ class ResearchRetriever:
         return ranked_results
 
     def retrieve_original_goal(self, original_query: str) -> list[Document]:
-        """Search the unmodified research goal across all configured sources concurrently."""
+        """Search the unmodified research goal across academic sources concurrently."""
 
         original_query = original_query.strip()
         if not original_query:
             return []
 
-        ranked_results = self._search_sources((original_query,), include_arxiv=True)
+        ranked_results = self._search_sources(
+            (original_query,),
+            include_arxiv=True,
+            include_web=False,
+        )
 
         return self._rank_documents(
             original_query,
@@ -1092,14 +1103,20 @@ class ResearchRetriever:
         self,
         original_query: str,
         query_plan: SearchQueryPlan,
+        *,
+        force_web: bool = False,
     ) -> list[Document]:
-        """Retrieve expanded-query evidence from every configured source."""
+        """Retrieve expanded-query evidence, with optional forced web fallback."""
 
         original_query = original_query.strip()
         if not original_query:
             return []
 
-        ranked_results = self._search_sources(query_plan.queries, include_arxiv=True)
+        ranked_results = self._search_sources(
+            query_plan.queries,
+            include_arxiv=True,
+            force_web=force_web,
+        )
         return self._rank_documents(original_query, query_plan, ranked_results)
 
     @staticmethod

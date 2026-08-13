@@ -170,6 +170,9 @@ elsevier:
 tavily:
   enabled: true
   results_per_query: 10
+  # The original research goal is searched against academic providers first.
+  # Tavily joins expanded/corrective retrieval when that academic evidence is
+  # absent or fails the evidence-coverage check.
   # Search first returns URLs plus bounded relevance snippets for local reranking.
   # Only the top URLs are then sent to Extract and admitted as web evidence.
   search_depth: "advanced"

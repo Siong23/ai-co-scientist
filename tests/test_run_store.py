@@ -9,6 +9,16 @@ FAKE_KEY = "LMSTUDIO-THIS-FAKE-KEY-MUST-NOT-PERSIST"
 def _cycle_details():
     return {
         "iteration": 1,
+        "research_trace": [
+            {
+                "step": "generation",
+                "status": "completed",
+                "title": "Generating hypotheses",
+                "summary": "Generated one evidence-grounded candidate.",
+                "details": ["Evidence: source-1"],
+                "elapsed_seconds": 1.5,
+            }
+        ],
         "steps": {
             "ranking2": {
                 "hypotheses": [
@@ -36,9 +46,11 @@ def test_save_run_persists_json_and_redacts_secrets(tmp_path, monkeypatch):
     monkeypatch.setenv("LMSTUDIO_API_KEY", FAKE_KEY)
     goal = ResearchGoal(description=f"Study catalyst with api_key={FAKE_KEY}")
 
+    details = _cycle_details()
+    details["research_trace"][0]["summary"] = f"Completed with api_key={FAKE_KEY}"
     run = save_run(
         research_goal=goal,
-        cycle_details=_cycle_details(),
+        cycle_details=details,
         status=f"done Authorization: Bearer {FAKE_KEY}",
         references_html="<p>refs</p>",
         results_html="<p>results</p>",
@@ -58,6 +70,7 @@ def test_report_escapes_user_and_model_content(tmp_path, monkeypatch):
     goal = ResearchGoal(description="<script>alert('goal')</script>")
     details = _cycle_details()
     details["steps"]["ranking2"]["hypotheses"][0]["title"] = "<img src=x onerror=alert(1)>"
+    details["research_trace"][0]["summary"] = "<script>alert('trace')</script>"
 
     run = save_run(
         research_goal=goal,
@@ -71,7 +84,9 @@ def test_report_escapes_user_and_model_content(tmp_path, monkeypatch):
     report = render_report(run)
     assert "<script>alert('goal')</script>" not in report
     assert "<img src=x onerror=alert(1)>" not in report
+    assert "<script>alert('trace')</script>" not in report
     assert "&lt;script&gt;alert" in report
+    assert "Research Process" in report
 
 
 def test_history_lists_runs_and_creates_report(tmp_path, monkeypatch):
