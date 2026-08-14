@@ -228,14 +228,13 @@ class ReflectionReport(BaseModel):
     testability_score: float = 0.0
     evidence_quality_score: float = 0.0
     expected_research_value_score: float = 0.0
-    review_comments: List[str] = []
+    strengths: List[str] = []
+    weaknesses: List[str] = []
+    recommendation: str = ""
+
 
     #unused variables(keeping for potential future use)
     claims: List[ClaimAssessment] = []
-    strengths: List[str] = []
-    weaknesses: List[str] = []
-    contradictions: List[str] = []
-    recommendation: str = ""
     confidence: float = 0.0
 
 
