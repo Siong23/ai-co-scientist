@@ -86,6 +86,8 @@ use_lmstudio_embeddings: true
 sentence_transformer_model: "qwen/text-embedding-qwen3-embedding-8b"
 
 rag:
+  # Maximum rewritten/corrective queries per retrieval round. The planner uses
+  # a dynamic 3-5 queries for hypothesis-guided retrieval and avoids padding.
   query_count: 5
   results_per_query: 20
   top_k: 10
@@ -110,6 +112,12 @@ rag:
   # full generation context. These limits leave output headroom in LM Studio.
   max_grading_abstract_chars: 1600
   max_grading_context_chars: 24000
+  # Reject query rewrites and provisional retrieval hypotheses that drift from
+  # the original goal or their verbatim requirement anchors. Validation uses
+  # one local embedding batch and retries query rewriting once on failure.
+  query_fidelity_enabled: true
+  query_fidelity_min_similarity: 0.35
+  provisional_hypothesis_min_similarity: 0.30
 
 # Relevant open-access papers are downloaded only after evidence coverage is
 # confirmed. Their bounded full-text chunks are persisted locally in Chroma and
@@ -170,6 +178,9 @@ elsevier:
 tavily:
   enabled: true
   results_per_query: 10
+  # The original research goal is searched against academic providers first.
+  # Tavily joins expanded/corrective retrieval when that academic evidence is
+  # absent or fails the evidence-coverage check.
   # Search first returns URLs plus bounded relevance snippets for local reranking.
   # Only the top URLs are then sent to Extract and admitted as web evidence.
   search_depth: "advanced"

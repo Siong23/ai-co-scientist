@@ -3,7 +3,8 @@ import os
 import threading
 import time
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple
+from queue import Empty, Queue
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import gradio as gr
@@ -12,6 +13,7 @@ from numpy.ma import count  # noqa: F401
 from app.agents import SupervisorAgent
 from app.config import config
 from app.models import ContextMemory, ResearchGoal
+from app.research_trace import format_research_trace_html, merge_trace_event, normalize_trace_event
 from app.run_store import (
     _escape,
     delete_run,
@@ -28,6 +30,7 @@ from app.utils import (
     get_lmstudio_base_url,
     get_lmstudio_model,
     logger,
+    redact_secrets,
 )
 
 # Global state for the Gradio app
@@ -176,9 +179,21 @@ def execute_cycle(
     research_goal: ResearchGoal,
     context: ContextMemory,
     cycle_supervisor: SupervisorAgent,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Run a cycle against the supplied state and return display-ready results."""
     import datetime
+
+    research_trace: List[Dict[str, Any]] = []
+
+    def capture_progress(event: Dict[str, Any]) -> None:
+        normalized = normalize_trace_event(event)
+        merge_trace_event(research_trace, normalized)
+        if progress_callback is not None:
+            try:
+                progress_callback(dict(normalized))
+            except Exception as exc:
+                logger.warning("Research progress callback failed: %s", redact_secrets(str(exc)))
 
     # Prepare log file
     log_dir = "results"
@@ -198,7 +213,12 @@ def execute_cycle(
         logger.info(f"Running cycle {iteration}")
 
         # Run the cycle
-        cycle_details = cycle_supervisor.run_cycle(research_goal, context)
+        cycle_details = cycle_supervisor.run_cycle(
+            research_goal,
+            context,
+            progress_callback=capture_progress,
+        )
+        cycle_details.setdefault("research_trace", research_trace)
 
         # Log execution time
         total_time = time.perf_counter() - start_time
@@ -256,11 +276,25 @@ def execute_cycle(
     except Exception as e:
         error_msg = f"❌ Error during cycle execution: {str(e)}"
         logger.error(error_msg, exc_info=True)
+        capture_progress(
+            {
+                "step": "cycle_error",
+                "status": "error",
+                "title": "Research cycle stopped",
+                "summary": error_msg,
+                "details": [],
+            }
+        )
         return {
             "status": error_msg,
             "results_html": "",
             "references_html": "",
-            "cycle_details": {"iteration": context.iteration_number + 1, "steps": {}, "errors": [error_msg]},
+            "cycle_details": {
+                "iteration": context.iteration_number + 1,
+                "steps": {},
+                "errors": [error_msg],
+                "research_trace": research_trace,
+            },
             "log_file": log_file,
         }
 
@@ -357,20 +391,40 @@ def run_cycle_with_progress(
     timeout_seconds: int = CYCLE_TIMEOUT_SECONDS,
     poll_seconds: float = CYCLE_PROGRESS_INTERVAL_SECONDS,
 ):
-    """Run a cycle in the background and show results once it finishes."""
+    """Run a cycle in the background and stream its research-process trace."""
     global global_context
 
     if not current_research_goal:
-        yield "❌ Error: No research goal set. Please set a research goal first.", "", ""
+        yield (
+            "❌ Error: No research goal set. Please set a research goal first.",
+            "",
+            "",
+            format_research_trace_html([]),
+        )
         return
 
     run_goal = current_research_goal
     run_context = deepcopy(global_context)
     run_supervisor = SupervisorAgent()
     result: Dict[str, Dict[str, Any]] = {}
+    progress_events: Queue[Dict[str, Any]] = Queue()
+    live_trace: List[Dict[str, Any]] = []
+
+    def drain_progress_events() -> None:
+        while True:
+            try:
+                event = progress_events.get_nowait()
+            except Empty:
+                return
+            merge_trace_event(live_trace, event)
 
     def worker():
-        result["value"] = execute_cycle(run_goal, run_context, run_supervisor)
+        result["value"] = execute_cycle(
+            run_goal,
+            run_context,
+            run_supervisor,
+            progress_callback=progress_events.put,
+        )
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
@@ -378,6 +432,7 @@ def run_cycle_with_progress(
     iteration = global_context.iteration_number + 1
 
     while thread.is_alive():
+        drain_progress_events()
         elapsed = time.monotonic() - started
         if elapsed >= timeout_seconds:
             timeout_duration = format_timeout_duration(timeout_seconds)
@@ -386,12 +441,24 @@ def run_cycle_with_progress(
                 "The app stopped waiting for the model provider instead of leaving the run spinning."
             )
             timeout_html = timeout_results_html(timeout_seconds)
+            merge_trace_event(
+                live_trace,
+                {
+                    "step": "timeout",
+                    "status": "error",
+                    "title": "Cycle time limit reached",
+                    "summary": timeout_status,
+                    "details": [],
+                    "elapsed_seconds": elapsed,
+                },
+            )
             saved_run = save_run(
                 research_goal=run_goal,
                 cycle_details={
                     "iteration": iteration,
                     "steps": {},
                     "errors": [timeout_status],
+                    "research_trace": live_trace,
                 },
                 status=timeout_status,
                 references_html="",
@@ -403,25 +470,62 @@ def run_cycle_with_progress(
                 f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
                 timeout_html,
                 "",
+                format_research_trace_html(live_trace, elapsed_seconds=elapsed),
             )
             return
 
+        active_event = next(
+            (event for event in reversed(live_trace) if event.get("status") == "running"),
+            live_trace[-1] if live_trace else None,
+        )
+        active_title = (
+            active_event.get("title") if active_event else "Generating, reviewing, ranking, and evolving hypotheses"
+        )
+        latest_summary = active_event.get("summary") if active_event else "The agent workflow is starting."
         status = (
             f"⏳ Cycle {iteration} is running.\n"
             f"Elapsed: {format_timeout_duration(elapsed)}.\n"
-            f"Active work: generating, reviewing, ranking, and evolving hypotheses.\n"
+            f"Active work: {active_title}.\n"
+            f"Latest update: {latest_summary}\n"
             f"Upper limit: {format_timeout_duration(timeout_seconds)}."
         )
-        yield status, "<p>Cycle is still running. Results will appear when the cycle completes.</p>", ""
+        yield (
+            status,
+            "<p>Cycle is still running. Results will appear when the cycle completes.</p>",
+            "",
+            format_research_trace_html(live_trace, running=True, elapsed_seconds=elapsed),
+        )
         thread.join(timeout=min(poll_seconds, max(timeout_seconds - elapsed, 0.1)))
 
+    drain_progress_events()
     cycle_result = result.get("value")
     if not cycle_result:
-        yield "❌ Error: Cycle ended without a result.", "", ""
+        merge_trace_event(
+            live_trace,
+            {
+                "step": "cycle_error",
+                "status": "error",
+                "title": "Cycle ended without a result",
+                "summary": "The background worker stopped without returning cycle data.",
+                "details": [],
+            },
+        )
+        yield (
+            "❌ Error: Cycle ended without a result.",
+            "",
+            "",
+            format_research_trace_html(live_trace, elapsed_seconds=time.monotonic() - started),
+        )
         return
+    final_trace = list(live_trace)
+    for event in cycle_result.get("cycle_details", {}).get("research_trace", []):
+        merge_trace_event(final_trace, event)
+    cycle_result.setdefault("cycle_details", {})["research_trace"] = final_trace
     if current_research_goal is run_goal:
         global_context = run_context
-    yield persist_cycle_result(run_goal, cycle_result)
+    status, results, references = persist_cycle_result(run_goal, cycle_result)
+    total_elapsed = cycle_result.get("cycle_details", {}).get("execution_time", time.monotonic() - started)
+    yield status, results, references, format_research_trace_html(final_trace, elapsed_seconds=total_elapsed)
 
 
 def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
@@ -476,13 +580,79 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         if step_name == "generation":
             hypotheses = step_data.get("hypotheses", [])
             search_stats = step_data.get("search_stats", [])
-            if isinstance(search_stats, list) and search_stats:
+            query_plan = step_data.get("query_plan", {})
+            if not isinstance(query_plan, dict):
+                query_plan = {}
+            provisional_hypotheses = query_plan.get(
+                "provisional_hypotheses",
+                [],
+            )
+            planned_queries = query_plan.get("queries", [])
+            query_fidelity = step_data.get("query_fidelity", [])
+            has_search_details = any(
+                isinstance(items, list) and items
+                for items in (
+                    search_stats,
+                    provisional_hypotheses,
+                    planned_queries,
+                    query_fidelity,
+                )
+            )
+            if has_search_details:
                 html += """
                 <details style="margin: 5px 0 10px;">
                     <summary style="cursor: pointer; font-size: 0.9em;">Search details</summary>
-                    <p><strong>Search providers called:</strong></p><ul>
                 """
-                for stat in search_stats:
+                if isinstance(provisional_hypotheses, list) and provisional_hypotheses:
+                    html += (
+                        "<p><strong>Provisional retrieval hypotheses "
+                        "(not evidence):</strong></p><ul>"
+                    )
+                    for provisional in provisional_hypotheses:
+                        if not isinstance(provisional, dict):
+                            continue
+                        role = html_lib.escape(str(provisional.get("role", "unknown")))
+                        statement = html_lib.escape(
+                            str(provisional.get("statement", ""))
+                        )
+                        html += f"<li>{role}: {statement}</li>"
+                    html += "</ul>"
+                if isinstance(planned_queries, list) and planned_queries:
+                    html += "<p><strong>Planned queries:</strong></p><ul>"
+                    for query in planned_queries:
+                        if not isinstance(query, dict):
+                            continue
+                        query_text = html_lib.escape(str(query.get("query", "")))
+                        intent = html_lib.escape(
+                            str(query.get("search_intent", "goal"))
+                        )
+                        source_type = html_lib.escape(
+                            str(query.get("source_type", "all"))
+                        )
+                        html += (
+                            f"<li>{intent} · {source_type}: {query_text}</li>"
+                        )
+                    html += "</ul>"
+                if isinstance(query_fidelity, list) and query_fidelity:
+                    checked_queries = [
+                        item
+                        for item in query_fidelity
+                        if isinstance(item, dict) and item.get("kind") == "query"
+                    ]
+                    if checked_queries:
+                        accepted = sum(
+                            item.get("accepted") is True
+                            for item in checked_queries
+                        )
+                        html += (
+                            "<p><strong>Query fidelity:</strong> "
+                            f"{accepted}/{len(checked_queries)} accepted</p>"
+                        )
+                if isinstance(search_stats, list) and search_stats:
+                    html += "<p><strong>Search providers called:</strong></p><ul>"
+                for stat in (
+                    search_stats if isinstance(search_stats, list) else []
+                ):
                     if not isinstance(stat, dict):
                         continue
                     provider = html_lib.escape(str(stat.get("source", "Unknown")))
@@ -493,7 +663,9 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         f"queries, {int(stat.get('results', 0))} results, "
                         f"{int(stat.get('elapsed_ms', 0))} ms ({status})</li>"
                     )
-                html += "</ul></details>"
+                if isinstance(search_stats, list) and search_stats:
+                    html += "</ul>"
+                html += "</details>"
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
             for i, hypo in enumerate(hypotheses):
                 audit = hypo.get("audit_report", {})
@@ -1056,6 +1228,13 @@ def create_gradio_interface():
             with gr.Tab("Current Run"):
                 with gr.Row():
                     with gr.Column():
+                        research_trace_output = gr.HTML(
+                            label="Research Process",
+                            value=format_research_trace_html([]),
+                        )
+
+                with gr.Row():
+                    with gr.Column():
                         results_output = gr.HTML(
                             label="Results", value="<p>Results will appear here after running cycles.</p>"
                         )
@@ -1095,14 +1274,16 @@ def create_gradio_interface():
             )
             yield (
                 f"{status_msg}\n\nStarting cycle with a {format_timeout_duration(CYCLE_TIMEOUT_SECONDS)} limit.",
+                format_research_trace_html([], running=True),
                 "<p>Starting cycle...</p>",
                 "",
                 history_html(),
                 gr.update(choices=history_run_choices(), value=None),
             )
-            for status, results, references in run_cycle_with_progress():
+            for status, results, references, research_trace in run_cycle_with_progress():
                 yield (
                     f"{status_msg}\n\n{status}",
+                    research_trace,
                     results,
                     references,
                     history_html(),
@@ -1120,7 +1301,14 @@ def create_gradio_interface():
                 elo_k_factor,
                 top_k_hypotheses,
             ],
-            outputs=[status_output, results_output, references_output, history_output, delete_run_dropdown],
+            outputs=[
+                status_output,
+                research_trace_output,
+                results_output,
+                references_output,
+                history_output,
+                delete_run_dropdown,
+            ],
         )
 
         demo.load(
