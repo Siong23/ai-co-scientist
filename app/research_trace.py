@@ -214,7 +214,7 @@ def format_research_trace_html(
     return f"""
     <style>
       .activity-toggle{{position:absolute;opacity:0;pointer-events:none}}
-      .research-trace{{margin:8px 0 18px;color:var(--body-text-color,#111)}}
+      .research-trace{{margin:8px 0 18px;color:var(--body-text-color,#111);border-radius:8px;margin:20px 0;padding:15px;}}
       .research-trace>summary{{cursor:pointer;display:inline-flex;gap:8px;align-items:center;padding:8px 0;list-style:none;color:#8a8a8a;font-size:1.05em}}
       .research-trace>summary::-webkit-details-marker{{display:none}}
       .research-trace>summary::after{{content:"›";font-size:1.35em;line-height:1;transition:transform .16s ease}}
