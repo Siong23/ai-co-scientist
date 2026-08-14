@@ -1170,7 +1170,7 @@ def create_gradio_interface():
         .blue { background-color: #d1ecf1; border: 1px solid #bee5eb; }
 
         #research-history-sidebar {
-            background: #ffffff !important;
+            background: var(--block-background-fill) !important;
             border-right: 1px solid var(--border-color-primary);
         }
         #research-history-sidebar .sidebar-history-copy {
@@ -1178,20 +1178,20 @@ def create_gradio_interface():
             font-size: 0.9rem;
         }
         #sidebar-run-list {
-            background: #ffffff !important;
+            background: var(--block-background-fill) !important;
             border: 0;
             box-shadow: none;
             padding: 0;
         }
         #sidebar-run-list > .wrap:not([data-testid]) {
             align-items: stretch;
-            background: #ffffff !important;
+            background: var(--block-background-fill) !important;
             display: flex;
             flex-direction: column;
             gap: 6px;
         }
         #sidebar-run-list label {
-            background: #ffffff !important;
+            background: var(--block-background-fill) !important;
             border: 0;
             border-radius: 10px;
             box-shadow: none !important;
@@ -1230,6 +1230,16 @@ def create_gradio_interface():
         .dark #sidebar-run-list label:not(:hover):not(:has(input:checked)) {
             background: var(--block-background-fill) !important;
         }
+        .dark #sidebar-run-list label:hover,
+        .dark #sidebar-run-list label:hover span {
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: var(--body-text-color) !important;
+        }
+        .dark #sidebar-run-list label:has(input:checked),
+        .dark #sidebar-run-list label:has(input:checked) span {
+            background: rgba(255, 255, 255, 0.12) !important;
+            color: var(--body-text-color) !important;
+        }
 
         /* Universal Fix for Dark Mode: Targets absolutely everything inside the custom HTML block */
         .dark div[id^="html-"],
@@ -1250,6 +1260,16 @@ def create_gradio_interface():
         .dark div[id^="html-"] div[style*="#28a745"] {
             background-color: #064e3b !important; /* Soft deep emerald instead of blinding light green */
             border-color: #28a745 !important;
+        }
+
+        /* Keep Activity source links legible instead of rendering white-on-white. */
+        .dark div[id^="html-"] .activity-drawer .source-chip {
+            background: rgba(255, 255, 255, 0.10) !important;
+            color: var(--body-text-color) !important;
+        }
+        .dark div[id^="html-"] .activity-drawer .source-chip:hover {
+            background: rgba(255, 255, 255, 0.18) !important;
+            color: var(--body-text-color) !important;
         }
         """
 
