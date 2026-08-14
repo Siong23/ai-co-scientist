@@ -81,7 +81,7 @@ def _reflection_report(
         expected_research_value_score=research_value,
         strengths=["Reasonably strong hypothesis."],
         weaknesses=[],
-        contradictions=[],
+        # contradictions=[],
         recommendation="Suitable for further investigation.",
         confidence=0.8,
     )
