@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 from ._compat import _legacy
 
-# Bounds the REVISE-fix loop so a stubborn low-scoring hypothesis cannot stall the pipeline.
-_MAX_REVISION_ATTEMPTS = 3
 
+def _build_reflection_report(result: Dict) -> Optional[ReflectionReport]:
+    # A transport or parse failure is not a scientific review.  Keeping the
+    # report absent ensures downstream ranking can abstain instead of treating
+    # synthetic zero scores as evidence about the hypothesis's quality.
+    if result.get("recommendation") == "UNREVIEWED":
+        return None
 
-def _build_reflection_report(result: Dict) -> ReflectionReport:
     return ReflectionReport(
         alignment_score=result.get("alignment_score", 0),
         novelty_score=result.get("novelty_score", 0),
@@ -45,49 +48,18 @@ class ReflectionAgent:
             h.feasibility_review = result["feasibility_review"]
             if result["comment"] != "Could not parse LLM response.":
                 h.review_comments.append(result["comment"])
-            if result["references"]:
-                h.references.extend(result["references"])
+            # This field describes the current review, so replace stale IDs
+            # instead of accumulating duplicates across repeated cycles.
+            # Hypothesis.references remains reserved for source dictionaries.
+            h.review_reference_ids = list(result["references"])
 
             reflection_report = _build_reflection_report(result)
             h.reflection_report = reflection_report
 
-            # A criterion scored below 4/10: attempt bounded LLM-driven revision,
-            # re-reviewing after each attempt until it clears the bar or attempts run out.
-            attempts = 0
-            while reflection_report.recommendation == "REVISE" and attempts < _MAX_REVISION_ATTEMPTS:
-                revised = _legacy.call_llm_for_hypothesis_revision(
-                    hypothesis=h,
-                    research_goal=research_goal,
-                    temperature=reflect_temp,
-                    model=research_goal.llm_model,
-                )
-                if revised is None:
-                    break
-
-                h.title = str(revised["title"]).strip()
-                h.text = (
-                    f"Hypothesis: {str(revised['hypothesis']).strip()}\n\n"
-                    f"Rationale: {str(revised['rationale']).strip()}\n\n"
-                    f"Feasibility: {str(revised['feasibility']).strip()}"
-                )
-
-                result = _legacy.call_llm_for_reflection(
-                    hypothesis=h,
-                    research_goal=research_goal,
-                    context=context,
-                    temperature=reflect_temp,
-                    model=research_goal.llm_model,
-                )
-                h.novelty_review = result["novelty_review"]
-                h.feasibility_review = result["feasibility_review"]
-                if result["comment"] != "Could not parse LLM response.":
-                    h.review_comments.append(result["comment"])
-                if result["references"]:
-                    h.references.extend(result["references"])
-
-                reflection_report = _build_reflection_report(result)
-                h.reflection_report = reflection_report
-                attempts += 1
+            # Reflection owns review artifacts only.  It must not rewrite a
+            # hypothesis under the same ID because that would invalidate its
+            # evidence, review history, and tournament provenance.  A REVISE
+            # recommendation is consumed by Evolution, which creates a child.
 
             _legacy.logger.info(
                 "Reviewed hypothesis: %s, Novelty: %s, Feasibility: %s",

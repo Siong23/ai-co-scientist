@@ -82,7 +82,7 @@ def _reflection_report(
         strengths=["Reasonably strong hypothesis."],
         weaknesses=[],
         # contradictions=[],
-        recommendation="Suitable for further investigation.",
+        recommendation="ACCEPT",
         confidence=0.8,
     )
 

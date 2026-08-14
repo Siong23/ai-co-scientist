@@ -49,11 +49,16 @@ class Hypothesis:
         self.elo_score: float = kwargs.get("elo_score", 1200.0)
         self.review_comments: List[str] = []
         self.references: List[Dict] = []
+        # Source IDs cited by Reflection are kept separate from the structured
+        # source dictionaries in references/evidence_sources.
+        self.review_reference_ids: List[str] = []
         self.is_active: bool = True
         self.parent_ids: List[str] = []
         self.evolution_strategy: Optional[str] = None
-        # Honor an explicitly supplied report; otherwise keep the historical empty-list shape.
-        self.reflection_report: List[ReflectionReport] = kwargs.get("reflection_report", [])
+        # A hypothesis has one current aggregate review.  None explicitly means
+        # that Reflection has not completed successfully, allowing Ranking to
+        # distinguish failure from a genuine low-scoring report.
+        self.reflection_report: Optional[ReflectionReport] = kwargs.get("reflection_report")
         self.evidence_source_ids: List[str] = []
         self.evidence_sources: List[Dict] = []
         self.audit_score: Optional[float] = None
@@ -70,6 +75,7 @@ class Hypothesis:
             "elo_score": self.elo_score,
             "review_comments": self.review_comments,
             "references": self.references,
+            "review_reference_ids": self.review_reference_ids,
             "is_active": self.is_active,
             "parent_ids": self.parent_ids,  # Include parent IDs
             "evolution_strategy": self.evolution_strategy,
