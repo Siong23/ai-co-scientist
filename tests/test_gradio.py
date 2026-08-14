@@ -95,12 +95,25 @@ def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, 
     assert any("Existing saved run" in str(choice) for choice in sidebar_history[0]["props"]["choices"])
     assert sidebar_history[0]["props"]["buttons"][0]["value"] == "Delete"
     assert sidebar_history[0]["props"]["buttons"][0]["variant"] == "stop"
-    assert "#research-history-sidebar {\n            background: #ffffff !important;" in demo.css
-    assert "#sidebar-run-list {\n            background: #ffffff !important;" in demo.css
+    assert (
+        "#research-history-sidebar {\n            background: var(--block-background-fill) !important;" in demo.css
+    )
+    assert "#sidebar-run-list {\n            background: var(--block-background-fill) !important;" in demo.css
+    assert "background: #ffffff !important;" not in demo.css
     assert "var(--body-text-color) 6%, transparent" in demo.css
     assert "var(--body-text-color) 10%, transparent" in demo.css
     assert "#sidebar-run-list label:has(input:checked) span" in demo.css
     assert "color: var(--body-text-color) !important;" in demo.css
+    assert ".dark #sidebar-run-list label:hover," in demo.css
+    assert "background: rgba(255, 255, 255, 0.08) !important;" in demo.css
+    assert ".dark #sidebar-run-list label:has(input:checked)," in demo.css
+    assert "background: rgba(255, 255, 255, 0.12) !important;" in demo.css
+    assert ".dark #sidebar-run-list label:hover span {" in demo.css
+    assert ".dark #sidebar-run-list label:has(input:checked) span {" in demo.css
+    assert '.dark div[id^="html-"] .activity-drawer .source-chip {' in demo.css
+    assert "background: rgba(255, 255, 255, 0.10) !important;" in demo.css
+    assert '.dark div[id^="html-"] .activity-drawer .source-chip:hover {' in demo.css
+    assert "background: rgba(255, 255, 255, 0.18) !important;" in demo.css
     assert not any(
         component["type"] == "group" and component["props"].get("elem_id") == "run-history-content"
         for component in demo.config["components"]
