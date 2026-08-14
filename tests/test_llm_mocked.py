@@ -4,7 +4,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 import app.utils as utils
-from app.agents import call_llm_for_generation, call_llm_for_reflection
+from app.agents import (
+    call_llm_for_generation,
+    call_llm_for_hypothesis_revision,
+    call_llm_for_reflection,
+)
 from app.models import ContextMemory, Hypothesis, ResearchGoal
 
 
@@ -281,6 +285,9 @@ def test_reflection_error_returns_not_reviewed():
     assert review["novelty_review"] == "UNREVIEWED"
     assert review["feasibility_review"] == "UNREVIEWED"
     assert review["references"] == []
+    assert review["recommendation"] == "UNREVIEWED"
+    assert review["strengths"] == []
+    assert review["weaknesses"] == []
 
 
 def test_reflection_passes_selected_model_to_llm_boundary():
@@ -293,6 +300,8 @@ def test_reflection_passes_selected_model_to_llm_boundary():
             "testability_score": 7,
             "evidence_quality_score": 5,
             "expected_research_value_score": 8,
+            "strengths": ["Well grounded in retrieved evidence."],
+            "weaknesses": ["Feasibility plan is vague."],
             "comment": "Looks plausible.",
             "references": [],
         }
@@ -305,7 +314,34 @@ def test_reflection_passes_selected_model_to_llm_boundary():
 
     assert review["novelty_review"] == "HIGH"  # 9 converts to HIGH
     assert review["novelty_score"] == 9
+    assert review["strengths"] == ["Well grounded in retrieved evidence."]
+    assert review["weaknesses"] == ["Feasibility plan is vague."]
+    assert review["recommendation"] == "ACCEPT"  # every score is 4 or above
     assert mock_call.call_args.kwargs["model"] == "selected-local-model"
+
+
+def test_reflection_recommends_revise_when_any_score_below_four():
+    payload = json.dumps(
+        {
+            "alignment_score": 8,
+            "novelty_score": 9,
+            "feasibility_score": 3,
+            "plausibility_score": 8,
+            "testability_score": 7,
+            "evidence_quality_score": 5,
+            "expected_research_value_score": 8,
+            "comment": "Feasibility is weak.",
+            "references": [],
+        }
+    )
+    with patch("app.agents.call_llm", return_value=payload):
+        hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-id-low-score")
+        research_goal = ResearchGoal(description="test goal", constraints="")
+        context = ContextMemory()
+        review = call_llm_for_reflection(hypothesis, research_goal, context)
+
+    assert review["feasibility_score"] == 3
+    assert review["recommendation"] == "REVISE"
 
 
 def test_reflection_retries_invalid_review_values():
@@ -348,4 +384,37 @@ def test_reflection_retries_invalid_review_values():
     assert review["feasibility_review"] == "HIGH"  # 8 converts to HIGH
     assert review["novelty_score"] == 2
     assert review["feasibility_score"] == 8
+    assert review["recommendation"] == "REVISE"  # novelty_score of 2 is below 4
     assert mock_call.call_count == 2
+
+
+def test_hypothesis_revision_returns_revised_fields():
+    payload = json.dumps(
+        [
+            {
+                "title": "Revised title",
+                "hypothesis": "Revised hypothesis text.",
+                "rationale": "Revised rationale grounded in the cited evidence.",
+                "feasibility": "Revised, concrete feasibility plan.",
+                "source_ids": ["arXiv:1111.1111"],
+            }
+        ]
+    )
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        hypothesis = Hypothesis(text="Hypothesis: weak claim.", hypothesis_id="test-id-revise")
+        hypothesis.evidence_source_ids = ["arXiv:1111.1111"]
+        research_goal = ResearchGoal(description="test goal", constraints="")
+        revised = call_llm_for_hypothesis_revision(hypothesis, research_goal, model="selected-local-model")
+
+    assert revised["title"] == "Revised title"
+    assert revised["hypothesis"] == "Revised hypothesis text."
+    assert mock_call.call_args.kwargs["model"] == "selected-local-model"
+
+
+def test_hypothesis_revision_returns_none_on_llm_error():
+    with patch("app.agents.call_llm", return_value="Error: API call failed"):
+        hypothesis = Hypothesis(text="Hypothesis: weak claim.", hypothesis_id="test-id-revise-error")
+        research_goal = ResearchGoal(description="test goal", constraints="")
+        revised = call_llm_for_hypothesis_revision(hypothesis, research_goal)
+
+    assert revised is None

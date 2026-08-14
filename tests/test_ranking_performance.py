@@ -759,8 +759,17 @@ def test_tournament_records_results_in_context():
     assert result["elo_b_after"] == hypothesis_lookup[recorded_b_id].elo_score
 
     # Verify structured decision information.
-    assert result["scores_a"] == {}
-    assert result["scores_b"] == {}
+    expected_scores = {
+        "research_goal_alignment": 7.0,
+        "novelty": 7.0,
+        "feasibility": 7.0,
+        "scientific_plausibility": 7.0,
+        "testability": 7.0,
+        "evidence_quality": 7.0,
+        "expected_research_value": 7.0,
+    }
+    assert result["scores_a"] == expected_scores
+    assert result["scores_b"] == expected_scores
     assert result["criteria"] == ["scientific validity"]
 
     print("\nTournament result:")

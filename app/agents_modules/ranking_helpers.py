@@ -35,7 +35,7 @@ def score_hypothesis(
 
     report = hypothesis.reflection_report
 
-    if report is None:
+    if not report:
         return {}
 
     alignment = (
@@ -682,13 +682,15 @@ def run_pairwise_debate(
     # Reflection prerequisite
     # ------------------------------------------------------------
 
-    if report_a is None or report_b is None:
+    # The default, unreviewed shape is an empty list; a completed review sets a
+    # single ReflectionReport instance.
+    if not report_a or not report_b:
         missing = []
 
-        if report_a is None:
+        if not report_a:
             missing.append(f"A ({hypoA.hypothesis_id})")
 
-        if report_b is None:
+        if not report_b:
             missing.append(f"B ({hypoB.hypothesis_id})")
 
         reason = (

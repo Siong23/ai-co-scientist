@@ -43,7 +43,10 @@ from .agents_modules.ranking_helpers import (
     update_elo_tie,
 )
 from .agents_modules.reflection import ReflectionAgent
-from .agents_modules.reflection_helpers import call_llm_for_reflection
+from .agents_modules.reflection_helpers import (
+    call_llm_for_hypothesis_revision,
+    call_llm_for_reflection,
+)
 from .agents_modules.supervisor import SupervisorAgent
 from .evidence import EvidenceChunk, EvidenceDocument, EvidenceSource
 from .models import ContextMemory, Hypothesis, ResearchGoal
@@ -96,6 +99,7 @@ __all__ = [
     "call_llm_for_evolution",
     "call_llm_for_generation",
     "call_llm_for_hypothesis_audit",
+    "call_llm_for_hypothesis_revision",
     "call_llm_for_literature_synthesis",
     "call_llm_for_relevance_filter",
     "call_llm_for_reflection",

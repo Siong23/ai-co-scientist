@@ -46,13 +46,14 @@ class Hypothesis:
         self.text = text or ""
         self.novelty_review: Optional[str] = None
         self.feasibility_review: Optional[str] = None
-        self.elo_score: float = 1200.0
+        self.elo_score: float = kwargs.get("elo_score", 1200.0)
         self.review_comments: List[str] = []
         self.references: List[Dict] = []
         self.is_active: bool = True
         self.parent_ids: List[str] = []
         self.evolution_strategy: Optional[str] = None
-        self.reflection_report = None  # keep same shape as before
+        # Honor an explicitly supplied report; otherwise keep the historical empty-list shape.
+        self.reflection_report: List[ReflectionReport] = kwargs.get("reflection_report", [])
         self.evidence_source_ids: List[str] = []
         self.evidence_sources: List[Dict] = []
         self.audit_score: Optional[float] = None
@@ -230,7 +231,7 @@ class ReflectionReport(BaseModel):
     expected_research_value_score: float = 0.0
     strengths: List[str] = []
     weaknesses: List[str] = []
-    recommendation: str = ""
+    recommendation: str = "UNREVIEWED"
 
 
     #unused variables(keeping for potential future use)
