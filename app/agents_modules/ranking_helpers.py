@@ -829,31 +829,26 @@ def parse_pairwise_result(response: str) -> str:
     """
 
     patterns = {
-        "A":[
-            r"decision\s*:\s*A\b",
-            r"winner\s*:\s*A\b",
+        "A": [
+            r"decision\s*:\s*A(?:\s|$|[^\w])",  # A followed by whitespace, end, or non-word char
+            r"winner\s*:\s*A(?:\s|$|[^\w])",
         ],
-
-        "B":[
-            r"decision\s*:\s*B\b",
-            r"winner\s*:\s*B\b",
+        "B": [
+            r"decision\s*:\s*B(?:\s|$|[^\w])",
+            r"winner\s*:\s*B(?:\s|$|[^\w])",
         ],
-
-        "TIE":[
+        "TIE": [
             r"decision\s*:\s*TIE\b",
         ],
-
-        "ABSTAIN":[
+        "ABSTAIN": [
             r"decision\s*:\s*ABSTAIN\b",
         ]
     }
-
 
     for label, regexes in patterns.items():
         for pattern in regexes:
             if re.search(pattern, response, re.IGNORECASE):
                 return label
-
 
     raise ValueError(
         "Could not determine ranking decision."
