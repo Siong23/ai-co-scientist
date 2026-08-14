@@ -77,10 +77,95 @@ def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, 
         for component in demo.config["components"]
         if component["type"] == "button" and component["props"].get("value") == "Delete Selected Run"
     ]
-
+    sidebars = [
+        component
+        for component in demo.config["components"]
+        if component["type"] == "sidebar" and component["props"].get("elem_id") == "research-history-sidebar"
+    ]
+    sidebar_history = [
+        component
+        for component in demo.config["components"]
+        if component["type"] == "radio" and component["props"].get("label") == "Recent research goals"
+    ]
     assert "Existing saved run" in saved_runs[0]["props"]["value"]
     assert any("run-existing" in str(choice) for choice in delete_dropdowns[0]["props"]["choices"])
+    assert saved_runs[0]["id"] < delete_dropdowns[0]["id"]
     assert delete_buttons
+    assert sidebars and sidebars[0]["props"]["open"] is False
+    assert any("Existing saved run" in str(choice) for choice in sidebar_history[0]["props"]["choices"])
+    assert sidebar_history[0]["props"]["buttons"][0]["value"] == "Delete"
+    assert sidebar_history[0]["props"]["buttons"][0]["variant"] == "stop"
+    assert "#research-history-sidebar {\n            background: #ffffff !important;" in demo.css
+    assert "#sidebar-run-list {\n            background: #ffffff !important;" in demo.css
+    assert "var(--body-text-color) 6%, transparent" in demo.css
+    assert "var(--body-text-color) 10%, transparent" in demo.css
+    assert "#sidebar-run-list label:has(input:checked) span" in demo.css
+    assert "color: var(--body-text-color) !important;" in demo.css
+    assert not any(
+        component["type"] == "group" and component["props"].get("elem_id") == "run-history-content"
+        for component in demo.config["components"]
+    )
+
+
+def test_sidebar_delete_refreshes_history_table_and_choices(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ResearchGoal
+    from app.run_store import RUNS_DIR_ENV, save_run
+
+    monkeypatch.setenv(RUNS_DIR_ENV, str(tmp_path))
+    save_run(
+        research_goal=ResearchGoal(description="Delete from sidebar"),
+        cycle_details={"iteration": 1, "steps": {}},
+        status="done",
+        references_html="",
+        results_html="",
+        run_id="run-sidebar-delete",
+    )
+
+    status, history, delete_dropdown, sidebar_history = gradio_app_module.delete_history_run(
+        "run-sidebar-delete"
+    )
+
+    assert status == "Deleted saved run run-sidebar-delete."
+    assert "Delete from sidebar" not in history
+    assert delete_dropdown["choices"] == []
+    assert sidebar_history["choices"] == []
+    assert not (tmp_path / "runs" / "run-sidebar-delete.json").exists()
+
+
+def test_sidebar_selection_restores_saved_goal_results_and_settings(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ResearchGoal
+    from app.run_store import RUNS_DIR_ENV, save_run
+
+    monkeypatch.setenv(RUNS_DIR_ENV, str(tmp_path))
+    save_run(
+        research_goal=ResearchGoal(
+            description="Restore this research goal",
+            llm_model="local/saved-model",
+            num_hypotheses=6,
+            generation_temperature=0.8,
+            reflection_temperature=0.4,
+            elo_k_factor=48,
+            top_k_hypotheses=3,
+        ),
+        cycle_details={"iteration": 1, "steps": {}},
+        status="Saved run completed.",
+        references_html="<p>Saved references</p>",
+        results_html="<p>Saved results</p>",
+        run_id="run-to-restore",
+    )
+    gradio_app_module.available_models = ["local/current-model"]
+
+    restored = gradio_app_module.load_history_run("run-to-restore")
+
+    assert restored[0] == "Restore this research goal"
+    assert "Loaded saved run run-to-restore" in restored[1]
+    assert "agent workflow will appear here" in restored[2]
+    assert restored[3] == "<p>Saved results</p>"
+    assert restored[4] == "<p>Saved references</p>"
+    assert restored[5]["value"] == "local/saved-model"
+    assert "local/saved-model" in restored[5]["choices"]
+    assert restored[6:11] == (6, 0.8, 0.4, 48, 3)
+    assert restored[11]["selected"] == "current-run"
 
 
 def test_default_model_is_selected_and_first_choice(gradio_app_module):
