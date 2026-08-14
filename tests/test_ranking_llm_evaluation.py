@@ -92,7 +92,7 @@ def _reflection_report(
         strengths=strengths or [],
         weaknesses=weaknesses or [],
         # contradictions=[],
-        recommendation="Suitable for further investigation.",
+        recommendation="ACCEPT",
         confidence=0.8,
         claims=[
         ClaimAssessment(
