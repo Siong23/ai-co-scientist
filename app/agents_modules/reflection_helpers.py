@@ -308,6 +308,31 @@ def call_llm_for_reflection(
     }
 
 
+def _bounded_evidence_sources(
+    evidence_sources: List[Dict],
+    *,
+    limit: int = 8,
+    excerpt_chars: int = 1200,
+) -> List[Dict]:
+    """Trim evidence sources so an unbounded full-text excerpt cannot overflow the model's context."""
+
+    bounded: List[Dict] = []
+    for source in evidence_sources[:limit]:
+        if not isinstance(source, dict):
+            continue
+        excerpt = str(
+            source.get("content") or source.get("summary") or source.get("abstract") or ""
+        ).strip()
+        bounded.append(
+            {
+                "source_id": source.get("source_id"),
+                "title": source.get("title"),
+                "excerpt": excerpt[:excerpt_chars],
+            }
+        )
+    return bounded
+
+
 def _hypothesis_revision_context(hypothesis: Hypothesis) -> Dict:
     """Serialize the hypothesis fields used as revision constraints."""
     report = hypothesis.reflection_report
@@ -325,7 +350,7 @@ def _hypothesis_revision_context(hypothesis: Hypothesis) -> Dict:
         "references": hypothesis.references,
         "reflection_report": reflection_report,
         "evidence_source_ids": hypothesis.evidence_source_ids,
-        "evidence_sources": hypothesis.evidence_sources,
+        "evidence_sources": _bounded_evidence_sources(hypothesis.evidence_sources),
     }
     if hypothesis.parent_ids:
         context["parent_ids"] = hypothesis.parent_ids
