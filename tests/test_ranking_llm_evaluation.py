@@ -91,7 +91,7 @@ def _reflection_report(
         expected_research_value_score=research_value,
         strengths=strengths or [],
         weaknesses=weaknesses or [],
-        contradictions=[],
+        # contradictions=[],
         recommendation="Suitable for further investigation.",
         confidence=0.8,
         claims=[
@@ -318,9 +318,9 @@ Strengths:
 Weaknesses:
 {chr(10).join(report.weaknesses) if report.weaknesses else "None"}
 
-Contradictions:
-{chr(10).join(report.contradictions) if report.contradictions else "None"}
-"""
+
+"""# Contradictions:
+# {chr(10).join(report.contradictions) if report.contradictions else "None"}
 
     return f"""
 Hypothesis ID:
