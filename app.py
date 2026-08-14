@@ -1241,6 +1241,11 @@ def create_gradio_interface():
             color: var(--body-text-color) !important;
         }
 
+        /* Let the browser handle theme matching natively */
+        :root {
+            color-scheme: light dark;
+        }
+
         /* Universal Fix for Dark Mode: Targets absolutely everything inside the custom HTML block */
         .dark div[id^="html-"],
         .dark div[id^="html-"] * {
