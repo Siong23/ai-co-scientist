@@ -20,6 +20,7 @@ from app.run_store import (
     get_reports_dir,
     history_html,
     list_runs,
+    load_run,
     report_file_url,
     save_run,
     write_report,
@@ -95,19 +96,96 @@ def history_run_choices() -> List[Tuple[str, str]]:
     return choices
 
 
-def refresh_history_view() -> Tuple[str, Dict[str, Any], str]:
-    """Refresh the history table and delete-run dropdown."""
-    return history_html(), gr.update(choices=history_run_choices(), value=None), ""
+def sidebar_run_choices(limit: int = 50) -> List[Tuple[str, str]]:
+    """Return compact, newest-first choices for the research history sidebar."""
+    choices = []
+    for run in list_runs(limit=limit):
+        goal = run.get("goal") or "Untitled research goal"
+        if len(goal) > 58:
+            goal = f"{goal[:55]}..."
+        created_at = str(run.get("created_at") or "")[:16].replace("T", " ")
+        label = f"{goal}  ·  {created_at}" if created_at else goal
+        choices.append((label, run.get("run_id")))
+    return choices
 
 
-def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[str, Any]]:
+def refresh_history_view() -> Tuple[str, Dict[str, Any], Dict[str, Any], str]:
+    """Refresh the saved-run table, delete dropdown, and sidebar list."""
+    return (
+        history_html(),
+        gr.update(choices=history_run_choices(), value=None),
+        gr.update(choices=sidebar_run_choices(), value=None),
+        "",
+    )
+
+
+def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[str, Any], Dict[str, Any]]:
     """Delete the selected saved run and refresh the history display."""
     if not selected_run_id:
-        return "Select a saved run to delete.", history_html(), gr.update(choices=history_run_choices(), value=None)
+        return (
+            "Select a saved run to delete.",
+            history_html(),
+            gr.update(choices=history_run_choices(), value=None),
+            gr.update(choices=sidebar_run_choices(), value=None),
+        )
 
     deleted = delete_run(selected_run_id)
     message = f"Deleted saved run {selected_run_id}." if deleted else f"Saved run {selected_run_id} was not found."
-    return message, history_html(), gr.update(choices=history_run_choices(), value=None)
+    return (
+        message,
+        history_html(),
+        gr.update(choices=history_run_choices(), value=None),
+        gr.update(choices=sidebar_run_choices(), value=None),
+    )
+
+
+def load_history_run(selected_run_id: Optional[str]) -> Tuple[Any, ...]:
+    """Load a saved run into the main view without making an LLM call."""
+    if not selected_run_id:
+        return (gr.skip(),) * 12
+
+    try:
+        run = load_run(selected_run_id)
+    except (OSError, ValueError):
+        skipped = [gr.skip() for _ in range(12)]
+        skipped[1] = f"Saved run {selected_run_id} could not be loaded. Refresh the history and try again."
+        return tuple(skipped)
+
+    goal_data = run.get("research_goal") or {}
+    description = goal_data.get("description") or ""
+    loaded_goal = ResearchGoal(
+        description=description,
+        constraints=goal_data.get("constraints") or {},
+        llm_model=goal_data.get("llm_model"),
+        query_rewrite_model=goal_data.get("query_rewrite_model"),
+        num_hypotheses=goal_data.get("num_hypotheses"),
+        generation_temperature=goal_data.get("generation_temperature"),
+        reflection_temperature=goal_data.get("reflection_temperature"),
+        elo_k_factor=goal_data.get("elo_k_factor"),
+        top_k_hypotheses=goal_data.get("top_k_hypotheses"),
+    )
+    model_choices = list(available_models)
+    if loaded_goal.llm_model and loaded_goal.llm_model not in model_choices:
+        model_choices.append(loaded_goal.llm_model)
+
+    stored_status = run.get("status") or "No status was recorded for this run."
+    status = f"Loaded saved run {run.get('run_id', selected_run_id)}.\n\n{stored_status}"
+    cycle_details = run.get("cycle_details") or {}
+    trace = cycle_details.get("research_trace") or []
+    return (
+        description,
+        status,
+        format_research_trace_html(trace, elapsed_seconds=cycle_details.get("execution_time")),
+        run.get("results_html") or "<p>No results were recorded for this run.</p>",
+        run.get("references_html") or "<p>No references were recorded for this run.</p>",
+        gr.update(choices=get_model_dropdown_choices(model_choices), value=loaded_goal.llm_model),
+        loaded_goal.num_hypotheses,
+        loaded_goal.generation_temperature,
+        loaded_goal.reflection_temperature,
+        loaded_goal.elo_k_factor,
+        loaded_goal.top_k_hypotheses,
+        gr.update(selected="current-run"),
+    )
 
 
 # Create a small helper function to turn plain text into bold text
@@ -1091,6 +1169,68 @@ def create_gradio_interface():
         .orange { background-color: #fff3cd; border: 1px solid #ffeaa7; }
         .blue { background-color: #d1ecf1; border: 1px solid #bee5eb; }
 
+        #research-history-sidebar {
+            background: #ffffff !important;
+            border-right: 1px solid var(--border-color-primary);
+        }
+        #research-history-sidebar .sidebar-history-copy {
+            color: var(--body-text-color-subdued);
+            font-size: 0.9rem;
+        }
+        #sidebar-run-list {
+            background: #ffffff !important;
+            border: 0;
+            box-shadow: none;
+            padding: 0;
+        }
+        #sidebar-run-list > .wrap:not([data-testid]) {
+            align-items: stretch;
+            background: #ffffff !important;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        #sidebar-run-list label {
+            background: #ffffff !important;
+            border: 0;
+            border-radius: 10px;
+            box-shadow: none !important;
+            color: var(--body-text-color) !important;
+            cursor: pointer;
+            display: block;
+            margin: 0;
+            padding: 10px 12px;
+            transition: background-color 120ms ease;
+            width: 100%;
+        }
+        #sidebar-run-list label:hover {
+            background: color-mix(in srgb, var(--body-text-color) 6%, transparent) !important;
+        }
+        #sidebar-run-list label:has(input:checked) {
+            background: color-mix(in srgb, var(--body-text-color) 10%, transparent) !important;
+            color: var(--body-text-color) !important;
+        }
+        #sidebar-run-list label:has(input:checked) span {
+            color: var(--body-text-color) !important;
+        }
+        #sidebar-run-list input[type="radio"] {
+            opacity: 0;
+            pointer-events: none;
+            position: absolute;
+        }
+        #sidebar-run-list label span {
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .dark #research-history-sidebar,
+        .dark #sidebar-run-list,
+        .dark #sidebar-run-list > .wrap:not([data-testid]) {
+            background: var(--block-background-fill) !important;
+        }
+        .dark #sidebar-run-list label:not(:hover):not(:has(input:checked)) {
+            background: var(--block-background-fill) !important;
+        }
+
         /* Universal Fix for Dark Mode: Targets absolutely everything inside the custom HTML block */
         .dark div[id^="html-"],
         .dark div[id^="html-"] * {
@@ -1114,6 +1254,24 @@ def create_gradio_interface():
         """
 
     with gr.Blocks(title="Open AI Co-Scientist - Hypothesis Evolution System") as demo:
+        with gr.Sidebar(open=False, width=320, elem_id="research-history-sidebar"):
+            gr.Markdown("## Research history")
+            gr.Markdown(
+                "Saved research goals remain available after a refresh. Select one to restore its results.",
+                elem_classes="sidebar-history-copy",
+            )
+            sidebar_refresh_btn = gr.Button("Refresh history", size="sm")
+            sidebar_delete_btn = gr.Button("Delete", variant="stop", size="sm")
+            sidebar_history = gr.Radio(
+                choices=sidebar_run_choices(),
+                value=None,
+                label="Recent research goals",
+                interactive=True,
+                elem_id="sidebar-run-list",
+                buttons=[sidebar_delete_btn],
+            )
+            sidebar_delete_status = gr.Markdown()
+
         # Header
         gr.Markdown("# 🔬 Open AI Co-Scientist - Hypothesis Evolution System")
         gr.Markdown("Generate, review, rank, and evolve research hypotheses using AI agents.")
@@ -1224,8 +1382,8 @@ def create_gradio_interface():
                 </div>
                 """)
 
-        with gr.Tabs():
-            with gr.Tab("Current Run"):
+        with gr.Tabs(selected="current-run") as run_tabs:
+            with gr.Tab("Current Run", id="current-run"):
                 with gr.Row():
                     with gr.Column():
                         research_trace_output = gr.HTML(
@@ -1245,7 +1403,7 @@ def create_gradio_interface():
                             label="References", value="<p>Related research papers will appear here.</p>"
                         )
 
-            with gr.Tab("Run History") as run_history_tab:
+            with gr.Tab("Run History", id="run-history") as run_history_tab:
                 gr.Markdown("Saved runs load automatically. Use refresh if runs were changed outside this page.")
                 refresh_history_btn = gr.Button("Refresh History")
                 history_output = gr.HTML(label="Saved Runs", value=history_html())
@@ -1279,6 +1437,7 @@ def create_gradio_interface():
                 "",
                 history_html(),
                 gr.update(choices=history_run_choices(), value=None),
+                gr.update(choices=sidebar_run_choices(), value=None),
             )
             for status, results, references, research_trace in run_cycle_with_progress():
                 yield (
@@ -1288,6 +1447,7 @@ def create_gradio_interface():
                     references,
                     history_html(),
                     gr.update(choices=history_run_choices(), value=None),
+                    gr.update(choices=sidebar_run_choices(), value=None),
                 )
 
         run_cycle_btn.click(
@@ -1308,28 +1468,59 @@ def create_gradio_interface():
                 references_output,
                 history_output,
                 delete_run_dropdown,
+                sidebar_history,
             ],
+        )
+
+        sidebar_history.select(
+            fn=load_history_run,
+            inputs=[sidebar_history],
+            outputs=[
+                research_goal_input,
+                status_output,
+                research_trace_output,
+                results_output,
+                references_output,
+                model_dropdown,
+                num_hypotheses,
+                generation_temp,
+                reflection_temp,
+                elo_k_factor,
+                top_k_hypotheses,
+                run_tabs,
+            ],
+            show_progress="minimal",
         )
 
         demo.load(
             fn=refresh_history_view,
             inputs=[],
-            outputs=[history_output, delete_run_dropdown, delete_history_status],
+            outputs=[history_output, delete_run_dropdown, sidebar_history, delete_history_status],
         )
         run_history_tab.select(
             fn=refresh_history_view,
             inputs=[],
-            outputs=[history_output, delete_run_dropdown, delete_history_status],
+            outputs=[history_output, delete_run_dropdown, sidebar_history, delete_history_status],
         )
         refresh_history_btn.click(
             fn=refresh_history_view,
             inputs=[],
-            outputs=[history_output, delete_run_dropdown, delete_history_status],
+            outputs=[history_output, delete_run_dropdown, sidebar_history, delete_history_status],
+        )
+        sidebar_refresh_btn.click(
+            fn=refresh_history_view,
+            inputs=[],
+            outputs=[history_output, delete_run_dropdown, sidebar_history, delete_history_status],
+        )
+        sidebar_delete_btn.click(
+            fn=delete_history_run,
+            inputs=[sidebar_history],
+            outputs=[sidebar_delete_status, history_output, delete_run_dropdown, sidebar_history],
         )
         delete_history_btn.click(
             fn=delete_history_run,
             inputs=[delete_run_dropdown],
-            outputs=[delete_history_status, history_output, delete_run_dropdown],
+            outputs=[delete_history_status, history_output, delete_run_dropdown, sidebar_history],
         )
 
         # Example inputs
