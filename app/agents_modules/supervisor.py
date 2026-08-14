@@ -47,6 +47,33 @@ def _reflection_details(hypotheses: List[Any]) -> List[str]:
     return details
 
 
+def _reflection_routing(hypotheses: List[Any]) -> Dict[str, List[Any]]:
+    """Partition hypotheses by the action requested by Reflection."""
+    routed: Dict[str, List[Any]] = {
+        "accepted": [],
+        "revise": [],
+        "unreviewed": [],
+    }
+    for hypothesis in hypotheses:
+        report = getattr(hypothesis, "reflection_report", None)
+        recommendation = str(getattr(report, "recommendation", "UNREVIEWED")).strip().upper()
+        if recommendation == "ACCEPT":
+            routed["accepted"].append(hypothesis)
+        elif recommendation == "REVISE":
+            routed["revise"].append(hypothesis)
+        else:
+            routed["unreviewed"].append(hypothesis)
+    return routed
+
+
+def _reflection_routing_summary(routed: Mapping[str, List[Any]]) -> Dict[str, List[str]]:
+    """Serialize routing decisions without duplicating full hypotheses."""
+    return {
+        name: [hypothesis.hypothesis_id for hypothesis in hypotheses]
+        for name, hypotheses in routed.items()
+    }
+
+
 def _ranking_details(results: List[Mapping[str, Any]]) -> List[str]:
     details = []
     for result in results[:4]:
@@ -236,12 +263,17 @@ class SupervisorAgent:
             f"Checking novelty, feasibility, and evidence quality for {len(active_hypos)} active hypotheses.",
         )
         self.reflection_agent.review_hypotheses(active_hypos, context, research_goal)  # Pass research_goal
-        cycle_details["steps"]["reflection"] = {"hypotheses": [h.to_dict() for h in active_hypos]}
+        reflection_routing = _reflection_routing(active_hypos)
+        rankable_hypos = reflection_routing["accepted"]
+        cycle_details["steps"]["reflection"] = {
+            "hypotheses": [h.to_dict() for h in active_hypos],
+            "routing": _reflection_routing_summary(reflection_routing),
+        }
         publish(
             "reflection",
-            "completed",
+            "warning" if reflection_routing["unreviewed"] else "completed",
             "Reviewing scientific quality",
-            f"Reviewed {len(active_hypos)} active hypotheses.",
+            f"Accepted {len(rankable_hypos)} of {len(active_hypos)} reviewed hypotheses for ranking.",
             details=_reflection_details(active_hypos),
             elapsed_seconds=time.perf_counter() - phase_started,
         )
@@ -256,15 +288,19 @@ class SupervisorAgent:
             "Running evidence-aware pairwise comparisons and updating tournament scores.",
         )
         start = len(context.tournament_results)
+        rankable_ids = {hypothesis.hypothesis_id for hypothesis in rankable_hypos}
+        rankable_new_hypotheses = [
+            hypothesis for hypothesis in new_hypotheses if hypothesis.hypothesis_id in rankable_ids
+        ]
         self.ranking_agent.run_tournament(
-            active_hypos,
+            rankable_hypos,
             context,
             research_goal,
-            new_hypotheses=new_hypotheses,
+            new_hypotheses=rankable_new_hypotheses,
         )
         ranking1_results = context.tournament_results[start:]
         cycle_details["steps"]["ranking1"] = {
-            "hypotheses": [h.to_dict() for h in active_hypos],
+            "hypotheses": [h.to_dict() for h in rankable_hypos],
             "tournament_results": ranking1_results,
         }
         ranking1_abstentions = sum(result.get("outcome") == "ABSTAIN" for result in ranking1_results)
@@ -313,13 +349,17 @@ class SupervisorAgent:
             )
             self.reflection_agent.review_hypotheses(evolved_hypotheses, context, research_goal)  # Pass research_goal
             active_hypos = context.get_active_hypotheses()  # Update active list
+            evolved_routing = _reflection_routing(evolved_hypotheses)
             # Add explicit step for reviewing evolved hypotheses AFTER evolution
-            cycle_details["steps"]["reflection_evolved"] = {"hypotheses": [h.to_dict() for h in evolved_hypotheses]}
+            cycle_details["steps"]["reflection_evolved"] = {
+                "hypotheses": [h.to_dict() for h in evolved_hypotheses],
+                "routing": _reflection_routing_summary(evolved_routing),
+            }
             publish(
                 "reflection_evolved",
-                "completed",
+                "warning" if evolved_routing["unreviewed"] else "completed",
                 "Reviewing evolved hypotheses",
-                f"Reviewed {len(evolved_hypotheses)} evolved hypotheses.",
+                f"Accepted {len(evolved_routing['accepted'])} of {len(evolved_hypotheses)} evolved hypotheses for ranking.",
                 details=_reflection_details(evolved_hypotheses),
                 elapsed_seconds=time.perf_counter() - phase_started,
             )
@@ -338,24 +378,34 @@ class SupervisorAgent:
             )
 
         # 5. Ranking (Tournament 2 - includes evolved)
+        # Recompute the gate after Evolution because active_hypos deliberately
+        # retains REVISE candidates for refinement.  Only ACCEPT reports may
+        # participate in Elo; otherwise rejected content could leak back into
+        # the final tournament merely because it is still active.
+        final_routing = _reflection_routing(active_hypos)
+        rankable_hypos = final_routing["accepted"]
+        rankable_ids = {hypothesis.hypothesis_id for hypothesis in rankable_hypos}
+        rankable_evolved_hypotheses = [
+            hypothesis for hypothesis in evolved_hypotheses if hypothesis.hypothesis_id in rankable_ids
+        ]
         _legacy.logger.info("Step 5: Ranking 2")
         phase_started = time.perf_counter()
         publish(
             "ranking2",
             "running",
             "Running the final tournament",
-            f"Comparing {len(active_hypos)} active hypotheses after evolution.",
+            f"Comparing {len(rankable_hypos)} Reflection-accepted hypotheses after evolution.",
         )
         start = len(context.tournament_results)
         self.ranking_agent.run_tournament(
-            active_hypos,
+            rankable_hypos,
             context,
             research_goal,
-            new_hypotheses=evolved_hypotheses,
+            new_hypotheses=rankable_evolved_hypotheses,
         )
         ranking2_results = context.tournament_results[start:]
         cycle_details["steps"]["ranking2"] = {
-            "hypotheses": [h.to_dict() for h in active_hypos],
+            "hypotheses": [h.to_dict() for h in rankable_hypos],
             "tournament_results": ranking2_results,
         }
         ranking2_abstentions = sum(result.get("outcome") == "ABSTAIN" for result in ranking2_results)

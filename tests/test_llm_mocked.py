@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import app.utils as utils
 from app.agents import (
+    ReflectionAgent,
     call_llm_for_generation,
     call_llm_for_hypothesis_revision,
     call_llm_for_reflection,
@@ -386,6 +387,154 @@ def test_reflection_retries_invalid_review_values():
     assert review["feasibility_score"] == 8
     assert review["recommendation"] == "REVISE"  # novelty_score of 2 is below 4
     assert mock_call.call_count == 2
+
+
+def test_reflection_rejects_model_references_when_no_verified_sources_exist():
+    payload = json.dumps(
+        {
+            "alignment_score": 8,
+            "novelty_score": 8,
+            "feasibility_score": 8,
+            "plausibility_score": 8,
+            "testability_score": 8,
+            "evidence_quality_score": 8,
+            "expected_research_value_score": 8,
+            "strengths": [],
+            "weaknesses": [],
+            "comment": "Looks plausible.",
+            "references": ["invented:123"],
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=payload):
+        review = call_llm_for_reflection(
+            Hypothesis(text="some hypothesis", hypothesis_id="test-no-sources"),
+            ResearchGoal(description="test goal", constraints=""),
+            ContextMemory(),
+        )
+
+    assert review["references"] == []
+
+
+def test_reflection_uses_hypothesis_evidence_instead_of_latest_context_sources():
+    payload = json.dumps(
+        {
+            "alignment_score": 8,
+            "novelty_score": 8,
+            "feasibility_score": 8,
+            "plausibility_score": 8,
+            "testability_score": 8,
+            "evidence_quality_score": 8,
+            "expected_research_value_score": 8,
+            "strengths": [],
+            "weaknesses": [],
+            "comment": "Looks plausible.",
+            "references": ["paper:attached"],
+        }
+    )
+    hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-own-evidence")
+    hypothesis.evidence_sources = [
+        {
+            "source_id": "paper:attached",
+            "title": "Attached evidence",
+            "abstract": "Evidence attached to this hypothesis.",
+        }
+    ]
+    context = ContextMemory()
+    context.last_retrieved_sources = [
+        {
+            "source_id": "paper:unrelated",
+            "title": "Unrelated latest evidence",
+            "abstract": "Evidence from a later generation cycle.",
+        }
+    ]
+
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        review = call_llm_for_reflection(
+            hypothesis,
+            ResearchGoal(description="test goal", constraints=""),
+            context,
+        )
+
+    prompt = mock_call.call_args.args[0]
+    assert "paper:attached" in prompt
+    assert "paper:unrelated" not in prompt
+    assert review["references"] == ["paper:attached"]
+
+
+def test_reflection_agent_does_not_create_zero_score_report_after_llm_failure():
+    hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-review-failure")
+
+    with patch(
+        "app.agents.call_llm_for_reflection",
+        return_value={
+            "novelty_review": "UNREVIEWED",
+            "feasibility_review": "UNREVIEWED",
+            "alignment_score": 0,
+            "novelty_score": 0,
+            "feasibility_score": 0,
+            "plausibility_score": 0,
+            "testability_score": 0,
+            "evidence_quality_score": 0,
+            "expected_research_value_score": 0,
+            "strengths": [],
+            "weaknesses": [],
+            "recommendation": "UNREVIEWED",
+            "comment": "LLM review failed.",
+            "references": [],
+        },
+    ):
+        ReflectionAgent().review_hypotheses(
+            [hypothesis],
+            ContextMemory(),
+            ResearchGoal(description="test goal", constraints=""),
+        )
+
+    assert hypothesis.reflection_report is None
+    assert hypothesis.novelty_review == "UNREVIEWED"
+    assert hypothesis.feasibility_review == "UNREVIEWED"
+
+
+def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():
+    hypothesis = Hypothesis(
+        title="Original title",
+        text="Original hypothesis text.",
+        hypothesis_id="test-revise-provenance",
+    )
+    hypothesis.references = [{"source_id": "paper:structured"}]
+    review = {
+        "novelty_review": "LOW",
+        "feasibility_review": "HIGH",
+        "alignment_score": 8,
+        "novelty_score": 3,
+        "feasibility_score": 8,
+        "plausibility_score": 8,
+        "testability_score": 8,
+        "evidence_quality_score": 8,
+        "expected_research_value_score": 8,
+        "strengths": ["Testable."],
+        "weaknesses": ["Insufficient novelty."],
+        "recommendation": "REVISE",
+        "comment": "Create a distinct revised descendant.",
+        "references": ["paper:review"],
+    }
+
+    with (
+        patch("app.agents.call_llm_for_reflection", return_value=review),
+        patch("app.agents.call_llm_for_hypothesis_revision") as mock_revision,
+    ):
+        ReflectionAgent().review_hypotheses(
+            [hypothesis],
+            ContextMemory(),
+            ResearchGoal(description="test goal", constraints=""),
+        )
+
+    assert hypothesis.title == "Original title"
+    assert hypothesis.text == "Original hypothesis text."
+    assert hypothesis.reflection_report.recommendation == "REVISE"
+    assert hypothesis.review_reference_ids == ["paper:review"]
+    assert hypothesis.references == [{"source_id": "paper:structured"}]
+    mock_revision.assert_not_called()
 
 
 def test_hypothesis_revision_returns_revised_fields():
