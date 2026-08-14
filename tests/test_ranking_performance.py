@@ -1,4 +1,10 @@
-"""Offline performance and regression tests for the improved Ranking Agent.
+"""Performance and regression tests for the improved Ranking Agent.
+
+Most tests use mocked LLM calls so they remain deterministic and
+independent of external APIs.
+
+Integration tests marked with @pytest.mark.integration perform real
+LLM calls to measure end-to-end behaviour.
 
 The tests evaluate:
 
@@ -25,10 +31,18 @@ old-vs-old comparisons.
 
 The ranking system also supports structured outcomes including A, B, TIE,
 and ABSTAIN, with corresponding Elo update behavior.
-"""
 
-# To run this test file:
-# pytest tests/test_ranking_performance.py -v -s
+To run this test file:
+Real Integration:
+pytest tests/test_ranking_performance.py -v -s
+
+Offline (mocked LLM):
+pytest tests/test_ranking_performance.py -v -s -m "not integration"
+
+Real LLM:
+pytest tests/test_ranking_performance.py -v -s -m integration
+
+"""
 
 from copy import deepcopy
 from time import perf_counter
@@ -44,32 +58,68 @@ from app.agents_modules.ranking_helpers import (
     update_elo,
     update_elo_tie,
 )
-from app.models import ContextMemory, Hypothesis, PairwiseDecision, ResearchGoal
+from app.models import ContextMemory, Hypothesis, PairwiseDecision, ResearchGoal, ReflectionReport
 
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
 
-def _hypothesis(hypothesis_id: str, elo_score: float = 1200.0) -> Hypothesis:
+def _reflection_report(
+    novelty=7.0,
+    feasibility=7.0,
+    plausibility=7.0,
+    testability=7.0,
+    evidence_quality=7.0,
+    research_value=7.0,
+):
+    return ReflectionReport(
+        novelty_score=novelty,
+        feasibility_score=feasibility,
+        plausibility_score=plausibility,
+        testability_score=testability,
+        evidence_quality_score=evidence_quality,
+        expected_research_value_score=research_value,
+        strengths=["Reasonably strong hypothesis."],
+        weaknesses=[],
+        contradictions=[],
+        recommendation="Suitable for further investigation.",
+        confidence=0.8,
+    )
+
+def _hypothesis(hypothesis_id: str, elo_score: float = 1200.0, reflection_report=None) -> Hypothesis:
     """Create a minimal hypothesis for testing."""
     return Hypothesis(
         hypothesis_id=hypothesis_id,
         text=f"Hypothesis {hypothesis_id}",
         elo_score=elo_score,
+        reflection_report=reflection_report or _reflection_report(),
     )
 
 
 def _decision(
-    hypothesis_a: Hypothesis,
-    hypothesis_b: Hypothesis,
-    outcome: str = "A",
-    confidence: float = 0.8,
-) -> PairwiseDecision:
+    hypothesis_a,
+    hypothesis_b,
+    outcome="A",
+    confidence=0.8,
+):
     """Create a deterministic pairwise decision."""
+
+    scores = {
+        "research_goal_alignment": 7.0,
+        "novelty": 7.0,
+        "feasibility": 7.0,
+        "scientific_plausibility": 7.0,
+        "testability": 7.0,
+        "evidence_quality": 7.0,
+        "expected_research_value": 7.0,
+    }
+
     return PairwiseDecision(
         hypothesis_a_id=hypothesis_a.hypothesis_id,
         hypothesis_b_id=hypothesis_b.hypothesis_id,
         outcome=outcome,
+        scores_a=scores.copy(),
+        scores_b=scores.copy(),
         confidence=confidence,
         reasoning="A better matches the research goal.",
         decisive_criteria=["scientific validity"],
@@ -715,3 +765,29 @@ def test_tournament_records_results_in_context():
 
     print("\nTournament result:")
     print(f"  {result}")
+
+def test_ranking_abstains_without_reflection_report():
+    goal = ResearchGoal(
+        description="Test research goal",
+    )
+
+    hypo_a = Hypothesis(
+        hypothesis_id="A",
+        text="Hypothesis A",
+    )
+
+    hypo_b = Hypothesis(
+        hypothesis_id="B",
+        text="Hypothesis B",
+    )
+
+    decision = run_pairwise_debate(
+        hypo_a,
+        hypo_b,
+        goal,
+    )
+
+    assert decision.outcome == "ABSTAIN"
+    assert decision.scores_a == {}
+    assert decision.scores_b == {}
+    assert "ReflectionReport" in decision.reasoning
