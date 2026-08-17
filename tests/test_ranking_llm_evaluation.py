@@ -34,7 +34,6 @@ import json
 import os
 import re
 from statistics import mean
-from unittest.mock import patch # noqa: F401
 
 import pytest
 
@@ -44,7 +43,6 @@ from app.agents_modules.ranking_helpers import (
     run_pairwise_debate,
 )
 from app.models import ClaimAssessment, Hypothesis, ReflectionReport, ResearchGoal
-
 
 # ---------------------------------------------------------------------------
 # Configuration

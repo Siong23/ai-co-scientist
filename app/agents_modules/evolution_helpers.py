@@ -166,7 +166,7 @@ Return only the corrected JSON object using the exact schema above.
 
 
 def _parent_payload(parent: Hypothesis) -> dict:
-    reflection = parent.reflection_report.dict() if parent.reflection_report else None
+    reflection = parent.reflection_report.model_dump() if parent.reflection_report else None
     return {
         "id": parent.hypothesis_id,
         "title": parent.title,

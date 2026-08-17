@@ -320,7 +320,7 @@ def _hypothesis_revision_context(hypothesis: Hypothesis) -> Dict:
     report = hypothesis.reflection_report
     if isinstance(report, list):
         report = report[-1] if report else None
-    reflection_report = report.dict() if hasattr(report, "dict") else None
+    reflection_report = report.model_dump() if hasattr(report, "model_dump") else None
 
     context: Dict = {
         "hypothesis_id": hypothesis.hypothesis_id,
