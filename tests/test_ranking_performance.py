@@ -58,7 +58,7 @@ from app.agents_modules.ranking_helpers import (
     update_elo,
     update_elo_tie,
 )
-from app.models import ContextMemory, Hypothesis, PairwiseDecision, ResearchGoal, ReflectionReport
+from app.models import ContextMemory, Hypothesis, PairwiseDecision, ReflectionReport, ResearchGoal
 
 # ---------------------------------------------------------------------------
 # Test helpers

@@ -34,16 +34,16 @@ import json
 import os
 import re
 from statistics import mean
-from unittest.mock import patch
+from unittest.mock import patch # noqa: F401
 
 import pytest
 
+from app.agents_modules.generation_helpers import _call_llm
 from app.agents_modules.ranking_helpers import (
     RANKING_LLM_MODEL,
     run_pairwise_debate,
 )
-from app.models import Hypothesis, ReflectionReport, ResearchGoal, ClaimAssessment
-from app.agents_modules.generation_helpers import _call_llm
+from app.models import ClaimAssessment, Hypothesis, ReflectionReport, ResearchGoal
 
 
 # ---------------------------------------------------------------------------
