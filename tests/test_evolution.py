@@ -208,6 +208,39 @@ def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
     ]
 
 
+def test_supervisor_handles_nested_proximity_result():
+    context, _, _ = _context()
+    supervisor = SupervisorAgent()
+    supervisor.generation_agent = Mock()
+    supervisor.generation_agent.generate_new_hypotheses.return_value = ([], [])
+    supervisor.generation_agent.rag_retriever.last_search_stats = []
+    supervisor.reflection_agent = Mock()
+    supervisor.ranking_agent = Mock()
+    supervisor.evolution_agent = Mock()
+    supervisor.evolution_agent.evolve_hypotheses.return_value = []
+    supervisor.proximity_agent = Mock()
+    supervisor.proximity_agent.get_proximity_analysis.return_value = {
+        "graph": {
+            "adjacency_graph": {},
+            "nodes": ["H1", "H2"],
+            "edges": [],
+        },
+        "clusters": {},
+        "cluster_members": {},
+        "largest_clusters": [],
+        "connectivity": {"H1": 0, "H2": 0},
+        "highly_connected": [],
+        "isolated": ["H1", "H2"],
+    }
+    supervisor.meta_review_agent = Mock()
+    supervisor.meta_review_agent.summarize_and_feedback.return_value = {}
+
+    details = supervisor.run_cycle(_goal(), context)
+
+    assert details["steps"]["proximity"]["nodes"] == ["H1", "H2"]
+    assert details["steps"]["proximity"]["edges"] == []
+
+
 def test_supervisor_exposes_evolution_attempts_in_cycle_details():
     context, _, _ = _context()
     progress_events = []
@@ -222,10 +255,18 @@ def test_supervisor_exposes_evolution_attempts_in_cycle_details():
         max_candidates_per_cycle=1,
     )
     supervisor.proximity_agent = Mock()
-    supervisor.proximity_agent.build_proximity_graph.return_value = {
-        "adjacency_graph": {},
-        "nodes": [],
-        "edges": [],
+    supervisor.proximity_agent.get_proximity_analysis.return_value = {
+        "graph": {
+            "adjacency_graph": {},
+            "nodes": [],
+            "edges": [],
+        },
+        "clusters": {},
+        "cluster_members": {},
+        "largest_clusters": [],
+        "connectivity": {},
+        "highly_connected": [],
+        "isolated": [],
     }
     supervisor.meta_review_agent = Mock()
     supervisor.meta_review_agent.summarize_and_feedback.return_value = {}

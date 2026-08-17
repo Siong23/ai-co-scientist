@@ -47,10 +47,18 @@ def test_supervisor_only_sends_reflection_accepted_hypotheses_to_ranking():
         evolved_revise,
     ]
     supervisor.proximity_agent = Mock()
-    supervisor.proximity_agent.build_proximity_graph.return_value = {
-        "adjacency_graph": {},
-        "nodes": [],
-        "edges": [],
+    supervisor.proximity_agent.get_proximity_analysis.return_value = {
+        "graph": {
+            "adjacency_graph": {},
+            "nodes": [],
+            "edges": [],
+        },
+        "clusters": {},
+        "cluster_members": {},
+        "largest_clusters": [],
+        "connectivity": {},
+        "highly_connected": [],
+        "isolated": [],
     }
     supervisor.meta_review_agent = Mock()
     supervisor.meta_review_agent.summarize_and_feedback.return_value = {}

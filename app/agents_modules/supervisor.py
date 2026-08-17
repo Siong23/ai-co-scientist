@@ -427,17 +427,28 @@ class SupervisorAgent:
             "Mapping hypothesis relationships",
             "Measuring similarity and organizing related hypotheses into a proximity graph.",
         )
-        proximity_result = self.proximity_agent.build_proximity_graph(context)  # Pass context
+        proximity_result = self.proximity_agent.get_proximity_analysis(context)
+        proximity_graph = proximity_result.get("graph", proximity_result)
+        adjacency_graph = proximity_graph.get("adjacency_graph", proximity_result.get("adjacency_graph", {}))
+        nodes = proximity_graph.get("nodes", proximity_result.get("nodes", []))
+        edges = proximity_graph.get("edges", proximity_result.get("edges", []))
+
         cycle_details["steps"]["proximity"] = {
-            "adjacency_graph": proximity_result["adjacency_graph"],
-            "nodes": proximity_result["nodes"],
-            "edges": proximity_result["edges"],
+            "adjacency_graph": adjacency_graph,
+            "nodes": nodes,
+            "edges": edges,
+            "clusters": proximity_result.get("clusters", {}),
+            "cluster_members": proximity_result.get("cluster_members", {}),
+            "largest_clusters": proximity_result.get("largest_clusters", []),
+            "connectivity": proximity_result.get("connectivity", {}),
+            "highly_connected": proximity_result.get("highly_connected", []),
+            "isolated": proximity_result.get("isolated", []),
         }
         publish(
             "proximity",
             "completed",
             "Mapping hypothesis relationships",
-            f"Mapped {len(proximity_result['nodes'])} hypotheses and {len(proximity_result['edges'])} relationships.",
+            f"Mapped {len(nodes)} hypotheses and {len(edges)} relationships.",
             elapsed_seconds=time.perf_counter() - phase_started,
         )
 
@@ -450,7 +461,7 @@ class SupervisorAgent:
             "Synthesizing the research review",
             "Summarizing the strongest candidates, remaining weaknesses, and suggested next steps.",
         )
-        overview = self.meta_review_agent.summarize_and_feedback(context, proximity_result["adjacency_graph"])
+        overview = self.meta_review_agent.summarize_and_feedback(context, adjacency_graph)
         cycle_details["meta_review"] = overview
         # Add meta-review to steps for consistency
         cycle_details["steps"]["meta_review"] = overview
