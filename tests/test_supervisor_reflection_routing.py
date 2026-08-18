@@ -25,12 +25,13 @@ def _hypothesis(hypothesis_id: str, recommendation: str | None) -> Hypothesis:
 def test_supervisor_only_sends_reflection_accepted_hypotheses_to_ranking():
     accepted = _hypothesis("H-accept", "ACCEPT")
     revise = _hypothesis("H-revise", "REVISE")
+    rejected = _hypothesis("H-reject", "REJECT")
     unreviewed = _hypothesis("H-unreviewed", None)
     evolved_accepted = _hypothesis("E-accept", "ACCEPT")
     evolved_revise = _hypothesis("E-revise", "REVISE")
 
     context = ContextMemory()
-    for hypothesis in (accepted, revise, unreviewed):
+    for hypothesis in (accepted, revise, rejected, unreviewed):
         context.add_hypothesis(hypothesis)
 
     supervisor = SupervisorAgent()
@@ -74,13 +75,16 @@ def test_supervisor_only_sends_reflection_accepted_hypotheses_to_ranking():
     assert second_call.args[0] == [accepted, evolved_accepted]
     assert second_call.kwargs["new_hypotheses"] == [evolved_accepted]
 
+    assert rejected.is_active is False
     assert details["steps"]["reflection"]["routing"] == {
         "accepted": ["H-accept"],
         "revise": ["H-revise"],
+        "rejected": ["H-reject"],
         "unreviewed": ["H-unreviewed"],
     }
     assert details["steps"]["reflection_evolved"]["routing"] == {
         "accepted": ["E-accept"],
         "revise": ["E-revise"],
+        "rejected": [],
         "unreviewed": [],
     }

@@ -381,12 +381,49 @@ def test_reflection_retries_invalid_review_values():
         context = ContextMemory()
         review = call_llm_for_reflection(hypothesis, research_goal, context)
 
-    assert review["novelty_review"] == "LOW"  # 2 converts to LOW
-    assert review["feasibility_review"] == "HIGH"  # 8 converts to HIGH
-    assert review["novelty_score"] == 2
-    assert review["feasibility_score"] == 8
-    assert review["recommendation"] == "REVISE"  # novelty_score of 2 is below 4
-    assert mock_call.call_count == 2
+        assert review["novelty_review"] == "LOW"  # 2 converts to LOW
+        assert review["feasibility_review"] == "HIGH"  # 8 converts to HIGH
+        assert review["novelty_score"] == 2
+        assert review["feasibility_score"] == 8
+        assert review["recommendation"] == "REJECT"  # score < 3 is REJECT
+        assert mock_call.call_count == 2
+
+
+def test_reflection_three_tier_recommendations():
+    from app.agents_modules.reflection_helpers import _recommendation_from_scores
+
+    # All >= 5 -> ACCEPT
+    assert _recommendation_from_scores({
+        "alignment_score": 5, "novelty_score": 6, "feasibility_score": 7,
+        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
+        "expected_research_value_score": 10,
+    }) == "ACCEPT"
+
+    # Any in [3, 4] and none < 3 -> REVISE
+    assert _recommendation_from_scores({
+        "alignment_score": 5, "novelty_score": 4, "feasibility_score": 7,
+        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
+        "expected_research_value_score": 10,
+    }) == "REVISE"
+
+    assert _recommendation_from_scores({
+        "alignment_score": 3, "novelty_score": 6, "feasibility_score": 7,
+        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
+        "expected_research_value_score": 10,
+    }) == "REVISE"
+
+    # Any < 3 -> REJECT
+    assert _recommendation_from_scores({
+        "alignment_score": 2, "novelty_score": 6, "feasibility_score": 7,
+        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
+        "expected_research_value_score": 10,
+    }) == "REJECT"
+
+    assert _recommendation_from_scores({
+        "alignment_score": 1, "novelty_score": 1, "feasibility_score": 1,
+        "plausibility_score": 1, "testability_score": 1, "evidence_quality_score": 1,
+        "expected_research_value_score": 1,
+    }) == "REJECT"
 
 
 def test_reflection_rejects_model_references_when_no_verified_sources_exist():

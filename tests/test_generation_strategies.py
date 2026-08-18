@@ -236,3 +236,30 @@ def test_focus_area_is_immutable():
 def test_focus_area_default_suggested_queries_is_empty_tuple():
     fa = FocusArea(area_id="fa_1", description="D", rationale="R")
     assert fa.suggested_queries == ()
+
+
+def test_generation_formats_meta_review_feedback():
+    from app.agents_modules.generation import GenerationAgent
+    from app.models import ContextMemory
+
+    agent = GenerationAgent()
+    context = ContextMemory()
+
+    # Empty feedback returns empty string
+    assert agent._format_meta_review_feedback(context) == ""
+
+    # Non-empty feedback formats critiques and next steps
+    context.meta_review_feedback = [
+        {
+            "meta_review_critique": ["Low novelty detected across hypotheses."],
+            "research_overview": {
+                "suggested_next_steps": ["Explore alternative mechanisms."],
+            },
+        }
+    ]
+    formatted = agent._format_meta_review_feedback(context)
+    assert "Prior cycle review critique:" in formatted
+    assert "Low novelty detected across hypotheses." in formatted
+    assert "Prior cycle recommended next steps:" in formatted
+    assert "Explore alternative mechanisms." in formatted
+

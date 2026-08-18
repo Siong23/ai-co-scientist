@@ -800,3 +800,19 @@ def test_ranking_abstains_without_reflection_report():
     assert decision.scores_a == {}
     assert decision.scores_b == {}
     assert "ReflectionReport" in decision.reasoning
+
+
+def test_ranking_model_resolution_from_config():
+    from app.agents_modules.ranking_helpers import _get_ranking_model
+
+    # When ranking_llm_model is configured in config dict
+    with patch("app.config.config", {"ranking_llm_model": "custom/ranking-model", "llm_model": "default/model"}):
+        assert _get_ranking_model() == "custom/ranking-model"
+
+    # When ranking_llm_model is None or empty, fall back to llm_model
+    with patch("app.config.config", {"ranking_llm_model": None, "llm_model": "default/model"}):
+        assert _get_ranking_model() == "default/model"
+
+    with patch("app.config.config", {"llm_model": "default/model"}):
+        assert _get_ranking_model() == "default/model"
+

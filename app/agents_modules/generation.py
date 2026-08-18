@@ -287,6 +287,24 @@ class GenerationAgent:
 
         self.paper_library = paper_library or ChromaPaperLibrary(embeddings=self.rag_retriever.embeddings)
 
+    def _format_meta_review_feedback(self, context: ContextMemory) -> str:
+        """Format prior-cycle meta-review critiques and suggestions for prompt injection."""
+        if not getattr(context, "meta_review_feedback", None):
+            return ""
+        latest = context.meta_review_feedback[-1]
+        critiques = latest.get("meta_review_critique", [])
+        next_steps = (latest.get("research_overview", {}) or {}).get("suggested_next_steps", [])
+        sections = []
+        if critiques:
+            critique_text = "\n".join(f"- {c}" for c in critiques)
+            sections.append(f"Prior cycle review critique:\n{critique_text}")
+        if next_steps:
+            steps_text = "\n".join(f"- {s}" for s in next_steps)
+            sections.append(f"Prior cycle recommended next steps:\n{steps_text}")
+        if not sections:
+            return ""
+        return "Prior cycle meta-review feedback to address in this round:\n" + "\n\n".join(sections) + "\n\n"
+
     def _retrieve_scientific_sources(
         self,
         research_goal: ResearchGoal,
@@ -1178,6 +1196,7 @@ Your refined contribution:
             f"Constraints:\n{research_goal.constraints}\n\n"
             "Existing hypotheses to avoid duplicating:\n"
             f"{list(context.hypotheses.keys())}\n\n"
+            f"{self._format_meta_review_feedback(context)}"
             "Explicit requirements validated against the retrieved evidence:\n"
             f"{coverage_map}\n\n"
             "Optional exploration directions (inspiration only, not requirements):\n"

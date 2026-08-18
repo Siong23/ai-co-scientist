@@ -53,6 +53,7 @@ def _reflection_routing(hypotheses: List[Any]) -> Dict[str, List[Any]]:
     routed: Dict[str, List[Any]] = {
         "accepted": [],
         "revise": [],
+        "rejected": [],
         "unreviewed": [],
     }
     for hypothesis in hypotheses:
@@ -60,6 +61,9 @@ def _reflection_routing(hypotheses: List[Any]) -> Dict[str, List[Any]]:
         recommendation = str(getattr(report, "recommendation", "UNREVIEWED")).strip().upper()
         if recommendation == "ACCEPT":
             routed["accepted"].append(hypothesis)
+        elif recommendation == "REJECT":
+            hypothesis.is_active = False
+            routed["rejected"].append(hypothesis)
         elif recommendation == "REVISE":
             routed["revise"].append(hypothesis)
         else:
@@ -240,6 +244,21 @@ class SupervisorAgent:
         self.reflection_agent.review_hypotheses(active_hypos, context, research_goal)
         reflection_routing = _reflection_routing(active_hypos)
         rankable_hypos = reflection_routing["accepted"]
+
+        # Deactivated hypotheses are already handled by _reflection_routing;
+        # log them for visibility.
+        rejected_hypos = reflection_routing.get("rejected", [])
+        if rejected_hypos:
+            _legacy.logger.info(
+                "Deactivated %d REJECT hypothesis(es): %s",
+                len(rejected_hypos),
+                [h.hypothesis_id for h in rejected_hypos],
+            )
+
+        # Attempt to revise REVISE-flagged hypotheses (QG-07).
+        revise_hypos = reflection_routing.get("revise", [])
+        if revise_hypos and hasattr(self.reflection_agent, "revise_hypotheses"):
+            self.reflection_agent.revise_hypotheses(revise_hypos, research_goal)
 
         cycle_details.setdefault("steps", {})[step_name] = {
             "hypotheses": [h.to_dict() for h in active_hypos],

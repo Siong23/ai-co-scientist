@@ -80,6 +80,7 @@ class EvolutionAgent:
                 evidence_sources=evidence_sources,
                 diagnostics=context.last_evolution_attempts,
                 quality_repair_attempts=self.quality_repair_attempts,
+                meta_review_feedback=getattr(context, "meta_review_feedback", None),
             )
             if candidate is None:
                 continue

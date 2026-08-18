@@ -343,3 +343,30 @@ def test_single_parent_runs_only_unary_refinement_strategies():
 
     assert [child.evolution_strategy for child in evolved] == ["feasibility", "simplification", "grounding"]
     assert all(child.parent_ids == ["H1"] for child in evolved)
+
+
+def test_evolution_injects_meta_review_feedback():
+    context = ContextMemory()
+    parent = Hypothesis("H1", "Seed", "A seed hypothesis.")
+    context.add_hypothesis(parent)
+    context.meta_review_feedback = [
+        {
+            "meta_review_critique": ["Explore orthogonal mechanisms."],
+            "research_overview": {
+                "suggested_next_steps": ["Use out_of_box strategy."],
+            },
+        }
+    ]
+    agent = EvolutionAgent(strategies=("feasibility",), max_candidates_per_cycle=1)
+
+    with patch(
+        "app.agents.call_llm",
+        return_value='{"title": "Feasible", "hypothesis": "A feasible hypothesis addressing critiques."}',
+    ) as call_llm:
+        agent.evolve_hypotheses(context, _goal(top_k=1))
+
+    prompt = call_llm.call_args.args[0]
+    assert "Prior cycle meta-review feedback to address:" in prompt
+    assert "Explore orthogonal mechanisms." in prompt
+    assert "Use out_of_box strategy." in prompt
+

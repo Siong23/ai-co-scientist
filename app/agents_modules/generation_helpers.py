@@ -64,10 +64,16 @@ def _normalise_generation_candidate(candidate: object) -> Dict | None:
 
     if not isinstance(candidate, dict):
         return None
-    normalised = {_GENERATION_FIELD_ALIASES.get(key, key): value for key, value in candidate.items()}
+    normalised = {
+        _GENERATION_FIELD_ALIASES.get(key, key): value
+        for key, value in candidate.items()
+    }
     if not _GENERATION_REQUIRED_FIELDS.issubset(normalised):
         return None
-    if not all(isinstance(normalised[field], str) for field in _GENERATION_REQUIRED_FIELDS - {"source_ids"}):
+    if not all(
+        isinstance(normalised[field], str)
+        for field in _GENERATION_REQUIRED_FIELDS - {"source_ids"}
+    ):
         return None
     if not isinstance(normalised["source_ids"], list):
         return None
@@ -187,9 +193,16 @@ def _parse_generation_response(response: str) -> List[Dict]:
                     break
 
         if isinstance(hypotheses_data, list):
-            hypotheses_data = [_normalise_generation_candidate(candidate) for candidate in hypotheses_data]
+            hypotheses_data = [
+                _normalise_generation_candidate(candidate)
+                for candidate in hypotheses_data
+            ]
 
-        if not isinstance(hypotheses_data, list) or not hypotheses_data or not all(hypotheses_data):
+        if (
+            not isinstance(hypotheses_data, list)
+            or not hypotheses_data
+            or not all(hypotheses_data)
+        ):
             error_message = (
                 "Invalid JSON format: Expected a hypothesis array with "
                 "'title', 'hypothesis', 'rationale', 'feasibility', and "
@@ -259,7 +272,11 @@ def _recover_incomplete_generation(
                 }
             ]
         if len(parsed) != 1 or parsed[0].get("title") == "Error":
-            detail = parsed[0].get("text", "expected exactly one candidate") if parsed else "empty response"
+            detail = (
+                parsed[0].get("text", "expected exactly one candidate")
+                if parsed
+                else "empty response"
+            )
             return [
                 {
                     "title": "Error",
@@ -312,7 +329,8 @@ def call_llm_for_generation(
         parsed = _parse_generation_response(response)
         if _is_incomplete_generation_error(parsed):
             logger.warning(
-                "The model reported an incomplete generation response; regenerating candidates individually."
+                "The model reported an incomplete generation response; "
+                "regenerating candidates individually."
             )
             return _recover_incomplete_generation(prompt, num_hypotheses, [], model)
         return parsed
@@ -356,7 +374,10 @@ def call_llm_for_generation(
     try:
         repaired = _parse_generation_response(repaired_response)
         if _is_incomplete_generation_error(repaired):
-            logger.warning("Format repair reported missing candidate content; regenerating candidates individually.")
+            logger.warning(
+                "Format repair reported missing candidate content; "
+                "regenerating candidates individually."
+            )
             return _recover_incomplete_generation(prompt, num_hypotheses, [], model)
         return repaired
     except ValueError as exc:
@@ -379,7 +400,9 @@ def call_llm_for_search_queries(
     query_count: int = 5,
     research_planner_prompt: str | None = None,
     query_rewriter_prompt: str | None = None,
-    query_fidelity_validator: (Callable[[SearchQueryPlan], tuple[bool, str]] | None) = None,
+    query_fidelity_validator: (
+        Callable[[SearchQueryPlan], tuple[bool, str]] | None
+    ) = None,
 ) -> tuple[SearchQueryPlan | None, str | None]:
     """Plan the research first, then rewrite the plan into search queries."""
 
@@ -415,7 +438,9 @@ def call_llm_for_search_queries(
     ) -> tuple[ProvisionalHypothesis, ...]:
         raw_hypotheses = payload.get("provisional_hypotheses")
         if not isinstance(raw_hypotheses, list):
-            raise ValueError("Research Planner must return provisional_hypotheses.")
+            raise ValueError(
+                "Research Planner must return provisional_hypotheses."
+            )
 
         normalized_goal = " ".join(research_goal.casefold().split())
         hypotheses: list[ProvisionalHypothesis] = []
@@ -424,7 +449,9 @@ def call_llm_for_search_queries(
         for raw_hypothesis in raw_hypotheses:
             if not isinstance(raw_hypothesis, dict):
                 continue
-            hypothesis_id = str(raw_hypothesis.get("hypothesis_id", "")).strip()
+            hypothesis_id = str(
+                raw_hypothesis.get("hypothesis_id", "")
+            ).strip()
             role = str(raw_hypothesis.get("role", "")).strip().casefold()
             statement = str(raw_hypothesis.get("statement", "")).strip()
             goal_quote = str(raw_hypothesis.get("goal_quote", "")).strip()
@@ -453,7 +480,10 @@ def call_llm_for_search_queries(
             )
 
         if seen_roles != {"primary", "alternative", "null"}:
-            raise ValueError("Expected one goal-anchored primary, alternative, and null provisional hypothesis.")
+            raise ValueError(
+                "Expected one goal-anchored primary, alternative, and null "
+                "provisional hypothesis."
+            )
         return tuple(hypotheses)
 
     def parse_research_plan(response: str) -> dict:
@@ -538,7 +568,9 @@ def call_llm_for_search_queries(
             raise ValueError("Expected 1 to 5 unique explicit requirements with verbatim goal quotes.")
 
         valid_requirement_ids = {aspect.aspect_id for aspect in explicit_requirements}
-        valid_hypothesis_ids = {hypothesis.hypothesis_id for hypothesis in provisional_hypotheses}
+        valid_hypothesis_ids = {
+            hypothesis.hypothesis_id for hypothesis in provisional_hypotheses
+        }
 
         def normalize_domain(value: object) -> str:
             candidate = str(value or "").strip().casefold()
@@ -601,7 +633,11 @@ def call_llm_for_search_queries(
                 if not isinstance(raw_domains, list):
                     raise ValueError("Query preferred_domains must be an array.")
                 preferred_domains = tuple(
-                    dict.fromkeys(domain for domain in (normalize_domain(value) for value in raw_domains) if domain)
+                    dict.fromkeys(
+                        domain
+                        for domain in (normalize_domain(value) for value in raw_domains)
+                        if domain
+                    )
                 )
                 source_type = str(raw_query.get("source_type") or "").strip().casefold()
                 if not source_type:
@@ -610,11 +646,17 @@ def call_llm_for_search_queries(
                     raise ValueError("Query source_type must be academic, web, official, or news.")
                 requirement_id = str(raw_query.get("evidence_requirement_id") or "").strip() or None
                 if requirement_id and requirement_id not in valid_requirement_ids:
-                    raise ValueError(f"Unknown evidence_requirement_id {requirement_id!r}.")
-                hypothesis_id = str(raw_query.get("hypothesis_id") or "").strip() or None
+                    raise ValueError(
+                        f"Unknown evidence_requirement_id {requirement_id!r}."
+                    )
+                hypothesis_id = str(
+                    raw_query.get("hypothesis_id") or ""
+                ).strip() or None
                 if hypothesis_id and hypothesis_id not in valid_hypothesis_ids:
                     raise ValueError(f"Unknown hypothesis_id {hypothesis_id!r}.")
-                search_intent = str(raw_query.get("search_intent") or "goal").strip().casefold()
+                search_intent = str(
+                    raw_query.get("search_intent") or "goal"
+                ).strip().casefold()
                 search_query = SearchQuery(
                     query=query_text,
                     sub_question=str(raw_query.get("sub_question") or ""),
@@ -639,7 +681,9 @@ def call_llm_for_search_queries(
             3 if provisional_hypotheses else 2,
         )
         if not minimum_query_count <= len(normalized_queries) <= query_count:
-            raise ValueError(f"Expected {minimum_query_count} to {query_count} unique search queries.")
+            raise ValueError(
+                f"Expected {minimum_query_count} to {query_count} unique search queries."
+            )
         exploration_directions = tuple(
             dict.fromkeys(
                 direction.strip() for direction in raw_directions if isinstance(direction, str) and direction.strip()
@@ -648,11 +692,14 @@ def call_llm_for_search_queries(
         if len(exploration_directions) > 5:
             raise ValueError("Expected no more than 5 exploration directions.")
         if provisional_hypotheses and query_count >= 3:
-            search_intents = {query.search_intent for query in normalized_queries}
+            search_intents = {
+                query.search_intent for query in normalized_queries
+            }
             required_intents = {"support", "counterevidence", "prior_art"}
             if not required_intents.issubset(search_intents):
                 raise ValueError(
-                    "Hypothesis-guided retrieval requires support, counterevidence, and prior_art queries."
+                    "Hypothesis-guided retrieval requires support, "
+                    "counterevidence, and prior_art queries."
                 )
 
         return SearchQueryPlan(
@@ -693,7 +740,9 @@ USER RESEARCH GOAL
     if legacy_query_response is None:
         try:
             research_plan = parse_research_plan(planner_response)
-            provisional_hypotheses = parse_provisional_hypotheses(research_plan)
+            provisional_hypotheses = parse_provisional_hypotheses(
+                research_plan
+            )
         except (json.JSONDecodeError, ValueError) as exc:
             logger.error("Could not parse Research Planner response: %s", planner_response, exc_info=True)
             return None, f"Query rewriting failed: Research planning failed: {exc}"
@@ -785,9 +834,13 @@ STRUCTURED RESEARCH PLAN
         try:
             query_plan = parse_response(response)
             if query_fidelity_validator is not None:
-                fidelity_valid, fidelity_reason = query_fidelity_validator(query_plan)
+                fidelity_valid, fidelity_reason = query_fidelity_validator(
+                    query_plan
+                )
                 if not fidelity_valid:
-                    raise ValueError("Query fidelity validation failed: " + fidelity_reason)
+                    raise ValueError(
+                        "Query fidelity validation failed: " + fidelity_reason
+                    )
             return query_plan, None
         except (json.JSONDecodeError, AttributeError, ValueError) as exc:
             logger.warning(
@@ -1011,7 +1064,6 @@ def _hypothesis_audit_mode() -> str:
     mode = str(rag_config.get("hypothesis_audit_mode", "balanced")).strip().casefold()
     return mode if mode in {"balanced", "strict"} else "balanced"
 
-
 def _numeric_specificity_not_in_evidence(
     final_hypothesis: dict,
     retrieved_context: str,
@@ -1066,7 +1118,9 @@ def call_llm_for_hypothesis_audit(
         if object_start < 0:
             raise ValueError("No JSON object found in hypothesis audit response.")
 
-        payload, _ = json.JSONDecoder().raw_decode(cleaned[object_start:])
+        payload, _ = json.JSONDecoder().raw_decode(
+            cleaned[object_start:]
+        )
 
         if not isinstance(payload, dict):
             raise ValueError("Hypothesis audit response must be a JSON object.")
@@ -1074,12 +1128,16 @@ def call_llm_for_hypothesis_audit(
         raw_audits = payload.get("audited_hypotheses")
 
         if not isinstance(raw_audits, list) or len(raw_audits) != 1:
-            raise ValueError("Expected exactly one item in 'audited_hypotheses'.")
+            raise ValueError(
+                "Expected exactly one item in 'audited_hypotheses'."
+            )
 
         raw_audit = raw_audits[0]
 
         if not isinstance(raw_audit, dict):
-            raise ValueError("The hypothesis audit item must be a JSON object.")
+            raise ValueError(
+                "The hypothesis audit item must be a JSON object."
+            )
 
         return raw_audit
 
@@ -1143,7 +1201,8 @@ retrieved sources. Return only valid JSON matching the required schema.
             ValueError,
         ) as first_error:
             logger.warning(
-                "Hypothesis audit candidate %d returned malformed/truncated JSON; retrying once: %s",
+                "Hypothesis audit candidate %d returned malformed/truncated JSON; "
+                "retrying once: %s",
                 candidate_index,
                 first_error,
             )
@@ -1197,7 +1256,9 @@ Requirements:
             return None, f"Hypothesis audit retry failed: {retry_response}"
 
         try:
-            raw_audit = _parse_single_audit_response(retry_response)
+            raw_audit = _parse_single_audit_response(
+                retry_response
+            )
             return raw_audit, None
 
         except (
@@ -1207,7 +1268,8 @@ Requirements:
             ValueError,
         ) as retry_error:
             logger.error(
-                "Could not parse hypothesis audit candidate %d after retry. Initial response=%s Retry response=%s",
+                "Could not parse hypothesis audit candidate %d after retry. "
+                "Initial response=%s Retry response=%s",
                 candidate_index,
                 response,
                 retry_response,
@@ -1215,7 +1277,8 @@ Requirements:
             )
             return (
                 None,
-                f"Hypothesis audit failed after retry: {retry_error}",
+                "Hypothesis audit failed after retry: "
+                f"{retry_error}",
             )
 
     def _build_failed_audit(
@@ -1229,14 +1292,19 @@ Requirements:
             "passed": False,
             "final_hypothesis": None,
             "audit_report": {
-                "scores": {score_name: 0.0 for score_name in AUDIT_SCORE_WEIGHTS},
+                "scores": {
+                    score_name: 0.0
+                    for score_name in AUDIT_SCORE_WEIGHTS
+                },
                 "weighted_score": 0.0,
                 "closest_prior_art": [],
                 "draft_unsupported_claims": [],
                 "draft_unsupported_numbers": [],
                 "unsupported_claims": [],
                 "unsupported_numbers": [],
-                "warnings": ["The candidate audit could not be parsed after one retry."],
+                "warnings": [
+                    "The candidate audit could not be parsed after one retry."
+                ],
                 "revision_instruction": "",
                 "verdict": "REJECT",
                 "hard_failures": [
@@ -1266,7 +1334,8 @@ Requirements:
 
         if audit_error or raw_audit is None:
             logger.warning(
-                "Hypothesis candidate %d audit failed after retry; rejecting only this candidate: %s",
+                "Hypothesis candidate %d audit failed after retry; "
+                "rejecting only this candidate: %s",
                 candidate_index,
                 audit_error or "unknown audit error",
             )
@@ -1285,23 +1354,36 @@ Requirements:
             raw_scores = raw_audit.get("scores")
 
             if not isinstance(raw_scores, dict):
-                raise ValueError("Hypothesis audit scores must be an object.")
+                raise ValueError(
+                    "Hypothesis audit scores must be an object."
+                )
 
             scores: dict[str, float] = {}
 
             for score_name in AUDIT_SCORE_WEIGHTS:
                 score = raw_scores.get(score_name)
 
-                if not isinstance(score, (int, float)) or isinstance(score, bool) or not 0 <= score <= 10:
-                    raise ValueError(f"Invalid audit score: {score_name}.")
+                if (
+                    not isinstance(score, (int, float))
+                    or isinstance(score, bool)
+                    or not 0 <= score <= 10
+                ):
+                    raise ValueError(
+                        f"Invalid audit score: {score_name}."
+                    )
 
                 scores[score_name] = float(score)
 
             # Keep backwards compatibility with accidental 0-1 scoring.
             if scores and max(scores.values()) <= 1:
-                scores = {score_name: score * 10 for score_name, score in scores.items()}
+                scores = {
+                    score_name: score * 10
+                    for score_name, score in scores.items()
+                }
 
-            final_hypothesis = raw_audit.get("final_hypothesis")
+            final_hypothesis = raw_audit.get(
+                "final_hypothesis"
+            )
 
             valid_final = None
             valid_source_ids: list[str] = []
@@ -1314,25 +1396,39 @@ Requirements:
                     "feasibility",
                 )
 
-                if all(
-                    isinstance(
-                        final_hypothesis.get(field),
-                        str,
+                if (
+                    all(
+                        isinstance(
+                            final_hypothesis.get(field),
+                            str,
+                        )
+                        and final_hypothesis[field].strip()
+                        for field in required_fields
                     )
-                    and final_hypothesis[field].strip()
-                    for field in required_fields
-                ) and isinstance(
-                    final_hypothesis.get("source_ids"),
-                    list,
+                    and isinstance(
+                        final_hypothesis.get("source_ids"),
+                        list,
+                    )
                 ):
-                    valid_source_ids = _resolve_retrieved_source_ids(
-                        final_hypothesis["source_ids"],
-                        available_source_ids,
+                    valid_source_ids = (
+                        _resolve_retrieved_source_ids(
+                            final_hypothesis[
+                                "source_ids"
+                            ],
+                            available_source_ids,
+                        )
                     )
 
                     if valid_source_ids:
-                        valid_final = {field: final_hypothesis[field].strip() for field in required_fields}
-                        valid_final["source_ids"] = valid_source_ids
+                        valid_final = {
+                            field: final_hypothesis[
+                                field
+                            ].strip()
+                            for field in required_fields
+                        }
+                        valid_final["source_ids"] = (
+                            valid_source_ids
+                        )
 
             draft_unsupported_claims = tuple(
                 dict.fromkeys(
@@ -1344,7 +1440,8 @@ Requirements:
                             [],
                         ),
                     )
-                    if isinstance(value, str) and value.strip()
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
 
@@ -1358,7 +1455,8 @@ Requirements:
                             [],
                         ),
                     )
-                    if isinstance(value, str) and value.strip()
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
 
@@ -1369,7 +1467,8 @@ Requirements:
                         "remaining_unsupported_claims",
                         [],
                     )
-                    if isinstance(value, str) and value.strip()
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
 
@@ -1380,7 +1479,8 @@ Requirements:
                         "remaining_unsupported_numbers",
                         [],
                     )
-                    if isinstance(value, str) and value.strip()
+                    if isinstance(value, str)
+                    and value.strip()
                 )
             )
 
@@ -1412,14 +1512,16 @@ Requirements:
                 if not isinstance(item, dict):
                     continue
 
-                resolved_id = _resolve_retrieved_source_id(
-                    str(
-                        item.get(
-                            "source_id",
-                            "",
-                        )
-                    ),
-                    available_source_ids,
+                resolved_id = (
+                    _resolve_retrieved_source_id(
+                        str(
+                            item.get(
+                                "source_id",
+                                "",
+                            )
+                        ),
+                        available_source_ids,
+                    )
                 )
 
                 if resolved_id is None:
@@ -1452,26 +1554,44 @@ Requirements:
                 )
 
                 audit_warnings.append(
-                    "The final hypothesis contains numeric specificity not found verbatim in the evidence."
+                    "The final hypothesis contains numeric specificity "
+                    "not found verbatim in the evidence."
                 )
 
             weighted_score = round(
-                sum(scores[name] * weight for name, weight in AUDIT_SCORE_WEIGHTS.items()) / 10,
+                sum(
+                    scores[name] * weight
+                    for name, weight
+                    in AUDIT_SCORE_WEIGHTS.items()
+                )
+                / 10,
                 1,
             )
 
             hard_failures = []
 
             if valid_final is None:
-                hard_failures.append("No valid final hypothesis with retrieved citations.")
+                hard_failures.append(
+                    "No valid final hypothesis with retrieved citations."
+                )
 
             if scores["evidence_validity"] < minimum_grounding_score:
-                hard_failures.append(f"Evidence validity score is below {minimum_grounding_score}/10.")
+                hard_failures.append(
+                    "Evidence validity score is below "
+                    f"{minimum_grounding_score}/10."
+                )
 
-            if scores["claim_evidence_entailment"] < minimum_grounding_score:
-                hard_failures.append(f"Claim-evidence entailment score is below {minimum_grounding_score}/10.")
+            if scores[
+                "claim_evidence_entailment"
+            ] < minimum_grounding_score:
+                hard_failures.append(
+                    "Claim-evidence entailment score is below "
+                    f"{minimum_grounding_score}/10."
+                )
 
-            if scores["novelty_against_prior_art"] < 5:
+            if scores[
+                "novelty_against_prior_art"
+            ] < 5:
                 audit_warnings.append(
                     "Novelty score is below 5/10; retaining the grounded "
                     "candidate for downstream reflection and ranking."
@@ -1482,7 +1602,10 @@ Requirements:
                 if audit_mode == "strict":
                     hard_failures.append(message)
                 else:
-                    audit_warnings.append(message + " Retaining it as a testable proposal for downstream review.")
+                    audit_warnings.append(
+                        message
+                        + " Retaining it as a testable proposal for downstream review."
+                    )
 
             # Keep this enabled if you want unsupported numerical claims
             # to be a hard rejection rather than only a warning.
@@ -1491,7 +1614,10 @@ Requirements:
                 if audit_mode == "strict":
                     hard_failures.append(message)
                 else:
-                    audit_warnings.append(message + " Treating the numbers as proposed experimental targets.")
+                    audit_warnings.append(
+                        message
+                        + " Treating the numbers as proposed experimental targets."
+                    )
 
             if weighted_score < 70:
                 audit_warnings.append(
@@ -1519,10 +1645,18 @@ Requirements:
                 "scores": scores,
                 "weighted_score": weighted_score,
                 "closest_prior_art": closest_prior_art,
-                "draft_unsupported_claims": list(draft_unsupported_claims),
-                "draft_unsupported_numbers": (draft_unsupported_numbers),
-                "unsupported_claims": list(unsupported_claims),
-                "unsupported_numbers": (unsupported_numbers),
+                "draft_unsupported_claims": list(
+                    draft_unsupported_claims
+                ),
+                "draft_unsupported_numbers": (
+                    draft_unsupported_numbers
+                ),
+                "unsupported_claims": list(
+                    unsupported_claims
+                ),
+                "unsupported_numbers": (
+                    unsupported_numbers
+                ),
                 "warnings": audit_warnings,
                 "mode": audit_mode,
                 "revision_instruction": str(
@@ -1531,16 +1665,30 @@ Requirements:
                         "",
                     )
                 ).strip(),
-                "verdict": ("REJECT" if hard_failures else ("PASS_WITH_WARNINGS" if audit_warnings else "PASS")),
+                "verdict": (
+                    "REJECT"
+                    if hard_failures
+                    else (
+                        "PASS_WITH_WARNINGS"
+                        if audit_warnings
+                        else "PASS"
+                    )
+                ),
                 "hard_failures": hard_failures,
             }
 
             audits.append(
                 {
-                    "candidate_index": (candidate_index),
+                    "candidate_index": (
+                        candidate_index
+                    ),
                     "passed": not hard_failures,
-                    "final_hypothesis": (valid_final),
-                    "audit_report": (audit_report),
+                    "final_hypothesis": (
+                        valid_final
+                    ),
+                    "audit_report": (
+                        audit_report
+                    ),
                 }
             )
 
@@ -1550,7 +1698,8 @@ Requirements:
             ValueError,
         ) as exc:
             logger.error(
-                "Hypothesis candidate %d returned a structurally invalid audit after JSON parsing.",
+                "Hypothesis candidate %d returned a structurally invalid "
+                "audit after JSON parsing.",
                 candidate_index,
                 exc_info=True,
             )
@@ -1558,7 +1707,8 @@ Requirements:
             audits.append(
                 _build_failed_audit(
                     candidate_index,
-                    f"Hypothesis audit structure validation failed: {exc}",
+                    "Hypothesis audit structure validation failed: "
+                    f"{exc}",
                 )
             )
 
@@ -1570,7 +1720,6 @@ Requirements:
     )
 
     return audits, None
-
 
 def call_llm_for_evidence_coverage(
     research_goal: str,
@@ -1794,6 +1943,7 @@ class FocusArea:
 
 @dataclass(frozen=True)
 class AssumptionAssessment:
+
     """One intermediate assumption considered by the Generation agent."""
 
     assumption_id: str
@@ -2046,7 +2196,10 @@ def call_llm_for_research_action(
     available_sources = available_sources or []
 
     requirement_by_id = {item.aspect_id: item.description for item in explicit_requirements}
-    missing_requirements = [requirement_by_id.get(aspect_id, aspect_id) for aspect_id in coverage.missing_aspect_ids]
+    missing_requirements = [
+        requirement_by_id.get(aspect_id, aspect_id)
+        for aspect_id in coverage.missing_aspect_ids
+    ]
     synthesis_text = format_literature_synthesis(synthesis)
     assumption_text = format_assumption_assessments(assumptions)
     history_text = json.dumps(_compact_search_history(search_history), ensure_ascii=False, indent=2)
@@ -2172,7 +2325,11 @@ Known sources available for OPEN_URL or FIND_IN_PAGE:
         if not isinstance(raw_queries, list):
             raise ValueError("Expected a 'queries' array.")
         queries = tuple(
-            dict.fromkeys(query.strip() for query in raw_queries if isinstance(query, str) and query.strip())
+            dict.fromkeys(
+                query.strip()
+                for query in raw_queries
+                if isinstance(query, str) and query.strip()
+            )
         )[:max_queries]
         raw_source_ids = payload.get("source_ids", [])
         if not isinstance(raw_source_ids, list):
@@ -2180,15 +2337,15 @@ Known sources available for OPEN_URL or FIND_IN_PAGE:
         known_web_source_ids = {
             str(item.get("source_id"))
             for item in available_sources
-            if isinstance(item, dict)
-            and item.get("source_id")
+            if isinstance(item, dict) and item.get("source_id")
             and str(item.get("source_family") or item.get("source_type")) == "web"
         }
         source_ids = tuple(
             dict.fromkeys(
                 source_id.strip()
                 for source_id in raw_source_ids
-                if isinstance(source_id, str) and source_id.strip() in known_web_source_ids
+                if isinstance(source_id, str)
+                and source_id.strip() in known_web_source_ids
             )
         )[:max_queries]
         target = str(payload.get("target", "")).strip()
@@ -2228,7 +2385,9 @@ Known sources available for OPEN_URL or FIND_IN_PAGE:
                     dict.fromkeys(
                         item.search_query
                         for item in assumptions
-                        if item.critical and item.status in {"MIXED", "UNVERIFIED"} and item.search_query
+                        if item.critical
+                        and item.status in {"MIXED", "UNVERIFIED"}
+                        and item.search_query
                     )
                 )[:max_queries]
 
@@ -2382,7 +2541,7 @@ Return ONLY valid JSON with no Markdown or commentary in this exact format:
         starts = [index for index in (cleaned.find("{"), cleaned.find("[")) if index >= 0]
         if not starts:
             return [], "Focus area identification failed: No JSON object found."
-        data, _ = json.JSONDecoder().raw_decode(cleaned[min(starts) :])
+        data, _ = json.JSONDecoder().raw_decode(cleaned[min(starts):])
         if not isinstance(data, dict) or "focus_areas" not in data or not isinstance(data["focus_areas"], list):
             return [], "Focus area identification failed: Expected JSON object with 'focus_areas' array."
 
@@ -2409,6 +2568,7 @@ Return ONLY valid JSON with no Markdown or commentary in this exact format:
     except Exception as exc:
         logger.error("Could not parse focus-area response: %s", response, exc_info=True)
         return [], f"Focus area identification failed: {exc}"
+
 
 
 def call_llm_for_literature_synthesis(
