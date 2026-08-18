@@ -166,7 +166,7 @@ Return only the corrected JSON object using the exact schema above.
 
 
 def _parent_payload(parent: Hypothesis) -> dict:
-    reflection = parent.reflection_report.dict() if parent.reflection_report else None
+    reflection = parent.reflection_report.model_dump() if parent.reflection_report else None
     return {
         "id": parent.hypothesis_id,
         "title": parent.title,
@@ -241,16 +241,38 @@ def _evidence_context(evidence_sources: Sequence[Mapping], *, limit: int = 8) ->
     return json.dumps(evidence, indent=2, ensure_ascii=False)
 
 
+def _format_evolution_meta_review(feedback: Sequence[Mapping] | str | None) -> str:
+    if not feedback:
+        return ""
+    if isinstance(feedback, str):
+        return f"\nPrior cycle meta-review feedback to address:\n{feedback}\n"
+    if isinstance(feedback, (list, tuple)) and feedback:
+        latest = feedback[-1]
+        if isinstance(latest, dict):
+            critiques = latest.get("meta_review_critique", [])
+            next_steps = (latest.get("research_overview", {}) or {}).get("suggested_next_steps", [])
+            parts = []
+            if critiques:
+                parts.append("Critiques:\n" + "\n".join(f"- {c}" for c in critiques))
+            if next_steps:
+                parts.append("Suggested next steps:\n" + "\n".join(f"- {s}" for s in next_steps))
+            if parts:
+                return "\nPrior cycle meta-review feedback to address:\n" + "\n\n".join(parts) + "\n"
+    return ""
+
+
 def build_evolution_prompt(
     strategy: EvolutionStrategy,
     parents: Sequence[Hypothesis],
     research_goal: ResearchGoal,
     *,
     evidence_sources: Sequence[Mapping] | None = None,
+    meta_review_feedback: Sequence[Mapping] | str | None = None,
 ) -> str:
     """Build a strategy-specific prompt grounded in tournament and review state."""
     parent_payload = [_parent_payload(parent) for parent in parents]
     resolved_evidence = resolve_parent_evidence(parents) if evidence_sources is None else list(evidence_sources)
+    feedback_section = _format_evolution_meta_review(meta_review_feedback)
     return f"""
 You are the Evolution agent in a scientific hypothesis tournament. Create exactly one NEW hypothesis; never edit,
 replace, or claim to overwrite a parent. The new hypothesis will be independently reviewed and must compete in the
@@ -264,7 +286,7 @@ Evaluation criteria:
 
 Constraints:
 {json.dumps(research_goal.constraints, indent=2, ensure_ascii=False, default=str)}
-
+{feedback_section}
 Evolution strategy: {strategy}
 Strategy instruction: {_STRATEGY_INSTRUCTIONS[strategy]}
 
@@ -288,6 +310,7 @@ def call_llm_for_evolution(
     evidence_sources: Sequence[Mapping] | None = None,
     diagnostics: list[dict] | None = None,
     quality_repair_attempts: int = 1,
+    meta_review_feedback: Sequence[Mapping] | str | None = None,
 ) -> dict[str, str] | None:
     """Create one evolved candidate through the shared, mockable LLM boundary."""
     base_prompt = build_evolution_prompt(
@@ -295,6 +318,7 @@ def call_llm_for_evolution(
         parents,
         research_goal,
         evidence_sources=evidence_sources,
+        meta_review_feedback=meta_review_feedback,
     )
     prompt = base_prompt
     quality_rejections: list[str] = []

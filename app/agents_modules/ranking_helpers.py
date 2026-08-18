@@ -17,8 +17,17 @@ from .generation_helpers import _call_llm
 # logger=logging.getLogger(__name__)
 
 # Ranking uses a faster, dedicated local model so repeated pairwise decisions do
-# not inherit the much larger generation model's latency.
+# not inherit the much larger generation model's latency.  The model is now read
+# from config.yaml (ranking_llm_model) with fallback to the main llm_model or RANKING_LLM_MODEL.
 RANKING_LLM_MODEL = "qwen/qwen3.6-35b-a3b"
+
+
+def _get_ranking_model() -> str:
+    from ..config import config
+    model = config.get("ranking_llm_model")
+    if model:
+        return model
+    return config.get("llm_model", RANKING_LLM_MODEL)
 
 def clean_markdown(text):
     if not text:
@@ -388,7 +397,7 @@ def generate_debate_argument(
     return _call_llm(
         prompt,
         temperature=0.3,
-        model=RANKING_LLM_MODEL,
+        model=_get_ranking_model(),
         reasoning="off",
     )
 
@@ -475,7 +484,7 @@ def judge_debate(
     return _call_llm(
         prompt,
         temperature=0.2,
-        model=RANKING_LLM_MODEL,
+        model=_get_ranking_model(),
         reasoning="off",
     )
 
@@ -644,7 +653,7 @@ def judge_hypotheses(
     return _call_llm(
         prompt,
         temperature=0.2,
-        model=RANKING_LLM_MODEL,
+        model=_get_ranking_model(),
         reasoning="off",
     )
 

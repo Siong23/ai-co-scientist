@@ -68,3 +68,34 @@ class ReflectionAgent:
                 h.feasibility_review,
             )
 
+    def revise_hypotheses(
+        self, hypotheses: List[Hypothesis], research_goal: ResearchGoal
+    ) -> List[Hypothesis]:
+        """Revise REVISE-flagged hypotheses using LLM revision helper."""
+        revised_list = []
+        for hypo in hypotheses:
+            try:
+                revised = _legacy.call_llm_for_hypothesis_revision(
+                    hypo,
+                    research_goal,
+                    temperature=research_goal.generation_temperature,
+                    model=research_goal.llm_model,
+                )
+                if revised and isinstance(revised, dict):
+                    if revised.get("title"):
+                        hypo.title = revised["title"]
+                    new_text = revised.get("hypothesis") or revised.get("text")
+                    if new_text:
+                        hypo.text = new_text
+                    _legacy.logger.info(
+                        "Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id
+                    )
+                    revised_list.append(hypo)
+            except Exception as exc:
+                _legacy.logger.warning(
+                    "Hypothesis revision failed for %s: %s",
+                    hypo.hypothesis_id,
+                    _legacy.redact_secrets(str(exc)),
+                )
+        return revised_list
+

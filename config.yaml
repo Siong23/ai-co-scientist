@@ -11,20 +11,21 @@ lmstudio_base_url: "http://100.117.90.5:1234/v1"
 # LLM Model. Use a compact free default so the public Hugging Face demo can
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
-# llm_model: "meta-llama/llama-3.2-3b-instruct:free"
-# llm_model: "deepseek-ai_deepseek-r1-0528-qwen3-8b"
-llm_model: "qwen/qwen3.6-35b-a3b"
-query_rewrite_model: "qwen/qwen3.6-35b-a3b"
+
+llm_model: "qwen/qwen3.8-27b"
+# query_rewrite_model: "qwen/qwen3.6-35b-a3b"
+query_rewrite_model: "qwen/qwen3.8-27b"
+
 
 # Number of hypotheses to generate
 num_hypotheses: 4
 
 # Per-provider request timeout. Keeps slow free endpoints from consuming the
 # whole Gradio cycle budget before fallback can try another model.
-llm_request_timeout_seconds: 180
+llm_request_timeout_seconds: 300
 
 # Absorb a transient LM Studio inference-engine 5xx without changing endpoints
-# or losing the native API's explicit reasoning="off" control.
+# or losing the native API's explicit reasoning control.
 lmstudio_native_server_error_retries: 1
 lmstudio_native_retry_backoff_seconds: 1.0
 
@@ -41,6 +42,7 @@ llm_max_tokens:
   format_repair: 2048
   hypothesis_audit: 3072
   evolution: 2048
+  supervisor_planning: 1600
 
 # The Evolution agent follows a rotating library of refinement strategies.
 # It creates new tournament candidates and never overwrites top-ranked parents.
@@ -59,6 +61,11 @@ evolution:
 
 # Elo K-factor
 elo_k_factor: 32
+
+# Dedicated ranking model. Set to null or remove to use the main llm_model for
+# pairwise tournament debates. A smaller, faster model reduces latency when many
+# comparisons run in parallel.
+ranking_llm_model: "qwen/qwen3.6-35b-a3b"
 
 # Top K hypotheses for evolution
 top_k_hypotheses: 2

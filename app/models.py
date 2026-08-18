@@ -84,7 +84,7 @@ class Hypothesis:
             "audit_score": self.audit_score,
             "audit_verdict": self.audit_verdict,
             "audit_report": self.audit_report,
-            "reflection_report": self.reflection_report.dict() if self.reflection_report else None,
+            "reflection_report": self.reflection_report.model_dump() if self.reflection_report else None,
         }
 
 

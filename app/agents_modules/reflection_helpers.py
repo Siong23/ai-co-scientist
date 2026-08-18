@@ -36,8 +36,15 @@ def _parse_string_list(value: object) -> List[str]:
 
 
 def _recommendation_from_scores(scores: Dict[str, int]) -> str:
-    """Return REVISE when any criterion scores below 4, else ACCEPT."""
-    if any(scores.get(field, 0) < 4 for field in _SCORE_FIELDS):
+    """Return REJECT / REVISE / ACCEPT based on minimum criterion scores.
+
+    - REJECT: any criterion scores below 3 (hypothesis should be deactivated).
+    - REVISE: any criterion scores in [3, 4] (hypothesis needs revision).
+    - ACCEPT: all criteria score 5 or above (hypothesis proceeds to ranking).
+    """
+    if any(scores.get(field, 0) < 3 for field in _SCORE_FIELDS):
+        return "REJECT"
+    if any(scores.get(field, 0) < 5 for field in _SCORE_FIELDS):
         return "REVISE"
     return "ACCEPT"
 
@@ -320,7 +327,7 @@ def _hypothesis_revision_context(hypothesis: Hypothesis) -> Dict:
     report = hypothesis.reflection_report
     if isinstance(report, list):
         report = report[-1] if report else None
-    reflection_report = report.dict() if hasattr(report, "dict") else None
+    reflection_report = report.model_dump() if hasattr(report, "model_dump") else None
 
     context: Dict = {
         "hypothesis_id": hypothesis.hypothesis_id,
