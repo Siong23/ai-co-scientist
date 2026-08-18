@@ -7,10 +7,10 @@ from typing import Dict, Optional
 from ..models import ContextMemory
 from ._compat import _legacy
 from .proximity_helpers import (
-    SimilarityScorer,
-    SimilarityConfig,
-    GraphOptimizer,
     BatchSimilarityCalculator,
+    GraphOptimizer,
+    SimilarityConfig,
+    SimilarityScorer,
 )
 
 

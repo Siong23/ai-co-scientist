@@ -54,10 +54,11 @@ class ArxivSearchTool:
         self.last_error_status = None
 
         # Build search query with category filter if provided
-        search_query = query
+        cleaned_query = re.sub(r'["\']', "", query).strip() or query.strip()
+        search_query = cleaned_query
         if categories:
             category_filter = " OR ".join([f"cat:{cat}" for cat in categories])
-            search_query = f"({query}) AND ({category_filter})"
+            search_query = f"({cleaned_query}) AND ({category_filter})"
 
         # Set sort criteria
         sort_criterion = arxiv.SortCriterion.Relevance

@@ -172,7 +172,7 @@ def call_llm(
     try:
         output_token_limit = max_tokens
         if output_token_limit is None:
-            output_token_limit = int(config.get("llm_default_max_tokens", 2048))
+            output_token_limit = int(config.get("llm_default_max_tokens", 8192))
         output_token_limit = max(1, int(output_token_limit))
 
         if reasoning is not None:
@@ -207,6 +207,12 @@ def call_llm(
                         for item in output
                         if isinstance(item, dict) and item.get("type") == "message" and item.get("content")
                     ).strip()
+                    if not content:
+                        content = "\n".join(
+                            str(item.get("content") or item.get("text") or "")
+                            for item in output
+                            if isinstance(item, dict) and (item.get("content") or item.get("text"))
+                        ).strip()
                     if not content:
                         return "Error: LM Studio returned an empty response."
                     return content
@@ -250,7 +256,15 @@ def call_llm(
         )
         if not completion.choices:
             return "Error: LM Studio returned no completion choices."
-        content = completion.choices[0].message.content
+        message = completion.choices[0].message
+        content = getattr(message, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            reasoning_content = getattr(message, "reasoning_content", None)
+            if isinstance(reasoning_content, str) and reasoning_content.strip():
+                content = reasoning_content
+            else:
+                content = ""
+        content = content.strip()
         if not content:
             return "Error: LM Studio returned an empty response."
         return content
@@ -307,7 +321,9 @@ class LMStudioSentenceTransformer:
     """SentenceTransformer-compatible interface backed by LM Studio /v1/embeddings API."""
 
     def __init__(self, model_name: Optional[str] = None):
-        self.model_name = model_name or config.get("sentence_transformer_model", "qwen/text-embedding-qwen3-embedding-8b")
+        self.model_name = model_name or config.get(
+            "sentence_transformer_model", "qwen/text-embedding-qwen3-embedding-8b"
+        )
 
     def encode(
         self,
@@ -373,7 +389,9 @@ def get_sentence_transformer_model():
                 _sentence_transformer_model = SentenceTransformer(model_name)
                 logger.info("Sentence transformer model loaded successfully.")
             except ImportError:
-                logger.error("Failed to import sentence_transformers. Please install it: pip install sentence-transformers")
+                logger.error(
+                    "Failed to import sentence_transformers. Please install it: pip install sentence-transformers"
+                )
                 raise
             except Exception as e:
                 logger.error(f"Failed to load sentence transformer model '{model_name}': {e}")

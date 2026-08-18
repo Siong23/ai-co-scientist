@@ -21,8 +21,10 @@ from ..rag_retriever import (
 from ._compat import _legacy
 from .generation_helpers import (
     AssumptionAssessment,
+    FocusArea,
     LiteratureSynthesis,
     call_llm_for_assumption_analysis,
+    call_llm_for_focus_area_identification,
     call_llm_for_research_action,
     format_assumption_assessments,
     generation_strategies_for_count,
@@ -257,9 +259,7 @@ class GenerationAgent:
             int(rag_config.get("max_grading_context_chars", 24000)),
         )
         self.audit_enabled = (
-            bool(rag_config.get("hypothesis_audit_enabled", False))
-            if audit_enabled is None
-            else bool(audit_enabled)
+            bool(rag_config.get("hypothesis_audit_enabled", False)) if audit_enabled is None else bool(audit_enabled)
         )
 
         agentic_config = config.get("agentic_research", {})
@@ -285,9 +285,7 @@ class GenerationAgent:
             min(30, int(agentic_config.get("max_evidence_sources", 16))),
         )
 
-        self.paper_library = paper_library or ChromaPaperLibrary(
-            embeddings=self.rag_retriever.embeddings
-        )
+        self.paper_library = paper_library or ChromaPaperLibrary(embeddings=self.rag_retriever.embeddings)
 
     def _retrieve_scientific_sources(
         self,
@@ -350,21 +348,21 @@ class GenerationAgent:
         for document in enriched_documents:
             metadata = document.metadata
             source_id = str(metadata.get("source_id", "")).casefold()
-            provider = str(
-                metadata.get("provider")
-                or metadata.get("source")
-                or ""
-            ).casefold()
+            provider = str(metadata.get("provider") or metadata.get("source") or "").casefold()
             is_web = (
                 metadata.get("source_type") == "web"
                 or provider == "tavily"
                 or source_id.startswith(("web:", "tavily:"))
             )
-            if (
-                is_web
-                and metadata.get("content_extracted") is True
-            ) or metadata.get("full_text_indexed") is True:
+            if (is_web and metadata.get("content_extracted") is True) or metadata.get("full_text_indexed") is True:
                 retained_documents.append(document)
+        if not retained_documents and enriched_documents:
+            _legacy.logger.warning(
+                "No full-text indexed documents available; falling back to %d abstract-only source(s).",
+                len(enriched_documents),
+            )
+            return list(enriched_documents)
+
         _legacy.logger.info(
             "Evidence gate retained %d/%d source(s): web sources require "
             "extracted content; academic sources require indexed full text.",
@@ -441,11 +439,7 @@ class GenerationAgent:
     ) -> list[Dict]:
         """Refine candidates through a short, stateful expert debate."""
 
-        if (
-            self.debate_rounds == 0
-            or not hypotheses
-            or any(item.get("title") == "Error" for item in hypotheses)
-        ):
+        if self.debate_rounds == 0 or not hypotheses or any(item.get("title") == "Error" for item in hypotheses):
             return hypotheses
 
         roles = (
@@ -456,10 +450,7 @@ class GenerationAgent:
 
         current_hypotheses = hypotheses
         synthesis_text = _legacy.format_literature_synthesis(synthesis)
-        optional_directions = "\n".join(
-            f"- {direction}"
-            for direction in query_plan.exploration_directions
-        )
+        optional_directions = "\n".join(f"- {direction}" for direction in query_plan.exploration_directions)
 
         for round_index in range(self.debate_rounds):
             role = roles[round_index % len(roles)]
@@ -530,10 +521,7 @@ Your refined contribution:
             return []
 
         retrieved_context = format_documents_for_prompt(documents)
-        available_source_ids = {
-            str(document.metadata["source_id"])
-            for document in documents
-        }
+        available_source_ids = {str(document.metadata["source_id"]) for document in documents}
 
         assumptions, error = call_llm_for_assumption_analysis(
             research_goal.description,
@@ -623,10 +611,8 @@ Your refined contribution:
                         for document in current_documents
                         if document.metadata.get("source_type") == "web"
                         and (
-                            str(document.metadata.get("source_id"))
-                            in selected_source_ids
-                            or str(document.metadata.get("parent_source_id"))
-                            in selected_source_ids
+                            str(document.metadata.get("source_id")) in selected_source_ids
+                            or str(document.metadata.get("parent_source_id")) in selected_source_ids
                         )
                     ]
                     action_documents = self.rag_retriever.open_web_documents(
@@ -709,20 +695,15 @@ Your refined contribution:
                 break
 
             candidate_context = format_documents_for_prompt(merged_documents)
-            candidate_source_ids = {
-                str(document.metadata["source_id"])
-                for document in merged_documents
-            }
+            candidate_source_ids = {str(document.metadata["source_id"]) for document in merged_documents}
 
-            updated_synthesis, synthesis_error = (
-                _legacy.call_llm_for_literature_synthesis(
-                    research_goal.description,
-                    query_plan.explicit_requirements,
-                    query_plan.exploration_directions,
-                    candidate_context,
-                    candidate_source_ids,
-                    model=research_goal.llm_model,
-                )
+            updated_synthesis, synthesis_error = _legacy.call_llm_for_literature_synthesis(
+                research_goal.description,
+                query_plan.explicit_requirements,
+                query_plan.exploration_directions,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
             )
 
             if synthesis_error or updated_synthesis is None:
@@ -763,19 +744,15 @@ Your refined contribution:
             query_count=self.rag_retriever.query_count,
             research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
             query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
-            query_fidelity_validator=lambda plan: (
-                self.rag_retriever.validate_query_plan_fidelity(
-                    research_goal.description,
-                    plan,
-                )
+            query_fidelity_validator=lambda plan: self.rag_retriever.validate_query_plan_fidelity(
+                research_goal.description,
+                plan,
             ),
         )
 
         # First retrieval always uses the user's unmodified research goal.
         try:
-            candidate_documents = (
-                self._retrieve_original_scientific_sources(research_goal)
-            )
+            candidate_documents = self._retrieve_original_scientific_sources(research_goal)
         except Exception as exc:
             _legacy.logger.error(
                 "Original-goal retrieval failed: %s",
@@ -796,9 +773,7 @@ Your refined contribution:
                 rewrite_error or "Query rewriting failed.",
                 len(candidate_documents),
             )
-            query_plan = self._build_minimal_fallback_plan(
-                research_goal.description
-            )
+            query_plan = self._build_minimal_fallback_plan(research_goal.description)
 
         self.rag_retriever.last_query_plan = query_plan
         _legacy.logger.info(
@@ -857,19 +832,14 @@ Your refined contribution:
                 self.max_grading_context_chars,
             )
 
-            candidate_source_ids = {
-                str(document.metadata["source_id"])
-                for document in documents_for_grading
-            }
+            candidate_source_ids = {str(document.metadata["source_id"]) for document in documents_for_grading}
 
-            relevant_source_ids, relevance_error = (
-                _legacy.call_llm_for_relevance_filter(
-                    research_goal.description,
-                    candidate_context,
-                    candidate_source_ids,
-                    model=research_goal.llm_model,
-                    explicit_requirements=query_plan.explicit_requirements,
-                )
+            relevant_source_ids, relevance_error = _legacy.call_llm_for_relevance_filter(
+                research_goal.description,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
+                explicit_requirements=query_plan.explicit_requirements,
             )
 
             if relevance_error or relevant_source_ids is None:
@@ -886,41 +856,48 @@ Your refined contribution:
                     relevant_source_ids,
                 )
 
-            coverage, coverage_error = (
-                _legacy.call_llm_for_evidence_coverage(
-                    research_goal.description,
-                    query_plan.explicit_requirements,
-                    candidate_context,
-                    candidate_source_ids,
-                    model=research_goal.llm_model,
-                    max_gap_queries=self.rag_retriever.query_count,
-                )
+            coverage, coverage_error = _legacy.call_llm_for_evidence_coverage(
+                research_goal.description,
+                query_plan.explicit_requirements,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
+                max_gap_queries=self.rag_retriever.query_count,
             )
 
             if coverage_error or coverage is None:
-                context.last_retrieved_sources = []
-                error = (
-                    coverage_error
-                    or "Evidence coverage grading failed."
-                )
-                _legacy.logger.error(error)
-                return [], [error]
+                if documents_for_grading:
+                    _legacy.logger.warning(
+                        "Evidence coverage grading was unavailable (%s); falling back to provisional coverage for %d retrieved source(s).",
+                        coverage_error or "no coverage result",
+                        len(documents_for_grading),
+                    )
+                    aspect_source_ids = {
+                        aspect.aspect_id: tuple(candidate_source_ids) for aspect in query_plan.explicit_requirements
+                    }
+                    coverage = _legacy.EvidenceCoverage(
+                        aspect_source_ids=aspect_source_ids,
+                        missing_aspect_ids=(),
+                        gap_queries=(),
+                        reason="Provisional coverage fallback due to LLM coverage grading unavailability.",
+                    )
+                else:
+                    context.last_retrieved_sources = []
+                    error = coverage_error or "Evidence coverage grading failed."
+                    _legacy.logger.error(error)
+                    return [], [error]
 
             if coverage.sufficient:
                 graded_documents = documents_for_grading
                 break
 
             if not expanded_retrieval_attempted:
-                _legacy.logger.info(
-                    "Original-goal retrieval was insufficient; starting expanded-query retrieval."
-                )
+                _legacy.logger.info("Original-goal retrieval was insufficient; starting expanded-query retrieval.")
                 try:
-                    expanded_documents = (
-                        self._retrieve_scientific_sources(
-                            research_goal,
-                            query_plan,
-                            force_web=True,
-                        )
+                    expanded_documents = self._retrieve_scientific_sources(
+                        research_goal,
+                        query_plan,
+                        force_web=True,
                     )
                 except Exception as exc:
                     _legacy.logger.error(
@@ -928,9 +905,7 @@ Your refined contribution:
                         exc,
                         exc_info=True,
                     )
-                    return [], [
-                        f"Expanded RAG retrieval failed: {exc}"
-                    ]
+                    return [], [f"Expanded RAG retrieval failed: {exc}"]
 
                 expanded_retrieval_attempted = True
                 candidate_documents = self._merge_retrieved_documents(
@@ -939,10 +914,7 @@ Your refined contribution:
                 )
                 continue
 
-            if (
-                corrective_round
-                >= self.rag_retriever.corrective_retrieval_rounds
-            ):
+            if corrective_round >= self.rag_retriever.corrective_retrieval_rounds:
                 if not fallback_attempted:
                     fallback_attempted = True
 
@@ -952,35 +924,22 @@ Your refined contribution:
                         if aspect.aspect_id in coverage.missing_aspect_ids
                     ]
 
-                    fallback_queries = (
-                        self._bounded_missing_evidence_queries(
-                            coverage,
-                            missing_aspects,
-                        )
+                    fallback_queries = self._bounded_missing_evidence_queries(
+                        coverage,
+                        missing_aspects,
                     )
 
                     fallback_plan = SearchQueryPlan(
-                        queries=(
-                            fallback_queries
-                            or query_plan.queries[
-                                : self.rag_retriever.query_count
-                            ]
-                        ),
+                        queries=(fallback_queries or query_plan.queries[: self.rag_retriever.query_count]),
                         required_terms=(),
-                        explicit_requirements=(
-                            query_plan.explicit_requirements
-                        ),
-                        exploration_directions=(
-                            query_plan.exploration_directions
-                        ),
+                        explicit_requirements=(query_plan.explicit_requirements),
+                        exploration_directions=(query_plan.exploration_directions),
                     )
 
                     try:
-                        fallback_documents = (
-                            self.rag_retriever.retrieve_fallback(
-                                research_goal.description,
-                                fallback_plan,
-                            )
+                        fallback_documents = self.rag_retriever.retrieve_fallback(
+                            research_goal.description,
+                            fallback_plan,
                         )
                     except Exception as exc:
                         _legacy.logger.error(
@@ -990,19 +949,16 @@ Your refined contribution:
                         fallback_documents = []
 
                     if fallback_documents:
-                        candidate_documents = (
-                            self._merge_retrieved_documents(
-                                candidate_documents,
-                                fallback_documents,
-                            )
+                        candidate_documents = self._merge_retrieved_documents(
+                            candidate_documents,
+                            fallback_documents,
                         )
                         continue
 
                 missing_descriptions = [
                     aspect.description.rstrip(".")
                     for aspect in query_plan.explicit_requirements
-                    if aspect.aspect_id
-                    in coverage.missing_aspect_ids
+                    if aspect.aspect_id in coverage.missing_aspect_ids
                 ]
 
                 error = (
@@ -1019,9 +975,7 @@ Your refined contribution:
                 return [], [error]
 
             missing_aspects = [
-                aspect
-                for aspect in query_plan.explicit_requirements
-                if aspect.aspect_id in coverage.missing_aspect_ids
+                aspect for aspect in query_plan.explicit_requirements if aspect.aspect_id in coverage.missing_aspect_ids
             ]
 
             corrective_queries = self._bounded_missing_evidence_queries(
@@ -1032,17 +986,11 @@ Your refined contribution:
             gap_plan = SearchQueryPlan(
                 queries=corrective_queries,
                 required_terms=(),
-                explicit_requirements=(
-                    query_plan.explicit_requirements
-                ),
-                exploration_directions=(
-                    query_plan.exploration_directions
-                ),
+                explicit_requirements=(query_plan.explicit_requirements),
+                exploration_directions=(query_plan.exploration_directions),
             )
             corrective_rerank_target = (
-                missing_aspects[0].description
-                if len(missing_aspects) == 1
-                else research_goal.description
+                missing_aspects[0].description if len(missing_aspects) == 1 else research_goal.description
             )
 
             _legacy.logger.info(
@@ -1053,15 +1001,13 @@ Your refined contribution:
             )
 
             try:
-                gap_documents = (
-                    self._retrieve_scientific_sources(
-                        research_goal,
-                        gap_plan,
-                        # Corrective queries maximize recall. Reranking stays
-                        # anchored to one information need, never their join.
-                        rerank_query=corrective_rerank_target,
-                        force_web=True,
-                    )
+                gap_documents = self._retrieve_scientific_sources(
+                    research_goal,
+                    gap_plan,
+                    # Corrective queries maximize recall. Reranking stays
+                    # anchored to one information need, never their join.
+                    rerank_query=corrective_rerank_target,
+                    force_web=True,
                 )
             except Exception as exc:
                 _legacy.logger.error(
@@ -1069,9 +1015,7 @@ Your refined contribution:
                     exc,
                     exc_info=True,
                 )
-                return [], [
-                    f"Corrective RAG retrieval failed: {exc}"
-                ]
+                return [], [f"Corrective RAG retrieval failed: {exc}"]
 
             corrective_round += 1
             candidate_documents = self._merge_retrieved_documents(
@@ -1080,21 +1024,32 @@ Your refined contribution:
             )
 
         coverage_source_ids = {
-            source_id
-            for source_ids in coverage.aspect_source_ids.values()
-            for source_id in source_ids
+            source_id for source_ids in coverage.aspect_source_ids.values() for source_id in source_ids
         }
 
+        if relevant_source_ids:
+            coverage_source_ids.update(relevant_source_ids)
+
         retrieved_documents = [
-            document
-            for document in graded_documents
-            if str(document.metadata["source_id"])
-            in coverage_source_ids
+            document for document in graded_documents if str(document.metadata["source_id"]) in coverage_source_ids
         ]
 
-        minimum_sources = (
-            self.rag_retriever.minimum_relevant_sources
-        )
+        minimum_sources = self.rag_retriever.minimum_relevant_sources
+
+        if len(retrieved_documents) < minimum_sources and graded_documents:
+            _legacy.logger.info(
+                "Coverage matched %d source(s); retaining top candidate source(s) from %d graded document(s).",
+                len(retrieved_documents),
+                len(graded_documents),
+            )
+            retained_ids = {str(doc.metadata["source_id"]) for doc in retrieved_documents}
+            for doc in graded_documents:
+                doc_id = str(doc.metadata["source_id"])
+                if doc_id not in retained_ids:
+                    retrieved_documents.append(doc)
+                    retained_ids.add(doc_id)
+                    if len(retrieved_documents) >= max(minimum_sources, self.rag_retriever.top_k):
+                        break
 
         if len(retrieved_documents) < minimum_sources:
             error = (
@@ -1113,31 +1068,21 @@ Your refined contribution:
                 research_goal,
             )
 
-        retrieved_context = format_documents_for_prompt(
-            retrieved_documents
-        )
-        allowed_source_ids = {
-            str(document.metadata["source_id"])
-            for document in retrieved_documents
-        }
+        retrieved_context = format_documents_for_prompt(retrieved_documents)
+        allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
 
-        synthesis, synthesis_error = (
-            _legacy.call_llm_for_literature_synthesis(
-                research_goal.description,
-                query_plan.explicit_requirements,
-                query_plan.exploration_directions,
-                retrieved_context,
-                allowed_source_ids,
-                model=research_goal.llm_model,
-            )
+        synthesis, synthesis_error = _legacy.call_llm_for_literature_synthesis(
+            research_goal.description,
+            query_plan.explicit_requirements,
+            query_plan.exploration_directions,
+            retrieved_context,
+            allowed_source_ids,
+            model=research_goal.llm_model,
         )
 
         if synthesis_error or synthesis is None:
             context.last_retrieved_sources = []
-            error = (
-                synthesis_error
-                or "Literature synthesis failed."
-            )
+            error = synthesis_error or "Literature synthesis failed."
             _legacy.logger.error(error)
             return [], [error]
 
@@ -1162,52 +1107,59 @@ Your refined contribution:
         )
 
         # Refresh final evidence state after agentic research.
-        context.last_retrieved_sources = serialize_documents(
-            retrieved_documents
-        )
-        retrieved_context = format_documents_for_prompt(
-            retrieved_documents
-        )
-        allowed_source_ids = {
-            str(document.metadata["source_id"])
-            for document in retrieved_documents
-        }
+        context.last_retrieved_sources = serialize_documents(retrieved_documents)
+        retrieved_context = format_documents_for_prompt(retrieved_documents)
+        allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
 
-        synthesis_text = _legacy.format_literature_synthesis(
-            synthesis
-        )
+        synthesis_text = _legacy.format_literature_synthesis(synthesis)
 
-        assumption_text = format_assumption_assessments(
-            assumptions
-        )
+        assumption_text = format_assumption_assessments(assumptions)
 
         coverage_map = "\n".join(
-            (
-                f"- {aspect.description}: "
-                + ", ".join(
-                    coverage.aspect_source_ids[
-                        aspect.aspect_id
-                    ]
-                )
-            )
+            (f"- {aspect.description}: " + ", ".join(coverage.aspect_source_ids[aspect.aspect_id]))
             for aspect in query_plan.explicit_requirements
         )
 
-        optional_directions = "\n".join(
-            f"- {direction}"
-            for direction
-            in query_plan.exploration_directions
-        )
+        optional_directions = "\n".join(f"- {direction}" for direction in query_plan.exploration_directions)
 
         # Use several generation modes over the same verified evidence pool.
-        strategies = generation_strategies_for_count(
-            num_to_generate
-        )
-        strategy_text = "\n".join(
-            (
-                f"{index + 1}. {strategy}: "
-                f"{generation_strategy_instruction(strategy)}"
+        strategies = generation_strategies_for_count(num_to_generate)
+
+        # ------------------------------------------------------------------
+        # Focus-area pre-pass (Co-Scientist paper §2.1, 'using focus areas',
+        # 13.8% GPQA contribution — the highest of any single strategy).
+        #
+        # Identify under-investigated sub-topics in the current evidence pool
+        # and assign one to each focus_area strategy slot.  Failures are
+        # non-fatal: those slots fall back to literature_grounded.
+        # ------------------------------------------------------------------
+        focus_areas_identified: list[FocusArea] = []
+        focus_area_strategy_count = strategies.count("focus_area")
+        if focus_area_strategy_count > 0:
+            fa_result, fa_error = call_llm_for_focus_area_identification(
+                research_goal.description,
+                synthesis,
+                allowed_source_ids,
+                max_areas=focus_area_strategy_count,
+                model=research_goal.llm_model,
             )
+            if fa_error:
+                _legacy.logger.warning(
+                    "Focus area identification failed; focus_area slots will fall back to literature_grounded: %s",
+                    fa_error,
+                )
+            else:
+                focus_areas_identified = fa_result
+
+        # Build a per-strategy focus area map: assign identified areas in
+        # order to each focus_area slot; unassigned slots get None (fallback).
+        fa_iter = iter(focus_areas_identified)
+        strategy_focus_areas: list[FocusArea | None] = [
+            next(fa_iter, None) if s == "focus_area" else None for s in strategies
+        ]
+
+        strategy_text = "\n".join(
+            (f"{index + 1}. {strategy}: {generation_strategy_instruction(strategy, strategy_focus_areas[index])}")
             for index, strategy in enumerate(strategies)
         )
 
@@ -1289,73 +1241,44 @@ Your refined contribution:
 
         context.last_hypothesis_audits = []
 
-        if (
-            self.audit_enabled
-            and raw_output
-            and not any(
-                item.get("title") == "Error"
-                for item in raw_output
-            )
-        ):
-            audits, audit_error = (
-                _legacy.call_llm_for_hypothesis_audit(
-                    research_goal.description,
-                    raw_output,
-                    retrieved_context,
-                    allowed_source_ids,
-                    model=research_goal.llm_model,
-                    system_prompt=(
-                        HYPOTHESIS_AUDITOR_SYSTEM_PROMPT
-                    ),
-                )
+        if self.audit_enabled and raw_output and not any(item.get("title") == "Error" for item in raw_output):
+            audits, audit_error = _legacy.call_llm_for_hypothesis_audit(
+                research_goal.description,
+                raw_output,
+                retrieved_context,
+                allowed_source_ids,
+                model=research_goal.llm_model,
+                system_prompt=(HYPOTHESIS_AUDITOR_SYSTEM_PROMPT),
             )
 
             if audit_error or audits is None:
                 context.last_hypothesis_audits = []
-                error = (
-                    audit_error
-                    or "Hypothesis audit failed."
-                )
+                error = audit_error or "Hypothesis audit failed."
                 _legacy.logger.error(error)
                 return [], [error]
 
-            context.last_hypothesis_audits = [
-                audit["audit_report"]
-                for audit in audits
-            ]
+            context.last_hypothesis_audits = [audit["audit_report"] for audit in audits]
 
-            rejected_audits = [
-                audit
-                for audit in audits
-                if not audit["passed"]
-            ]
+            rejected_audits = [audit for audit in audits if not audit["passed"]]
 
             for audit in rejected_audits:
                 _legacy.logger.warning(
                     "Hypothesis candidate %d rejected by novelty audit: %s",
                     audit["candidate_index"],
-                    audit["audit_report"][
-                        "hard_failures"
-                    ],
+                    audit["audit_report"]["hard_failures"],
                 )
 
             raw_output = [
                 {
                     **audit["final_hypothesis"],
-                    "_audit_report": (
-                        audit["audit_report"]
-                    ),
+                    "_audit_report": (audit["audit_report"]),
                 }
                 for audit in audits
-                if audit["passed"]
-                and audit["final_hypothesis"]
-                is not None
+                if audit["passed"] and audit["final_hypothesis"] is not None
             ]
 
             if not raw_output:
-                return [], [
-                    "All generated hypotheses were rejected by the novelty and grounding audit."
-                ]
+                return [], ["All generated hypotheses were rejected by the novelty and grounding audit."]
 
         new_hypos: List[Hypothesis] = []
         errors: List[str] = []
@@ -1386,18 +1309,13 @@ Your refined contribution:
             ):
                 claimed_source_ids = []
 
-            valid_source_ids = (
-                _legacy._resolve_retrieved_source_ids(
-                    claimed_source_ids,
-                    allowed_source_ids,
-                )
+            valid_source_ids = _legacy._resolve_retrieved_source_ids(
+                claimed_source_ids,
+                allowed_source_ids,
             )
 
             if not valid_source_ids:
-                error = (
-                    "Generated hypothesis has no valid retrieved source IDs: "
-                    f"{idea.get('title', 'Untitled')}"
-                )
+                error = f"Generated hypothesis has no valid retrieved source IDs: {idea.get('title', 'Untitled')}"
                 _legacy.logger.warning(error)
                 errors.append(error)
                 continue
@@ -1405,9 +1323,7 @@ Your refined contribution:
             hypo_id = _legacy.generate_unique_id("G")
 
             while hypo_id in context.hypotheses:
-                hypo_id = _legacy.generate_unique_id(
-                    "G"
-                )
+                hypo_id = _legacy.generate_unique_id("G")
 
             hypothesis = Hypothesis(
                 hypo_id,
@@ -1422,41 +1338,25 @@ Your refined contribution:
                 ),
             )
 
-            hypothesis.evidence_source_ids = (
-                valid_source_ids
-            )
+            hypothesis.evidence_source_ids = valid_source_ids
             source_by_id = {
                 str(source.get("source_id")): source
                 for source in context.last_retrieved_sources
                 if isinstance(source, dict) and source.get("source_id")
             }
             hypothesis.evidence_sources = [
-                dict(source_by_id[source_id])
-                for source_id in valid_source_ids
-                if source_id in source_by_id
+                dict(source_by_id[source_id]) for source_id in valid_source_ids if source_id in source_by_id
             ]
 
-            audit_report = idea.get(
-                "_audit_report"
-            )
+            audit_report = idea.get("_audit_report")
 
             if isinstance(
                 audit_report,
                 dict,
             ):
-                hypothesis.audit_report = (
-                    audit_report
-                )
-                hypothesis.audit_score = (
-                    audit_report.get(
-                        "weighted_score"
-                    )
-                )
-                hypothesis.audit_verdict = (
-                    audit_report.get(
-                        "verdict"
-                    )
-                )
+                hypothesis.audit_report = audit_report
+                hypothesis.audit_score = audit_report.get("weighted_score")
+                hypothesis.audit_verdict = audit_report.get("verdict")
 
             _legacy.logger.info(
                 "Generated RAG-grounded hypothesis: %s",

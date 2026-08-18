@@ -41,7 +41,7 @@ current_research_goal: Optional[ResearchGoal] = None
 available_models: List[str] = []
 CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
-CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "900"))
+CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "1800"))
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 
 # Configure logging for Gradio
@@ -682,17 +682,12 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     <summary style="cursor: pointer; font-size: 0.9em;">Search details</summary>
                 """
                 if isinstance(provisional_hypotheses, list) and provisional_hypotheses:
-                    html += (
-                        "<p><strong>Provisional retrieval hypotheses "
-                        "(not evidence):</strong></p><ul>"
-                    )
+                    html += "<p><strong>Provisional retrieval hypotheses (not evidence):</strong></p><ul>"
                     for provisional in provisional_hypotheses:
                         if not isinstance(provisional, dict):
                             continue
                         role = html_lib.escape(str(provisional.get("role", "unknown")))
-                        statement = html_lib.escape(
-                            str(provisional.get("statement", ""))
-                        )
+                        statement = html_lib.escape(str(provisional.get("statement", "")))
                         html += f"<li>{role}: {statement}</li>"
                     html += "</ul>"
                 if isinstance(planned_queries, list) and planned_queries:
@@ -701,36 +696,20 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         if not isinstance(query, dict):
                             continue
                         query_text = html_lib.escape(str(query.get("query", "")))
-                        intent = html_lib.escape(
-                            str(query.get("search_intent", "goal"))
-                        )
-                        source_type = html_lib.escape(
-                            str(query.get("source_type", "all"))
-                        )
-                        html += (
-                            f"<li>{intent} · {source_type}: {query_text}</li>"
-                        )
+                        intent = html_lib.escape(str(query.get("search_intent", "goal")))
+                        source_type = html_lib.escape(str(query.get("source_type", "all")))
+                        html += f"<li>{intent} · {source_type}: {query_text}</li>"
                     html += "</ul>"
                 if isinstance(query_fidelity, list) and query_fidelity:
                     checked_queries = [
-                        item
-                        for item in query_fidelity
-                        if isinstance(item, dict) and item.get("kind") == "query"
+                        item for item in query_fidelity if isinstance(item, dict) and item.get("kind") == "query"
                     ]
                     if checked_queries:
-                        accepted = sum(
-                            item.get("accepted") is True
-                            for item in checked_queries
-                        )
-                        html += (
-                            "<p><strong>Query fidelity:</strong> "
-                            f"{accepted}/{len(checked_queries)} accepted</p>"
-                        )
+                        accepted = sum(item.get("accepted") is True for item in checked_queries)
+                        html += f"<p><strong>Query fidelity:</strong> {accepted}/{len(checked_queries)} accepted</p>"
                 if isinstance(search_stats, list) and search_stats:
                     html += "<p><strong>Search providers called:</strong></p><ul>"
-                for stat in (
-                    search_stats if isinstance(search_stats, list) else []
-                ):
+                for stat in search_stats if isinstance(search_stats, list) else []:
                     if not isinstance(stat, dict):
                         continue
                     provider = html_lib.escape(str(stat.get("source", "Unknown")))
@@ -782,12 +761,8 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 for audit in audits:
                     if not isinstance(audit, dict):
                         continue
-                    verdict = html_lib.escape(
-                        str(audit.get("verdict", "UNREVIEWED"))
-                    )
-                    score = html_lib.escape(
-                        str(audit.get("weighted_score", "N/A"))
-                    )
+                    verdict = html_lib.escape(str(audit.get("verdict", "UNREVIEWED")))
+                    score = html_lib.escape(str(audit.get("weighted_score", "N/A")))
                     messages = [
                         str(message).strip()
                         for key in ("hard_failures", "warnings")
@@ -795,19 +770,11 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         if isinstance(message, str) and message.strip()
                     ]
                     message_html = (
-                        "<ul>"
-                        + "".join(
-                            f"<li>{html_lib.escape(message)}</li>"
-                            for message in messages
-                        )
-                        + "</ul>"
+                        "<ul>" + "".join(f"<li>{html_lib.escape(message)}</li>" for message in messages) + "</ul>"
                         if messages
                         else ""
                     )
-                    html += (
-                        f"<li><strong>{verdict} · {score}/100</strong>"
-                        f"{message_html}</li>"
-                    )
+                    html += f"<li><strong>{verdict} · {score}/100</strong>{message_html}</li>"
                 html += "</ol></details>"
         elif step_name in ["reflection", "reflection_evolved"]:
             hypotheses = step_data.get("hypotheses", [])
