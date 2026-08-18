@@ -1245,7 +1245,7 @@ def create_gradio_interface():
         }
         """
 
-    with gr.Blocks(title="Open AI Co-Scientist - Hypothesis Evolution System") as demo:
+    with gr.Blocks(title="AI Co-Scientist - Hypothesis Evolution System") as demo:
         with gr.Sidebar(open=False, width=320, elem_id="research-history-sidebar"):
             gr.Markdown("## Research history")
             gr.Markdown(
