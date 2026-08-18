@@ -41,6 +41,7 @@ llm_max_tokens:
   format_repair: 2048
   hypothesis_audit: 3072
   evolution: 2048
+  supervisor_planning: 1600
 
 # The Evolution agent follows a rotating library of refinement strategies.
 # It creates new tournament candidates and never overwrites top-ranked parents.

@@ -7,11 +7,11 @@ import pytest
 
 from app.agents_modules.proximity import ProximityAgent
 from app.agents_modules.proximity_helpers import (
+    BatchSimilarityCalculator,
+    GraphOptimizer,
+    ProximityTestFactory,
     SimilarityConfig,
     SimilarityScorer,
-    GraphOptimizer,
-    BatchSimilarityCalculator,
-    ProximityTestFactory,
 )
 
 
