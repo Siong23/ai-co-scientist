@@ -120,7 +120,7 @@ def test_generation_repairs_unparsable_output_once():
     assert repair_call.kwargs == {
         "temperature": 0.0,
         "model": "selected-local-model",
-        "max_tokens": 2048,
+        "max_tokens": 4096,
         "reasoning": "off",
     }
     assert "format" in repair_call.args[0].lower()
@@ -161,7 +161,7 @@ def test_generation_recovers_remaining_candidate_after_truncated_json():
     assert recovery_call.kwargs == {
         "temperature": 0.2,
         "model": "selected-local-model",
-        "max_tokens": 3072,
+        "max_tokens": 6144,
         "reasoning": "off",
     }
 

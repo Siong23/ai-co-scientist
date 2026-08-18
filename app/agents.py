@@ -17,6 +17,7 @@ from .agents_modules.evolution_helpers import (
 from .agents_modules.generation import GenerationAgent
 from .agents_modules.generation_helpers import (
     EvidenceCoverage,
+    FocusArea,
     LiteratureFinding,
     LiteratureSynthesis,
     _canonical_arxiv_id,  # noqa: F401
@@ -25,6 +26,7 @@ from .agents_modules.generation_helpers import (
     _resolve_retrieved_source_ids,  # noqa: F401
     call_llm_for_debate_refinement,
     call_llm_for_evidence_coverage,
+    call_llm_for_focus_area_identification,
     call_llm_for_generation,
     call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
@@ -48,8 +50,18 @@ from .agents_modules.reflection_helpers import (
     call_llm_for_reflection,
 )
 from .agents_modules.supervisor import SupervisorAgent
+from .agents_modules.supervisor_planner import (
+    SUPERVISOR_ACTIONS,
+    SupervisorAction,
+    SupervisorDecision,
+    SupervisorPlanner,
+    assess_supervisor_state,
+    build_supervisor_planning_prompt,
+    decide_action_heuristically,
+    parse_supervisor_decision,
+)
 from .evidence import EvidenceChunk, EvidenceDocument, EvidenceSource
-from .models import ContextMemory, Hypothesis, ResearchGoal
+from .models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 from .rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
@@ -79,6 +91,7 @@ __all__ = [
     "EvidenceCoverage",
     "EvolutionAgent",
     "EVOLUTION_STRATEGIES",
+    "FocusArea",
     "GenerationAgent",
     "Hypothesis",
     "LiteratureFinding",
@@ -88,14 +101,22 @@ __all__ = [
     "ProvisionalHypothesis",
     "RankingAgent",
     "ReflectionAgent",
+    "ReflectionReport",
     "ResearchGoal",
     "ResearchRetriever",
+    "SUPERVISOR_ACTIONS",
     "SearchQuery",
     "SearchQueryPlan",
+    "SupervisorAction",
+    "SupervisorDecision",
+    "SupervisorPlanner",
     "SupervisorAgent",
+    "assess_supervisor_state",
+    "build_supervisor_planning_prompt",
     "call_llm",
     "call_llm_for_debate_refinement",
     "call_llm_for_evidence_coverage",
+    "call_llm_for_focus_area_identification",
     "call_llm_for_evolution",
     "call_llm_for_generation",
     "call_llm_for_hypothesis_audit",
@@ -107,6 +128,7 @@ __all__ = [
     "combine_hypotheses",
     "build_evolution_prompt",
     "create_evolved_hypothesis",
+    "decide_action_heuristically",
     "format_documents_for_prompt",
     "format_literature_synthesis",
     "format_references",
@@ -115,6 +137,7 @@ __all__ = [
     "logger",
     "parse_pairwise_result",
     "parse_evolution_response",
+    "parse_supervisor_decision",
     "redact_secrets",
     "run_pairwise_debate",
     "serialize_documents",

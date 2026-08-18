@@ -1915,11 +1915,29 @@ GENERATION_STRATEGIES = (
     "contradiction_driven",
     "conditional_hop",
     "cross_paper_synthesis",
+    "focus_area",
+    "raw_idea",
 )
 
 
 @dataclass(frozen=True)
+class FocusArea:
+    """One under-investigated sub-topic identified for targeted generation.
+
+    The Generation agent identifies these from the literature synthesis before
+    generating hypotheses, matching the Co-Scientist paper's 'using focus areas'
+    strategy (13.8% contribution on GPQA, the highest of any single strategy).
+    """
+
+    area_id: str
+    description: str
+    rationale: str
+    suggested_queries: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AssumptionAssessment:
+
     """One intermediate assumption considered by the Generation agent."""
 
     assumption_id: str
@@ -2413,8 +2431,14 @@ def generation_strategies_for_count(num_hypotheses: int) -> tuple[str, ...]:
     return tuple(GENERATION_STRATEGIES[index % len(GENERATION_STRATEGIES)] for index in range(count))
 
 
-def generation_strategy_instruction(strategy: str) -> str:
-    """Return the prompt instruction for one hypothesis-generation strategy."""
+def generation_strategy_instruction(strategy: str, focus_area: "FocusArea | None" = None) -> str:
+    """Return the prompt instruction for one hypothesis-generation strategy.
+
+    Args:
+        strategy: One of the GENERATION_STRATEGIES keys.
+        focus_area: When strategy is 'focus_area', the pre-identified sub-topic
+            to target.  Ignored for all other strategies.
+    """
 
     instructions = {
         "literature_grounded": (
@@ -2433,11 +2457,112 @@ def generation_strategy_instruction(strategy: str) -> str:
             "Identify findings from different retrieved sources that have not clearly been tested together. "
             "Propose a specific interaction or boundary-condition hypothesis rather than merely combining keywords."
         ),
+        "focus_area": (
+            "Generate a hypothesis that directly targets the following under-investigated sub-topic "
+            "identified from the evidence: {focus_area_description}. "
+            "Rationale for focus: {focus_area_rationale}. "
+            "Your hypothesis must address this specific gap; cite only retrieved sources that bear on it."
+        ),
+        "raw_idea": (
+            "Generate a high-diversity speculative hypothesis that synthesises surprising or "
+            "non-obvious connections across retrieved sources. "
+            "Bold inference is encouraged; clearly label any step that goes beyond established evidence. "
+            "You may cite a single retrieved source if the claim follows primarily from one paper, "
+            "but the hypothesis itself must be original and not already present in the cited text."
+        ),
     }
     normalized = strategy.strip().casefold()
     if normalized not in instructions:
         raise ValueError(f"Unknown generation strategy: {strategy}.")
-    return instructions[normalized]
+    template = instructions[normalized]
+    if normalized == "focus_area":
+        if focus_area is None:
+            # Graceful degradation: fall back to literature-grounded when no
+            # focus area was identified (e.g. identification LLM call failed).
+            return instructions["literature_grounded"]
+        return template.format(
+            focus_area_description=focus_area.description,
+            focus_area_rationale=focus_area.rationale,
+        )
+    return template
+
+
+def call_llm_for_focus_area_identification(
+    research_goal: str,
+    synthesis: LiteratureSynthesis,
+    available_source_ids: set[str],
+    max_areas: int = 3,
+    model: str | None = None,
+) -> tuple[list[FocusArea], str | None]:
+    """Identify under-investigated sub-topics from the literature synthesis for targeted generation."""
+    capped_max = min(5, max(1, int(max_areas)))
+    prompt = f"""You are analyzing a literature synthesis to identify under-investigated focus areas.
+
+RESEARCH GOAL:
+{research_goal}
+
+LITERATURE SYNTHESIS:
+{format_literature_synthesis(synthesis)}
+
+Identify up to {capped_max} specific, high-priority focus areas (under-investigated sub-topics or evidence gaps) that merit targeted hypothesis generation.
+Return ONLY valid JSON with no Markdown or commentary in this exact format:
+{{
+  "focus_areas": [
+    {{
+      "area_id": "fa_1",
+      "description": "<Clear description of the under-investigated focus area>",
+      "rationale": "<Why this focus area is promising and under-addressed>",
+      "suggested_queries": ["<optional search query>"]
+    }}
+  ]
+}}"""
+    response = _call_llm(
+        prompt,
+        temperature=0.2,
+        model=model,
+        max_tokens=_output_token_limit("focus_area_identification", 1200),
+        reasoning="off",
+    )
+    if response.startswith("Error:"):
+        return [], f"Focus area identification failed: {response}"
+
+    cleaned = response.strip()
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        cleaned = match.group(1).strip()
+
+    try:
+        starts = [index for index in (cleaned.find("{"), cleaned.find("[")) if index >= 0]
+        if not starts:
+            return [], "Focus area identification failed: No JSON object found."
+        data, _ = json.JSONDecoder().raw_decode(cleaned[min(starts):])
+        if not isinstance(data, dict) or "focus_areas" not in data or not isinstance(data["focus_areas"], list):
+            return [], "Focus area identification failed: Expected JSON object with 'focus_areas' array."
+
+        results: list[FocusArea] = []
+        for i, item in enumerate(data["focus_areas"][:capped_max], 1):
+            if not isinstance(item, dict):
+                continue
+            desc = str(item.get("description", "")).strip()
+            rat = str(item.get("rationale", "")).strip()
+            if not desc or not rat:
+                continue
+            area_id = str(item.get("area_id") or f"fa_{i}").strip()
+            queries = item.get("suggested_queries", [])
+            suggested = tuple(str(q).strip() for q in queries if str(q).strip()) if isinstance(queries, list) else ()
+            results.append(
+                FocusArea(
+                    area_id=area_id,
+                    description=desc,
+                    rationale=rat,
+                    suggested_queries=suggested,
+                )
+            )
+        return results, None
+    except Exception as exc:
+        logger.error("Could not parse focus-area response: %s", response, exc_info=True)
+        return [], f"Focus area identification failed: {exc}"
+
 
 
 def call_llm_for_literature_synthesis(

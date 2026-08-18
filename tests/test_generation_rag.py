@@ -639,7 +639,7 @@ def test_hypothesis_auditor_revises_and_passes_a_grounded_candidate():
         "temperature": 0.0,
         "model": "audit-model",
         "system_prompt": "auditor system prompt",
-        "max_tokens": 3072,
+        "max_tokens": 4096,
         "reasoning": "off",
     }
 
@@ -1189,7 +1189,7 @@ def test_relevance_grader_keeps_only_known_directly_relevant_sources():
     assert mock_call.call_args.kwargs == {
         "temperature": 0.0,
         "model": "chosen-model",
-        "max_tokens": 512,
+        "max_tokens": 1024,
         "reasoning": "off",
     }
     grader_prompt = mock_call.call_args.args[0]

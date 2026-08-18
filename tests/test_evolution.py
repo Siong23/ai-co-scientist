@@ -154,7 +154,7 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
     assert call_llm.call_args_list[0].kwargs == {
         "temperature": 0.7,
         "model": "offline-model",
-        "max_tokens": 2048,
+        "max_tokens": 3072,
         "reasoning": "off",
     }
     assert "never edit" in call_llm.call_args_list[0].args[0]
@@ -226,6 +226,13 @@ def test_supervisor_exposes_evolution_attempts_in_cycle_details():
         "adjacency_graph": {},
         "nodes": [],
         "edges": [],
+        "clusters": {},
+        "cluster_labels": {},
+        "outliers": [],
+        "exemplars": [],
+        "near_duplicates": [],
+        "diversity_score": 0.0,
+        "mean_similarities": {},
     }
     supervisor.meta_review_agent = Mock()
     supervisor.meta_review_agent.summarize_and_feedback.return_value = {}
