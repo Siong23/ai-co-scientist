@@ -809,13 +809,13 @@ def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
         agentic_research_enabled=False,
     )
     with (
-        patch("app.agents.call_llm_for_search_queries", return_value=(plan, None)),
+        patch("app.agents_modules.generation.call_llm_for_search_queries", return_value=(plan, None)),
         patch.object(agent, "_retrieve_scientific_sources", return_value=[document]),
-        patch("app.agents.call_llm_for_relevance_filter", return_value=([source_id], None)),
-        patch("app.agents.call_llm_for_evidence_coverage", return_value=(coverage, None)),
-        patch("app.agents.call_llm_for_literature_synthesis", return_value=(synthesis, None)),
-        patch("app.agents.call_llm_for_generation", return_value=[draft]),
-        patch("app.agents.call_llm_for_hypothesis_audit", return_value=([audit], None)),
+        patch("app.agents_modules.generation.call_llm_for_relevance_filter", return_value=([source_id], None)),
+        patch("app.agents_modules.generation.call_llm_for_evidence_coverage", return_value=(coverage, None)),
+        patch("app.agents_modules.generation.call_llm_for_literature_synthesis", return_value=(synthesis, None)),
+        patch("app.agents_modules.generation.call_llm_for_generation", return_value=[draft]),
+        patch("app.agents_modules.generation.call_llm_for_hypothesis_audit", return_value=([audit], None)),
     ):
         context = ContextMemory()
         hypotheses, errors = agent.generate_new_hypotheses(
@@ -2446,11 +2446,11 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
             return_value=documents,
         ),
         patch(
-            "app.agents.call_llm_for_relevance_filter",
+            "app.agents_modules.generation.call_llm_for_relevance_filter",
             return_value=([], None),
         ),
         patch(
-            "app.agents.call_llm_for_evidence_coverage",
+            "app.agents_modules.generation.call_llm_for_evidence_coverage",
             side_effect=audit_all_candidates,
         ),
     ):
@@ -2696,7 +2696,7 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
             ],
         ) as mock_retrieve,
         patch(
-            "app.agents.call_llm_for_relevance_filter",
+            "app.agents_modules.generation.call_llm_for_relevance_filter",
             side_effect=[
                 (["arXiv:1111.1111"], None),
                 (
@@ -2709,7 +2709,7 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
             ],
         ),
         patch(
-            "app.agents.call_llm_for_evidence_coverage",
+            "app.agents_modules.generation.call_llm_for_evidence_coverage",
             side_effect=[
                 (first_coverage, None),
                 (complete_coverage, None),
@@ -2796,11 +2796,11 @@ def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
             side_effect=[[document], []],
         ) as mock_retrieve,
         patch(
-            "app.agents.call_llm_for_relevance_filter",
+            "app.agents_modules.generation.call_llm_for_relevance_filter",
             return_value=(["arXiv:1111.1111"], None),
         ),
         patch(
-            "app.agents.call_llm_for_evidence_coverage",
+            "app.agents_modules.generation.call_llm_for_evidence_coverage",
             return_value=(incomplete_coverage, None),
         ),
         patch.object(
@@ -2911,14 +2911,14 @@ def test_semantic_scholar_fallback_can_fill_gap_after_arxiv_is_exhausted():
             return_value=[fallback_document],
         ) as mock_fallback,
         patch(
-            "app.agents.call_llm_for_relevance_filter",
+            "app.agents_modules.generation.call_llm_for_relevance_filter",
             side_effect=[
                 (["arXiv:1111.1111"], None),
                 (["arXiv:1111.1111", "s2:outcome"], None),
             ],
         ),
         patch(
-            "app.agents.call_llm_for_evidence_coverage",
+            "app.agents_modules.generation.call_llm_for_evidence_coverage",
             side_effect=[
                 (incomplete_coverage, None),
                 (complete_coverage, None),
@@ -2986,7 +2986,7 @@ def test_generation_debate_runs_three_stateful_refinement_turns():
         ]
 
     with patch(
-        "app.agents.call_llm_for_debate_refinement",
+        "app.agents_modules.generation.call_llm_for_debate_refinement",
         side_effect=[
             (refined("Evidence refined"), None),
             (refined("Methods refined"), None),
@@ -3038,7 +3038,7 @@ def test_generation_debate_keeps_last_valid_turn_when_next_turn_fails():
     first_refinement = [{**initial[0], "title": "First valid turn"}]
 
     with patch(
-        "app.agents.call_llm_for_debate_refinement",
+        "app.agents_modules.generation.call_llm_for_debate_refinement",
         side_effect=[
             (first_refinement, None),
             (None, "invalid JSON"),

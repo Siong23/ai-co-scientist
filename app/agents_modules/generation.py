@@ -18,15 +18,25 @@ from ..rag_retriever import (
     format_documents_for_prompt,
     serialize_documents,
 )
-from ._compat import _legacy
+from ..utils import generate_unique_id, logger, redact_secrets
 from .generation_helpers import (
     AssumptionAssessment,
+    EvidenceCoverage,
     FocusArea,
     LiteratureSynthesis,
+    _resolve_retrieved_source_ids,
     call_llm_for_assumption_analysis,
+    call_llm_for_debate_refinement,
+    call_llm_for_evidence_coverage,
     call_llm_for_focus_area_identification,
+    call_llm_for_generation,
+    call_llm_for_hypothesis_audit,
+    call_llm_for_literature_synthesis,
+    call_llm_for_relevance_filter,
     call_llm_for_research_action,
+    call_llm_for_search_queries,
     format_assumption_assessments,
+    format_literature_synthesis,
     generation_strategies_for_count,
     generation_strategy_instruction,
 )
@@ -351,9 +361,9 @@ class GenerationAgent:
                 research_goal.description,
             )
         except Exception as exc:
-            _legacy.logger.warning(
+            logger.warning(
                 "Paper download/vector indexing failed; continuing with abstracts: %s",
-                _legacy.redact_secrets(str(exc)),
+                redact_secrets(str(exc)),
             )
             return list(documents)
 
@@ -393,13 +403,13 @@ class GenerationAgent:
             if (is_web and metadata.get("content_extracted") is True) or metadata.get("full_text_indexed") is True:
                 retained_documents.append(document)
         if not retained_documents and enriched_documents:
-            _legacy.logger.warning(
+            logger.warning(
                 "No full-text indexed documents available; falling back to %d abstract-only source(s).",
                 len(enriched_documents),
             )
             return list(enriched_documents)
 
-        _legacy.logger.info(
+        logger.info(
             "Evidence gate retained %d/%d source(s): web sources require "
             "extracted content; academic sources require indexed full text.",
             len(retained_documents),
@@ -494,7 +504,7 @@ class GenerationAgent:
         )
 
         current_hypotheses = hypotheses
-        synthesis_text = _legacy.format_literature_synthesis(synthesis)
+        synthesis_text = format_literature_synthesis(synthesis)
         optional_directions = "\n".join(f"- {direction}" for direction in query_plan.exploration_directions)
 
         # Iterate through the configured number of simulated debate rounds
@@ -536,7 +546,7 @@ Candidate hypotheses from the preceding discussion:
 Your refined contribution:
 """.strip()
 
-            refined, debate_error = _legacy.call_llm_for_debate_refinement(
+            refined, debate_error = call_llm_for_debate_refinement(
                 debate_prompt,
                 num_hypotheses=len(current_hypotheses),
                 temperature=research_goal.generation_temperature,
@@ -545,7 +555,7 @@ Your refined contribution:
 
             # If a debate turn fails, do not crash; keep the last valid draft
             if debate_error or refined is None:
-                _legacy.logger.warning(
+                logger.warning(
                     "Keeping the last valid hypotheses after debate round %d failed: %s",
                     round_index + 1,
                     debate_error,
@@ -586,7 +596,7 @@ Your refined contribution:
         )
 
         if error or assumptions is None:
-            _legacy.logger.warning(
+            logger.warning(
                 "Assumption analysis unavailable; continuing without conditional-hop state: %s",
                 error or "no assumption result",
             )
@@ -642,13 +652,13 @@ Your refined contribution:
             )
 
             if decision_error or decision is None:
-                _legacy.logger.warning(
+                logger.warning(
                     "Agentic research controller unavailable; proceeding to generation: %s",
                     decision_error or "no decision",
                 )
                 break
 
-            _legacy.logger.info(
+            logger.info(
                 "Agentic research action=%s target=%s queries=%s reason=%s",
                 decision.action,
                 decision.target,
@@ -709,15 +719,15 @@ Your refined contribution:
                         rerank_query=decision.target,
                     )
             except Exception as exc:
-                _legacy.logger.warning(
+                logger.warning(
                     "Agentic retrieval failed for action %s; proceeding with current evidence: %s",
                     decision.action,
-                    _legacy.redact_secrets(str(exc)),
+                    redact_secrets(str(exc)),
                 )
                 break
 
             if not action_documents:
-                _legacy.logger.info(
+                logger.info(
                     "Agentic retrieval returned no documents for action %s; proceeding to generation.",
                     decision.action,
                 )
@@ -729,7 +739,7 @@ Your refined contribution:
             )
 
             if not prepared_action_documents:
-                _legacy.logger.info(
+                logger.info(
                     "Agentic retrieval produced no generation-eligible documents for action %s.",
                     decision.action,
                 )
@@ -745,7 +755,7 @@ Your refined contribution:
             merged_documents = merged_documents[: self.agentic_max_sources]
 
             if len(merged_documents) <= len(current_documents):
-                _legacy.logger.info(
+                logger.info(
                     "Agentic retrieval added no new evidence after deduplication; proceeding to generation."
                 )
                 break
@@ -753,7 +763,7 @@ Your refined contribution:
             candidate_context = format_documents_for_prompt(merged_documents)
             candidate_source_ids = {str(document.metadata["source_id"]) for document in merged_documents}
 
-            updated_synthesis, synthesis_error = _legacy.call_llm_for_literature_synthesis(
+            updated_synthesis, synthesis_error = call_llm_for_literature_synthesis(
                 research_goal.description,
                 query_plan.explicit_requirements,
                 query_plan.exploration_directions,
@@ -763,7 +773,7 @@ Your refined contribution:
             )
 
             if synthesis_error or updated_synthesis is None:
-                _legacy.logger.warning(
+                logger.warning(
                     "Could not refresh literature synthesis after agentic retrieval; keeping previous evidence state: %s",
                     synthesis_error or "no synthesis result",
                 )
@@ -795,7 +805,7 @@ Your refined contribution:
         # First calls Research Planner (goal analysis & provisional hypotheses),
         # then calls Query Rewriter (routed search queries & explicit requirements).
         # ==================================================================
-        query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
+        query_plan, rewrite_error = call_llm_for_search_queries(
             research_goal.description,
             model=getattr(
                 research_goal,
@@ -817,7 +827,7 @@ Your refined contribution:
         try:
             candidate_documents = self._retrieve_original_scientific_sources(research_goal)
         except Exception as exc:
-            _legacy.logger.error(
+            logger.error(
                 "Original-goal retrieval failed: %s",
                 exc,
                 exc_info=True,
@@ -828,12 +838,12 @@ Your refined contribution:
         if (rewrite_error or query_plan is None) and not candidate_documents:
             context.last_retrieved_sources = []
             error = rewrite_error or "Query rewriting failed."
-            _legacy.logger.error(error)
+            logger.error(error)
             return [], [error]
 
         # If query planning failed but original retrieval succeeded, use fallback plan
         if rewrite_error or query_plan is None:
-            _legacy.logger.warning(
+            logger.warning(
                 "%s Continuing with %d original-goal candidate(s) and a minimal fallback plan.",
                 rewrite_error or "Query rewriting failed.",
                 len(candidate_documents),
@@ -841,7 +851,7 @@ Your refined contribution:
             query_plan = self._build_minimal_fallback_plan(research_goal.description)
 
         self.rag_retriever.last_query_plan = query_plan
-        _legacy.logger.info(
+        logger.info(
             "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s "
             "provisional_hypotheses=%s exploration_directions=%s",
             query_plan.queries,
@@ -863,7 +873,7 @@ Your refined contribution:
                 )
                 expanded_retrieval_attempted = True
             except Exception as exc:
-                _legacy.logger.error(
+                logger.error(
                     "Expanded RAG retrieval failed: %s",
                     exc,
                     exc_info=True,
@@ -895,7 +905,7 @@ Your refined contribution:
                 max_total_chars=self.max_grading_context_chars,
             )
 
-            _legacy.logger.info(
+            logger.info(
                 "Evidence grading context sources=%d chars=%d budget=%d",
                 len(documents_for_grading),
                 len(candidate_context),
@@ -905,7 +915,7 @@ Your refined contribution:
             candidate_source_ids = {str(document.metadata["source_id"]) for document in documents_for_grading}
 
             # 3A: Relevance filtering (advisory candidate selection)
-            relevant_source_ids, relevance_error = _legacy.call_llm_for_relevance_filter(
+            relevant_source_ids, relevance_error = call_llm_for_relevance_filter(
                 research_goal.description,
                 candidate_context,
                 candidate_source_ids,
@@ -914,21 +924,21 @@ Your refined contribution:
             )
 
             if relevance_error or relevant_source_ids is None:
-                _legacy.logger.warning(
+                logger.warning(
                     "Evidence relevance grading was unavailable; coverage will still audit all %d candidate source(s): %s",
                     len(documents_for_grading),
                     relevance_error or "no relevance result",
                 )
                 relevant_source_ids = []
             else:
-                _legacy.logger.info(
+                logger.info(
                     "RAG candidate count=%d relevance suggestions=%s",
                     len(documents_for_grading),
                     relevant_source_ids,
                 )
 
             # 3B: Explicit requirement coverage grading
-            coverage, coverage_error = _legacy.call_llm_for_evidence_coverage(
+            coverage, coverage_error = call_llm_for_evidence_coverage(
                 research_goal.description,
                 query_plan.explicit_requirements,
                 candidate_context,
@@ -939,7 +949,7 @@ Your refined contribution:
 
             if coverage_error or coverage is None:
                 if documents_for_grading:
-                    _legacy.logger.warning(
+                    logger.warning(
                         "Evidence coverage grading was unavailable (%s); falling back to provisional coverage for %d retrieved source(s).",
                         coverage_error or "no coverage result",
                         len(documents_for_grading),
@@ -947,7 +957,7 @@ Your refined contribution:
                     aspect_source_ids = {
                         aspect.aspect_id: tuple(candidate_source_ids) for aspect in query_plan.explicit_requirements
                     }
-                    coverage = _legacy.EvidenceCoverage(
+                    coverage = EvidenceCoverage(
                         aspect_source_ids=aspect_source_ids,
                         missing_aspect_ids=(),
                         gap_queries=(),
@@ -956,7 +966,7 @@ Your refined contribution:
                 else:
                     context.last_retrieved_sources = []
                     error = coverage_error or "Evidence coverage grading failed."
-                    _legacy.logger.error(error)
+                    logger.error(error)
                     return [], [error]
 
             # If all requirements are satisfied by current evidence, exit gate loop
@@ -966,7 +976,7 @@ Your refined contribution:
 
             # If original-goal search was insufficient, run planned expanded queries
             if not expanded_retrieval_attempted:
-                _legacy.logger.info("Original-goal retrieval was insufficient; starting expanded-query retrieval.")
+                logger.info("Original-goal retrieval was insufficient; starting expanded-query retrieval.")
                 try:
                     expanded_documents = self._retrieve_scientific_sources(
                         research_goal,
@@ -974,7 +984,7 @@ Your refined contribution:
                         force_web=True,
                     )
                 except Exception as exc:
-                    _legacy.logger.error(
+                    logger.error(
                         "Expanded RAG retrieval failed: %s",
                         exc,
                         exc_info=True,
@@ -1017,9 +1027,9 @@ Your refined contribution:
                             fallback_plan,
                         )
                     except Exception as exc:
-                        _legacy.logger.error(
+                        logger.error(
                             "Supplementary search fallback failed: %s",
-                            _legacy.redact_secrets(str(exc)),
+                            redact_secrets(str(exc)),
                         )
                         fallback_documents = []
 
@@ -1046,7 +1056,7 @@ Your refined contribution:
                     + ". Hypothesis generation was not executed."
                 )
 
-                _legacy.logger.error(error)
+                logger.error(error)
                 context.last_retrieved_sources = []
                 return [], [error]
 
@@ -1070,7 +1080,7 @@ Your refined contribution:
                 missing_aspects[0].description if len(missing_aspects) == 1 else research_goal.description
             )
 
-            _legacy.logger.info(
+            logger.info(
                 "Corrective retrieval round %d for missing explicit requirements=%s queries=%s",
                 corrective_round + 1,
                 coverage.missing_aspect_ids,
@@ -1087,7 +1097,7 @@ Your refined contribution:
                     force_web=True,
                 )
             except Exception as exc:
-                _legacy.logger.error(
+                logger.error(
                     "Corrective RAG retrieval failed: %s",
                     exc,
                     exc_info=True,
@@ -1116,7 +1126,7 @@ Your refined contribution:
 
         # Retain top candidate sources if count is below minimum required threshold
         if len(retrieved_documents) < minimum_sources and graded_documents:
-            _legacy.logger.info(
+            logger.info(
                 "Coverage matched %d source(s); retaining top candidate source(s) from %d graded document(s).",
                 len(retrieved_documents),
                 len(graded_documents),
@@ -1137,7 +1147,7 @@ Your refined contribution:
                 f"{minimum_sources} are required. Hypothesis generation "
                 "was not executed."
             )
-            _legacy.logger.error(error)
+            logger.error(error)
             context.last_retrieved_sources = []
             return [], [error]
 
@@ -1155,7 +1165,7 @@ Your refined contribution:
         # Step 4: Literature Synthesis
         # Summarizes findings, contradictions, knowledge gaps, and rationale.
         # ==================================================================
-        synthesis, synthesis_error = _legacy.call_llm_for_literature_synthesis(
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
             research_goal.description,
             query_plan.explicit_requirements,
             query_plan.exploration_directions,
@@ -1167,7 +1177,7 @@ Your refined contribution:
         if synthesis_error or synthesis is None:
             context.last_retrieved_sources = []
             error = synthesis_error or "Literature synthesis failed."
-            _legacy.logger.error(error)
+            logger.error(error)
             return [], [error]
 
         # ==================================================================
@@ -1191,7 +1201,7 @@ Your refined contribution:
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
 
-        synthesis_text = _legacy.format_literature_synthesis(synthesis)
+        synthesis_text = format_literature_synthesis(synthesis)
         assumption_text = format_assumption_assessments(assumptions)
 
         coverage_map = "\n".join(
@@ -1221,7 +1231,7 @@ Your refined contribution:
                 model=research_goal.llm_model,
             )
             if fa_error:
-                _legacy.logger.warning(
+                logger.warning(
                     "Focus area identification failed; focus_area slots will fall back to literature_grounded: %s",
                     fa_error,
                 )
@@ -1307,7 +1317,7 @@ Your refined contribution:
         # ==================================================================
         # Step 7: Call LLM to generate initial candidate hypotheses
         # ==================================================================
-        raw_output = _legacy.call_llm_for_generation(
+        raw_output = call_llm_for_generation(
             prompt,
             num_hypotheses=num_to_generate,
             temperature=gen_temp,
@@ -1332,7 +1342,7 @@ Your refined contribution:
         # and strips/revises hallucinated numbers and claims.
         # ==================================================================
         if self.audit_enabled and raw_output and not any(item.get("title") == "Error" for item in raw_output):
-            audits, audit_error = _legacy.call_llm_for_hypothesis_audit(
+            audits, audit_error = call_llm_for_hypothesis_audit(
                 research_goal.description,
                 raw_output,
                 retrieved_context,
@@ -1344,7 +1354,7 @@ Your refined contribution:
             if audit_error or audits is None:
                 context.last_hypothesis_audits = []
                 error = audit_error or "Hypothesis audit failed."
-                _legacy.logger.error(error)
+                logger.error(error)
                 return [], [error]
 
             context.last_hypothesis_audits = [audit["audit_report"] for audit in audits]
@@ -1352,7 +1362,7 @@ Your refined contribution:
             rejected_audits = [audit for audit in audits if not audit["passed"]]
 
             for audit in rejected_audits:
-                _legacy.logger.warning(
+                logger.warning(
                     "Hypothesis candidate %d rejected by novelty audit: %s",
                     audit["candidate_index"],
                     audit["audit_report"]["hard_failures"],
@@ -1386,7 +1396,7 @@ Your refined contribution:
                         "Unknown generation error",
                     )
                 )
-                _legacy.logger.error(
+                logger.error(
                     "Hypothesis generation failed: %s",
                     error_text,
                 )
@@ -1405,22 +1415,22 @@ Your refined contribution:
                 claimed_source_ids = []
 
             # Verify that cited source IDs exist in the retrieved evidence pool
-            valid_source_ids = _legacy._resolve_retrieved_source_ids(
+            valid_source_ids = _resolve_retrieved_source_ids(
                 claimed_source_ids,
                 allowed_source_ids,
             )
 
             if not valid_source_ids:
                 error = f"Generated hypothesis has no valid retrieved source IDs: {idea.get('title', 'Untitled')}"
-                _legacy.logger.warning(error)
+                logger.warning(error)
                 errors.append(error)
                 continue
 
             # Generate unique hypothesis ID with prefix 'G' (Generation)
-            hypo_id = _legacy.generate_unique_id("G")
+            hypo_id = generate_unique_id("G")
 
             while hypo_id in context.hypotheses:
-                hypo_id = _legacy.generate_unique_id("G")
+                hypo_id = generate_unique_id("G")
 
             hypothesis = Hypothesis(
                 hypo_id,
@@ -1455,7 +1465,7 @@ Your refined contribution:
                 hypothesis.audit_score = audit_report.get("weighted_score")
                 hypothesis.audit_verdict = audit_report.get("verdict")
 
-            _legacy.logger.info(
+            logger.info(
                 "Generated RAG-grounded hypothesis: %s",
                 hypothesis.to_dict(),
             )

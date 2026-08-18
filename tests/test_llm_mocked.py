@@ -503,7 +503,7 @@ def test_reflection_agent_does_not_create_zero_score_report_after_llm_failure():
     hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-review-failure")
 
     with patch(
-        "app.agents.call_llm_for_reflection",
+        "app.agents_modules.reflection.call_llm_for_reflection",
         return_value={
             "novelty_review": "UNREVIEWED",
             "feasibility_review": "UNREVIEWED",
@@ -557,8 +557,8 @@ def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():
     }
 
     with (
-        patch("app.agents.call_llm_for_reflection", return_value=review),
-        patch("app.agents.call_llm_for_hypothesis_revision") as mock_revision,
+        patch("app.agents_modules.reflection.call_llm_for_reflection", return_value=review),
+        patch("app.agents_modules.reflection.call_llm_for_hypothesis_revision") as mock_revision,
     ):
         ReflectionAgent().review_hypotheses(
             [hypothesis],

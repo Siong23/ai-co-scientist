@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence
 
 from ..models import ContextMemory, ResearchGoal
-from ._compat import _legacy
+from ..utils import logger, redact_secrets
+from .generation_helpers import _call_llm
 
 SupervisorAction = Literal[
     "GENERATE",
@@ -331,14 +332,14 @@ class SupervisorPlanner:
         # Attempt LLM-based planning
         try:
             prompt = build_supervisor_planning_prompt(state, research_goal)
-            response = _legacy.call_llm(prompt, temperature=0.2)
+            response = _call_llm(prompt, temperature=0.2)
             decision = parse_supervisor_decision(response)
             if decision is not None:
                 return decision
         except Exception as exc:
-            _legacy.logger.debug(
+            logger.debug(
                 "Supervisor LLM planner fallback triggered: %s",
-                _legacy.redact_secrets(str(exc)),
+                redact_secrets(str(exc)),
             )
 
         return decide_action_heuristically(state, research_goal)

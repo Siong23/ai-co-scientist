@@ -298,7 +298,7 @@ def test_tournament_comparison_count_with_new_hypothesis():
         return _decision(h_a, h_b)
 
     with patch(
-        "app.agents_modules.ranking._legacy.run_pairwise_debate",
+        "app.agents_modules.ranking.run_pairwise_debate",
         side_effect=fake_debate,
     ) as debate:
 
@@ -388,7 +388,7 @@ def test_ranking_consistency():
         context = ContextMemory()
 
         with patch(
-            "app.agents_modules.ranking._legacy.run_pairwise_debate",
+            "app.agents_modules.ranking.run_pairwise_debate",
             side_effect=deterministic_debate,
         ):
 
@@ -647,7 +647,7 @@ def test_inactive_hypotheses_are_not_ranked():
         return _decision(h_a, h_b)
 
     with patch(
-        "app.agents_modules.ranking._legacy.run_pairwise_debate",
+        "app.agents_modules.ranking.run_pairwise_debate",
         side_effect=fake_debate,
     ) as debate:
 
@@ -713,7 +713,7 @@ def test_tournament_records_results_in_context():
         )
 
     with patch(
-        "app.agents_modules.ranking._legacy.run_pairwise_debate",
+        "app.agents_modules.ranking.run_pairwise_debate",
         side_effect=fake_debate,
     ):
 

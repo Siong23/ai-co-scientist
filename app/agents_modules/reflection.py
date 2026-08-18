@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from ..models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
-from ._compat import _legacy
+from ..utils import logger, redact_secrets
+from .reflection_helpers import (
+    call_llm_for_hypothesis_revision,
+    call_llm_for_reflection,
+)
 
 
 def _build_reflection_report(result: Dict) -> Optional[ReflectionReport]:
@@ -43,7 +47,13 @@ class ReflectionAgent:
             # if h.novelty_review is not None and h.feasibility_review is not None:
             #    continue
             # Pass the specific temperature
-            result = _legacy.call_llm_for_reflection(hypothesis=h, research_goal=research_goal, context=context, temperature=reflect_temp, model=research_goal.llm_model,)
+            result = call_llm_for_reflection(
+                hypothesis=h,
+                research_goal=research_goal,
+                context=context,
+                temperature=reflect_temp,
+                model=research_goal.llm_model,
+            )
             h.novelty_review = result["novelty_review"]
             h.feasibility_review = result["feasibility_review"]
             if result["comment"] != "Could not parse LLM response.":
@@ -61,7 +71,7 @@ class ReflectionAgent:
             # evidence, review history, and tournament provenance.  A REVISE
             # recommendation is consumed by Evolution, which creates a child.
 
-            _legacy.logger.info(
+            logger.info(
                 "Reviewed hypothesis: %s, Novelty: %s, Feasibility: %s",
                 h.hypothesis_id,
                 h.novelty_review,
@@ -75,7 +85,7 @@ class ReflectionAgent:
         revised_list = []
         for hypo in hypotheses:
             try:
-                revised = _legacy.call_llm_for_hypothesis_revision(
+                revised = call_llm_for_hypothesis_revision(
                     hypo,
                     research_goal,
                     temperature=research_goal.generation_temperature,
@@ -87,15 +97,15 @@ class ReflectionAgent:
                     new_text = revised.get("hypothesis") or revised.get("text")
                     if new_text:
                         hypo.text = new_text
-                    _legacy.logger.info(
+                    logger.info(
                         "Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id
                     )
                     revised_list.append(hypo)
             except Exception as exc:
-                _legacy.logger.warning(
+                logger.warning(
                     "Hypothesis revision failed for %s: %s",
                     hypo.hypothesis_id,
-                    _legacy.redact_secrets(str(exc)),
+                    redact_secrets(str(exc)),
                 )
         return revised_list
 
