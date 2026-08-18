@@ -1265,7 +1265,7 @@ def create_gradio_interface():
             sidebar_delete_status = gr.Markdown()
 
         # Header
-        gr.Markdown("# 🔬 Open AI Co-Scientist - Hypothesis Evolution System")
+        gr.Markdown("# 🔬 AI Co-Scientist - Hypothesis Evolution System")
         gr.Markdown("Generate, review, rank, and evolve research hypotheses using AI agents.")
 
         # Deployment status
