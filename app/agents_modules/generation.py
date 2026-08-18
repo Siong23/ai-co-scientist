@@ -228,7 +228,19 @@ Return only valid JSON:
 
 
 class GenerationAgent:
-    """Generate hypotheses grounded in multi-source academic retrieval."""
+    """Generate scientific hypotheses grounded in multi-source academic retrieval.
+
+    The Generation Agent executes an end-to-end 9-stage research pipeline:
+      1. Search Planning & Query Rewriting (two-stage research plan + query routing)
+      2. Initial Evidence Retrieval (querying arXiv and web sources for the original goal)
+      3. Deterministic Corrective RAG Evidence Gate (relevance filtering + coverage grading + corrective rounds)
+      4. Literature Synthesis (extracting established findings, contradictions, and knowledge gaps)
+      5. Agentic Autonomous Research Loop (proactive gap searching, claim verification, and counterevidence)
+      6. Multi-Strategy Hypothesis Generation (allocating 6 distinct generation strategies + focus-area pre-pass)
+      7. Multi-Turn Simulated Scientific Debate (cross-examination by 3 distinct reviewer personas)
+      8. Hypothesis Grounding & Novelty Audit (independent candidate verification, scoring, and fake number removal)
+      9. Hypothesis Domain Object Construction (attaching verified citations and audit reports)
+    """
 
     def __init__(
         self,
@@ -239,16 +251,19 @@ class GenerationAgent:
         paper_library: ChromaPaperLibrary | None = None,
         agentic_research_enabled: bool | None = None,
     ) -> None:
+        # Initialize RAG retrieval engine with user or default configuration
         self.rag_retriever = ResearchRetriever(
             minimum_relevant_sources=minimum_relevant_sources,
             corrective_retrieval_rounds=corrective_retrieval_rounds,
             generation_debate_rounds=debate_rounds,
         )
+        # Cap debate rounds safely between 0 (disabled) and 5
         self.debate_rounds = max(
             0,
             min(5, self.rag_retriever.generation_debate_rounds),
         )
 
+        # RAG evidence grading character limits to avoid context window overflow
         rag_config = config.get("rag", {})
         self.max_grading_abstract_chars = max(
             0,
@@ -258,10 +273,12 @@ class GenerationAgent:
             1000,
             int(rag_config.get("max_grading_context_chars", 24000)),
         )
+        # Novelty and grounding audit toggle
         self.audit_enabled = (
             bool(rag_config.get("hypothesis_audit_enabled", False)) if audit_enabled is None else bool(audit_enabled)
         )
 
+        # Agentic autonomous research loop settings (limits exploration steps & budget)
         agentic_config = config.get("agentic_research", {})
         self.agentic_research_enabled = (
             bool(agentic_config.get("enabled", True))
@@ -285,6 +302,7 @@ class GenerationAgent:
             min(30, int(agentic_config.get("max_evidence_sources", 16))),
         )
 
+        # Vector paper library for full-text PDF caching and embeddings
         self.paper_library = paper_library or ChromaPaperLibrary(embeddings=self.rag_retriever.embeddings)
 
     def _format_meta_review_feedback(self, context: ContextMemory) -> str:
@@ -455,7 +473,16 @@ class GenerationAgent:
         synthesis: LiteratureSynthesis,
         hypotheses: list[Dict],
     ) -> list[Dict]:
-        """Refine candidates through a short, stateful expert debate."""
+        """Refine candidates through a short, stateful expert debate.
+
+        Simulates a peer-review panel consisting of 3 distinct personas:
+          1. Evidence & research-goal alignment reviewer (ensures strict grounding and goal adherence)
+          2. Skeptical methods & falsifiability reviewer (challenges vague methods and demands testability)
+          3. Integrating domain expert (synthesizes interdisciplinary insights)
+
+        Each round takes the previous round's hypotheses and refines them.
+        If any round fails or LLM errors occur, gracefully retains the last valid set.
+        """
 
         if self.debate_rounds == 0 or not hypotheses or any(item.get("title") == "Error" for item in hypotheses):
             return hypotheses
@@ -470,6 +497,7 @@ class GenerationAgent:
         synthesis_text = _legacy.format_literature_synthesis(synthesis)
         optional_directions = "\n".join(f"- {direction}" for direction in query_plan.exploration_directions)
 
+        # Iterate through the configured number of simulated debate rounds
         for round_index in range(self.debate_rounds):
             role = roles[round_index % len(roles)]
             debate_prompt = f"""
@@ -515,6 +543,7 @@ Your refined contribution:
                 model=research_goal.llm_model,
             )
 
+            # If a debate turn fails, do not crash; keep the last valid draft
             if debate_error or refined is None:
                 _legacy.logger.warning(
                     "Keeping the last valid hypotheses after debate round %d failed: %s",
@@ -533,7 +562,13 @@ Your refined contribution:
         synthesis: LiteratureSynthesis,
         documents,
     ) -> list[AssumptionAssessment]:
-        """Run lightweight conditional-hop analysis without blocking generation."""
+        """Run lightweight conditional-hop analysis without blocking generation.
+
+        Examines current evidence to label underlying assumptions as:
+          - SUPPORTED: directly backed by cited literature
+          - CONTRADICTED: challenged by cited literature
+          - MIXED / UNVERIFIED: uncertain assumptions requiring testing or targeted queries
+        """
 
         if not documents:
             return []
@@ -582,13 +617,16 @@ Your refined contribution:
         if not self.agentic_research_enabled:
             return current_documents, current_synthesis, []
 
+        # Analyze initial assumptions to guide autonomous exploration
         assumptions = self._analyze_assumptions(
             research_goal,
             current_synthesis,
             current_documents,
         )
 
+        # Run multi-step agentic research loop up to agentic_max_steps
         for step in range(self.agentic_max_steps):
+            # Step A: Ask LLM controller to select next best research action
             decision, decision_error = call_llm_for_research_action(
                 research_goal.description,
                 current_synthesis,
@@ -752,6 +790,11 @@ Your refined contribution:
         gen_temp = research_goal.generation_temperature
         self.rag_retriever.reset_search_stats()
 
+        # ==================================================================
+        # Step 1: Two-stage search query planning
+        # First calls Research Planner (goal analysis & provisional hypotheses),
+        # then calls Query Rewriter (routed search queries & explicit requirements).
+        # ==================================================================
         query_plan, rewrite_error = _legacy.call_llm_for_search_queries(
             research_goal.description,
             model=getattr(
@@ -768,7 +811,9 @@ Your refined contribution:
             ),
         )
 
-        # First retrieval always uses the user's unmodified research goal.
+        # ==================================================================
+        # Step 2: Initial retrieval with user's unmodified research goal
+        # ==================================================================
         try:
             candidate_documents = self._retrieve_original_scientific_sources(research_goal)
         except Exception as exc:
@@ -779,12 +824,14 @@ Your refined contribution:
             )
             candidate_documents = []
 
+        # If both query planning and initial retrieval fail, abort early
         if (rewrite_error or query_plan is None) and not candidate_documents:
             context.last_retrieved_sources = []
             error = rewrite_error or "Query rewriting failed."
             _legacy.logger.error(error)
             return [], [error]
 
+        # If query planning failed but original retrieval succeeded, use fallback plan
         if rewrite_error or query_plan is None:
             _legacy.logger.warning(
                 "%s Continuing with %d original-goal candidate(s) and a minimal fallback plan.",
@@ -806,6 +853,7 @@ Your refined contribution:
 
         expanded_retrieval_attempted = False
 
+        # If original goal returned no documents, execute the planned search queries
         if not candidate_documents:
             try:
                 candidate_documents = self._retrieve_scientific_sources(
@@ -828,15 +876,19 @@ Your refined contribution:
         corrective_round = 0
         fallback_attempted = False
 
-        # ------------------------------------------------------------------
-        # Existing deterministic/corrective RAG evidence gate.
-        # ------------------------------------------------------------------
+        # ==================================================================
+        # Step 3: Deterministic/Corrective RAG evidence gate loop
+        # Iteratively grades candidate relevance and requirement coverage.
+        # If coverage is insufficient, issues corrective queries or fallbacks.
+        # ==================================================================
         while True:
+            # Filter documents according to full-text indexing requirements
             documents_for_grading = self._prepare_candidate_documents(
                 candidate_documents,
                 research_goal,
             )
 
+            # Format documents into a budget-capped context string for LLM grading
             candidate_context = format_documents_for_grading(
                 documents_for_grading,
                 max_abstract_chars=self.max_grading_abstract_chars,
@@ -852,6 +904,7 @@ Your refined contribution:
 
             candidate_source_ids = {str(document.metadata["source_id"]) for document in documents_for_grading}
 
+            # 3A: Relevance filtering (advisory candidate selection)
             relevant_source_ids, relevance_error = _legacy.call_llm_for_relevance_filter(
                 research_goal.description,
                 candidate_context,
@@ -874,6 +927,7 @@ Your refined contribution:
                     relevant_source_ids,
                 )
 
+            # 3B: Explicit requirement coverage grading
             coverage, coverage_error = _legacy.call_llm_for_evidence_coverage(
                 research_goal.description,
                 query_plan.explicit_requirements,
@@ -905,10 +959,12 @@ Your refined contribution:
                     _legacy.logger.error(error)
                     return [], [error]
 
+            # If all requirements are satisfied by current evidence, exit gate loop
             if coverage.sufficient:
                 graded_documents = documents_for_grading
                 break
 
+            # If original-goal search was insufficient, run planned expanded queries
             if not expanded_retrieval_attempted:
                 _legacy.logger.info("Original-goal retrieval was insufficient; starting expanded-query retrieval.")
                 try:
@@ -932,6 +988,7 @@ Your refined contribution:
                 )
                 continue
 
+            # If max corrective rounds reached, try supplementary fallback search once
             if corrective_round >= self.rag_retriever.corrective_retrieval_rounds:
                 if not fallback_attempted:
                     fallback_attempted = True
@@ -973,6 +1030,7 @@ Your refined contribution:
                         )
                         continue
 
+                # Evidence still insufficient after all corrective rounds and fallbacks
                 missing_descriptions = [
                     aspect.description.rstrip(".")
                     for aspect in query_plan.explicit_requirements
@@ -992,6 +1050,7 @@ Your refined contribution:
                 context.last_retrieved_sources = []
                 return [], [error]
 
+            # 3C: Perform corrective retrieval round for missing requirements
             missing_aspects = [
                 aspect for aspect in query_plan.explicit_requirements if aspect.aspect_id in coverage.missing_aspect_ids
             ]
@@ -1041,6 +1100,7 @@ Your refined contribution:
                 gap_documents,
             )
 
+        # Collect all verified source IDs supporting requirements
         coverage_source_ids = {
             source_id for source_ids in coverage.aspect_source_ids.values() for source_id in source_ids
         }
@@ -1054,6 +1114,7 @@ Your refined contribution:
 
         minimum_sources = self.rag_retriever.minimum_relevant_sources
 
+        # Retain top candidate sources if count is below minimum required threshold
         if len(retrieved_documents) < minimum_sources and graded_documents:
             _legacy.logger.info(
                 "Coverage matched %d source(s); retaining top candidate source(s) from %d graded document(s).",
@@ -1080,6 +1141,7 @@ Your refined contribution:
             context.last_retrieved_sources = []
             return [], [error]
 
+        # Enrich retained documents with full text when available
         if not self._requires_indexed_sources():
             retrieved_documents = self._enrich_with_full_text(
                 retrieved_documents,
@@ -1089,6 +1151,10 @@ Your refined contribution:
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
 
+        # ==================================================================
+        # Step 4: Literature Synthesis
+        # Summarizes findings, contradictions, knowledge gaps, and rationale.
+        # ==================================================================
         synthesis, synthesis_error = _legacy.call_llm_for_literature_synthesis(
             research_goal.description,
             query_plan.explicit_requirements,
@@ -1104,14 +1170,10 @@ Your refined contribution:
             _legacy.logger.error(error)
             return [], [error]
 
-        # ------------------------------------------------------------------
-        # Agentic RAG extension.
-        #
-        # The hard coverage gate above is unchanged. Once that gate passes,
-        # the Generation agent can inspect the evidence state and decide
-        # whether to search a knowledge gap, seek counterevidence, verify a
-        # critical assumption, or proceed to generation.
-        # ------------------------------------------------------------------
+        # ==================================================================
+        # Step 5: Bounded Agentic Research Extension Loop
+        # Proactively verifies assumptions, searches counterevidence, etc.
+        # ==================================================================
         (
             retrieved_documents,
             synthesis,
@@ -1124,13 +1186,12 @@ Your refined contribution:
             synthesis,
         )
 
-        # Refresh final evidence state after agentic research.
+        # Refresh final evidence state after agentic research
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
 
         synthesis_text = _legacy.format_literature_synthesis(synthesis)
-
         assumption_text = format_assumption_assessments(assumptions)
 
         coverage_map = "\n".join(
@@ -1140,17 +1201,15 @@ Your refined contribution:
 
         optional_directions = "\n".join(f"- {direction}" for direction in query_plan.exploration_directions)
 
-        # Use several generation modes over the same verified evidence pool.
+        # ==================================================================
+        # Step 6: Multi-strategy allocation & Focus-area pre-pass
+        # Distributes strategies across requested candidate count:
+        # literature_grounded, contradiction_driven, conditional_hop,
+        # cross_paper_synthesis, focus_area, raw_idea
+        # ==================================================================
         strategies = generation_strategies_for_count(num_to_generate)
 
-        # ------------------------------------------------------------------
-        # Focus-area pre-pass (Co-Scientist paper §2.1, 'using focus areas',
-        # 13.8% GPQA contribution — the highest of any single strategy).
-        #
-        # Identify under-investigated sub-topics in the current evidence pool
-        # and assign one to each focus_area strategy slot.  Failures are
-        # non-fatal: those slots fall back to literature_grounded.
-        # ------------------------------------------------------------------
+        # Identify under-investigated sub-topics in the evidence pool for focus_area slots
         focus_areas_identified: list[FocusArea] = []
         focus_area_strategy_count = strategies.count("focus_area")
         if focus_area_strategy_count > 0:
@@ -1181,6 +1240,7 @@ Your refined contribution:
             for index, strategy in enumerate(strategies)
         )
 
+        # Build full hypothesis generation prompt
         prompt = (
             "You are an expert tasked with formulating novel and robust "
             "scientific hypotheses for an audience of domain experts.\n\n"
@@ -1244,6 +1304,9 @@ Your refined contribution:
             "source when the claim combines evidence from multiple sources.\n"
         )
 
+        # ==================================================================
+        # Step 7: Call LLM to generate initial candidate hypotheses
+        # ==================================================================
         raw_output = _legacy.call_llm_for_generation(
             prompt,
             num_hypotheses=num_to_generate,
@@ -1251,6 +1314,9 @@ Your refined contribution:
             model=research_goal.llm_model,
         )
 
+        # ==================================================================
+        # Step 8: Multi-turn simulated scientific debate refinement
+        # ==================================================================
         raw_output = self._run_scientific_debate(
             research_goal,
             query_plan,
@@ -1260,6 +1326,11 @@ Your refined contribution:
 
         context.last_hypothesis_audits = []
 
+        # ==================================================================
+        # Step 9: Novelty and Grounding Audit (if enabled)
+        # Evaluates candidate evidence validity, novelty against prior art,
+        # and strips/revises hallucinated numbers and claims.
+        # ==================================================================
         if self.audit_enabled and raw_output and not any(item.get("title") == "Error" for item in raw_output):
             audits, audit_error = _legacy.call_llm_for_hypothesis_audit(
                 research_goal.description,
@@ -1287,6 +1358,7 @@ Your refined contribution:
                     audit["audit_report"]["hard_failures"],
                 )
 
+            # Retain only candidates that passed audit
             raw_output = [
                 {
                     **audit["final_hypothesis"],
@@ -1299,6 +1371,10 @@ Your refined contribution:
             if not raw_output:
                 return [], ["All generated hypotheses were rejected by the novelty and grounding audit."]
 
+        # ==================================================================
+        # Step 10: Construct final Hypothesis domain objects
+        # Validates source IDs, assigns unique IDs (Gxxx), attaches audit info.
+        # ==================================================================
         new_hypos: List[Hypothesis] = []
         errors: List[str] = []
 
@@ -1328,6 +1404,7 @@ Your refined contribution:
             ):
                 claimed_source_ids = []
 
+            # Verify that cited source IDs exist in the retrieved evidence pool
             valid_source_ids = _legacy._resolve_retrieved_source_ids(
                 claimed_source_ids,
                 allowed_source_ids,
@@ -1339,6 +1416,7 @@ Your refined contribution:
                 errors.append(error)
                 continue
 
+            # Generate unique hypothesis ID with prefix 'G' (Generation)
             hypo_id = _legacy.generate_unique_id("G")
 
             while hypo_id in context.hypotheses:
