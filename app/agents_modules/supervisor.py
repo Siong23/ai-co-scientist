@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..research_trace import merge_trace_event, normalize_trace_event
-from ._compat import _legacy
+from ..utils import logger, redact_secrets
 from .evolution import EvolutionAgent
 from .generation import GenerationAgent
 from .meta_review import MetaReviewAgent
@@ -20,7 +20,7 @@ ProgressCallback = Callable[[Dict[str, Any]], None]
 
 
 def _shorten(value: Any, limit: int = 240) -> str:
-    text = " ".join(_legacy.redact_secrets(str(value)).split())
+    text = " ".join(redact_secrets(str(value)).split())
     if len(text) > limit:
         return f"{text[: limit - 3].rstrip()}..."
     return text
@@ -132,7 +132,7 @@ class SupervisorAgent:
         cycle_details: Dict[str, Any],
     ) -> List[Hypothesis]:
         """Execute evidence discovery and hypothesis generation."""
-        _legacy.logger.info("Supervisor Step: Generation")
+        logger.info("Supervisor Step: Generation")
         phase_started = time.perf_counter()
         publish(
             "generation",
@@ -231,7 +231,7 @@ class SupervisorAgent:
         step_name: str = "reflection",
     ) -> Dict[str, List[Hypothesis]]:
         """Execute quality reflection and routing."""
-        _legacy.logger.info("Supervisor Step: Reflection (%s)", step_name)
+        logger.info("Supervisor Step: Reflection (%s)", step_name)
         phase_started = time.perf_counter()
         active_hypos = target_hypos if target_hypos is not None else context.get_active_hypotheses()
 
@@ -249,7 +249,7 @@ class SupervisorAgent:
         # log them for visibility.
         rejected_hypos = reflection_routing.get("rejected", [])
         if rejected_hypos:
-            _legacy.logger.info(
+            logger.info(
                 "Deactivated %d REJECT hypothesis(es): %s",
                 len(rejected_hypos),
                 [h.hypothesis_id for h in rejected_hypos],
@@ -285,7 +285,7 @@ class SupervisorAgent:
         step_name: str = "ranking1",
     ) -> List[Dict[str, Any]]:
         """Execute tournament pairwise ranking."""
-        _legacy.logger.info("Supervisor Step: Ranking (%s)", step_name)
+        logger.info("Supervisor Step: Ranking (%s)", step_name)
         phase_started = time.perf_counter()
         rankable_hypos = target_hypos if target_hypos is not None else context.get_active_hypotheses()
 
@@ -326,7 +326,7 @@ class SupervisorAgent:
         cycle_details: Dict[str, Any],
     ) -> List[Hypothesis]:
         """Execute hypothesis evolution and refinement strategies."""
-        _legacy.logger.info("Supervisor Step: Evolution")
+        logger.info("Supervisor Step: Evolution")
         phase_started = time.perf_counter()
         publish(
             "evolution",
@@ -374,7 +374,7 @@ class SupervisorAgent:
         cycle_details: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Execute proximity graph construction and diversity analysis."""
-        _legacy.logger.info("Supervisor Step: Proximity Analysis")
+        logger.info("Supervisor Step: Proximity Analysis")
         phase_started = time.perf_counter()
         publish(
             "proximity",
@@ -427,7 +427,7 @@ class SupervisorAgent:
         proximity_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute meta-review synthesis and feedback generation."""
-        _legacy.logger.info("Supervisor Step: Meta-Review")
+        logger.info("Supervisor Step: Meta-Review")
         phase_started = time.perf_counter()
         publish(
             "meta_review",
@@ -467,7 +467,7 @@ class SupervisorAgent:
         progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """Runs a sequential cycle of hypothesis generation and refinement."""
-        _legacy.logger.info("--- Starting Cycle %d ---", context.iteration_number + 1)
+        logger.info("--- Starting Cycle %d ---", context.iteration_number + 1)
         research_trace: List[Dict[str, Any]] = []
         cycle_details: Dict[str, Any] = {
             "iteration": context.iteration_number + 1,
@@ -503,9 +503,9 @@ class SupervisorAgent:
                 try:
                     progress_callback(dict(normalized))
                 except Exception as exc:
-                    _legacy.logger.warning(
+                    logger.warning(
                         "Research progress callback failed: %s",
-                        _legacy.redact_secrets(str(exc)),
+                        redact_secrets(str(exc)),
                     )
 
         # 1. Generation
@@ -572,7 +572,7 @@ class SupervisorAgent:
         self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
 
         context.iteration_number += 1
-        _legacy.logger.info("--- Cycle %d Complete ---", context.iteration_number)
+        logger.info("--- Cycle %d Complete ---", context.iteration_number)
         return cycle_details
 
     def run_dynamic_cycle(
@@ -584,7 +584,7 @@ class SupervisorAgent:
         planner_mode: str = "auto",
     ) -> Dict[str, Any]:
         """Runs a dynamic cycle where the Supervisor actively plans and schedules actions."""
-        _legacy.logger.info("--- Starting Cycle %d (Dynamic Planning) ---", context.iteration_number + 1)
+        logger.info("--- Starting Cycle %d (Dynamic Planning) ---", context.iteration_number + 1)
         research_trace: List[Dict[str, Any]] = []
         supervisor_decisions: List[Dict[str, Any]] = []
         cycle_details: Dict[str, Any] = {
@@ -622,9 +622,9 @@ class SupervisorAgent:
                 try:
                     progress_callback(dict(normalized))
                 except Exception as exc:
-                    _legacy.logger.warning(
+                    logger.warning(
                         "Research progress callback failed: %s",
-                        _legacy.redact_secrets(str(exc)),
+                        redact_secrets(str(exc)),
                     )
 
         proximity_result: Optional[Dict[str, Any]] = None
@@ -661,7 +661,7 @@ class SupervisorAgent:
             )
 
             if decision.action == "FINALIZE":
-                _legacy.logger.info("Supervisor decided to finalize the session.")
+                logger.info("Supervisor decided to finalize the session.")
                 break
 
             elif decision.action == "GENERATE":
@@ -717,5 +717,5 @@ class SupervisorAgent:
             self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
 
         context.iteration_number += 1
-        _legacy.logger.info("--- Cycle %d (Dynamic) Complete ---", context.iteration_number)
+        logger.info("--- Cycle %d (Dynamic) Complete ---", context.iteration_number)
         return cycle_details

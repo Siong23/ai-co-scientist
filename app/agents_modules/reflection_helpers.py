@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+import re
+from typing import Any, Dict, List
 
 from ..models import ContextMemory, Hypothesis, ResearchGoal
+from ..rag_retriever import ResearchRetriever, SearchQuery, SearchQueryPlan, serialize_documents
 from ..utils import logger
 from .generation_helpers import _call_llm, call_llm_for_generation
 
@@ -396,3 +398,162 @@ def call_llm_for_hypothesis_revision(
         )
         return None
     return revised[0]
+
+_CLAIM_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "be", "by", "can", "for", "from", "in", "is", "it",
+    "of", "on", "or", "that", "the", "their", "this", "to", "will", "with",
+}
+
+
+def function_to_extract_claim(hypothesis: Hypothesis) -> str:
+    """Extract the claim section from the serialized hypothesis text."""
+
+    text = str(getattr(hypothesis, "text", "") or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(?:^|\n)\s*Hypothesis:\s*(.*?)(?=\n\s*(?:Rationale|Feasibility):|$)", text, re.IGNORECASE | re.DOTALL)
+    if match:
+        return " ".join(match.group(1).split())
+    return text.splitlines()[0].strip()
+
+
+def _claim_terms(claim: str) -> set[str]:
+    return {
+        term.casefold()
+        for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", claim)
+        if term.casefold() not in _CLAIM_STOP_WORDS
+    }
+
+
+def _evidence_text(source: dict[str, Any]) -> str:
+    return " ".join(
+        str(source.get(field, "") or "")
+        for field in ("title", "summary", "abstract", "content", "text")
+    )
+
+
+def _rank_claim_evidence(claim: str, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    terms = _claim_terms(claim)
+    if not terms:
+        return []
+    ranked: list[tuple[float, int, dict[str, Any]]] = []
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict):
+            continue
+        source_terms = set(re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", _evidence_text(source).casefold()))
+        overlap = len(terms & source_terms)
+        if overlap:
+            enriched = dict(source)
+            enriched["claim_relevance_score"] = round(overlap / len(terms), 3)
+            ranked.append((overlap / len(terms), -index, enriched))
+    ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    return [item[2] for item in ranked]
+
+
+def function_to_get_supporting_evidence(hypothesis: Hypothesis, claim: str) -> list[dict[str, Any]]:
+    """Return stored, source-ID-validated evidence relevant to ``claim``."""
+
+    source_ids = {str(source_id) for source_id in getattr(hypothesis, "evidence_source_ids", [])}
+    sources = [
+        dict(source)
+        for source in (getattr(hypothesis, "evidence_sources", []) or [])
+        if isinstance(source, dict) and str(source.get("source_id", "")) in source_ids
+    ]
+    return _rank_claim_evidence(claim, sources)
+
+
+def function_to_get_contradictory_evidence(
+    hypothesis: Hypothesis,
+    claim: str,
+    retriever: ResearchRetriever | None = None,
+) -> list[dict[str, Any]]:
+    """Search the configured evidence providers for sources challenging ``claim``."""
+
+    if not claim.strip():
+        return []
+    search_query = SearchQuery(
+        query=f"{claim} contradictory evidence counterevidence",
+        purpose="find evidence that challenges the claim",
+        source_type="all",
+        search_intent="counterevidence",
+    )
+    query_plan = SearchQueryPlan(queries=(search_query,), required_terms=())
+    try:
+        documents = (retriever or ResearchRetriever()).retrieve(
+            claim,
+            query_plan,
+            force_web=True,
+        )
+    except Exception as exc:
+        logger.warning("Contradictory evidence search failed for %s: %s", hypothesis.hypothesis_id, exc)
+        return []
+    return serialize_documents(documents)
+
+
+def resolve_claim_status(supporting_evidence: list, contradictory_evidence: list) -> str:
+    """Classify a claim from the presence of supporting and contradictory evidence."""
+
+    has_support = len(supporting_evidence) > 0
+    has_contradiction = len(contradictory_evidence) > 0
+
+    if not has_support and not has_contradiction:
+        return "NOT_FOUND"
+    if has_support and has_contradiction:
+        return "MIXED"
+    if has_contradiction:
+        return "CONTRADICTED"
+    if has_support:
+        return "SUPPORTED"
+    
+    return "UNVERIFIED"
+
+def calculate_claim_confidence(
+    status: str,
+    n_supporting: int,
+    n_contradictory: int,
+    n_threshold: int = 3,
+    w1: float = 0.4,
+    w2: float = 0.6,
+    w3: float = 0.25,
+) -> float:
+    # Base status score (S_status)
+    status_weights = {
+        "SUPPORTED": 1.0,
+        "MIXED": 0.5,
+        "UNVERIFIED": 0.0,
+        "NOT_FOUND": 0.0,
+        "CONTRADICTED": -0.5,
+    }
+    s_status = status_weights.get(status, 0.0)
+
+    # Calculate capped evidence ratio
+    evidence_ratio = min(1.0, max(0, n_supporting) / max(1, n_threshold))
+
+    # Compute raw score
+    raw_score = (w1 * s_status) + (w2 * evidence_ratio) - (w3 * n_contradictory)
+
+    # Clamp final output between 0.0 and 1.0
+    return max(0.0, min(1.0, raw_score))
+
+def evaluate_claim(
+    hypothesis: Hypothesis,
+    retriever: ResearchRetriever | None = None,
+) -> dict[str, Any]:
+    """Extract, assess, and serialize the first claim in a hypothesis."""
+
+    claim = function_to_extract_claim(hypothesis)
+    supporting_evidence = function_to_get_supporting_evidence(hypothesis, claim)
+    contradictory_evidence = function_to_get_contradictory_evidence(hypothesis, claim, retriever=retriever)
+    status = resolve_claim_status(supporting_evidence, contradictory_evidence)
+    confidence = calculate_claim_confidence(
+        status=status,
+        n_supporting=len(supporting_evidence),
+        n_contradictory=len(contradictory_evidence)
+    )
+    return {
+        "claim": claim,
+        "status": status,
+        "confidence": confidence,
+        "supporting_evidence": supporting_evidence,
+        "contradictory_evidence": contradictory_evidence,
+    }

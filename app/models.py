@@ -219,12 +219,12 @@ class PairwiseDecision(BaseModel):
 class ClaimAssessment(BaseModel):
     claim: str
 
-    status: Literal["SUPPORTED", "CONTRADICTED", "MIXED", "NOT_FOUND", "UNVERIFIED"]
+    status: Literal["SUPPORTED", "CONTRADICTED", "MIXED", "NOT_FOUND", "UNVERIFIED"] = "UNVERIFIED"
+
+    confidence: float = 0.0
 
     supporting_evidence: List[Dict] = []
     contradictory_evidence: List[Dict] = []
-
-    confidence: float = 0.0
 
 
 class ReflectionReport(BaseModel):

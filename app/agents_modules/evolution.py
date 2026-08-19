@@ -6,7 +6,7 @@ from typing import List
 
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
-from ._compat import _legacy
+from ..utils import logger
 from .evolution_helpers import (
     EVOLUTION_STRATEGIES,
     EvolutionStrategy,
@@ -58,7 +58,7 @@ class EvolutionAgent:
         context.last_evolution_attempts = []
         active = context.get_active_hypotheses()
         if not active:
-            _legacy.logger.info("No active hypotheses to evolve.")
+            logger.info("No active hypotheses to evolve.")
             return []
 
         sorted_by_elo = sorted(active, key=lambda h: h.elo_score, reverse=True)
@@ -90,7 +90,7 @@ class EvolutionAgent:
                 strategy,
                 evidence_sources=evidence_sources,
             )
-            _legacy.logger.info(
+            logger.info(
                 "Evolved hypothesis %s created with strategy %s from parents %s",
                 evolved.hypothesis_id,
                 strategy,
@@ -102,7 +102,7 @@ class EvolutionAgent:
         # artificial ranking advantage from its length. Keep the parents unchanged
         # when every strategy fails instead of adding a misleading tournament entry.
         if not new_hypotheses and len(top_candidates) >= 2:
-            _legacy.logger.warning(
+            logger.warning(
                 "All Evolution strategies failed; no evolved hypothesis was created from parents %s.",
                 [parent.hypothesis_id for parent in top_candidates],
             )

@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Iterable, List
 
 from ..models import ContextMemory, Hypothesis, ResearchGoal
-from ._compat import _legacy
+from ..utils import logger
+from .ranking_helpers import run_pairwise_debate, update_elo, update_elo_tie
 
 
 class RankingAgent:
@@ -24,12 +25,12 @@ class RankingAgent:
         k_factor = research_goal.elo_k_factor
 
         if len(hypotheses) < 2:
-            _legacy.logger.info("Not enough hypotheses to run a tournament.")
+            logger.info("Not enough hypotheses to run a tournament.")
             return
 
         active_hypotheses = [h for h in hypotheses if h.is_active]
         if len(active_hypotheses) < 2:
-            _legacy.logger.info("Not enough *active* hypotheses to run a tournament.")
+            logger.info("Not enough *active* hypotheses to run a tournament.")
             return
 
         random.shuffle(active_hypotheses)  # Shuffle only active ones
@@ -54,17 +55,17 @@ class RankingAgent:
                     pairs.append((h_a, h_b))
 
         if not pairs:
-            _legacy.logger.info("No new hypotheses require ranking comparisons.")
+            logger.info("No new hypotheses require ranking comparisons.")
             return
 
         for h in active_hypotheses:
-            _legacy.logger.info(
+            logger.info(
                 "Ranking input: %s | reflection_report=%s",
                 h.hypothesis_id,
                 h.reflection_report is not None,
             )
 
-        _legacy.logger.info(f"Running tournament with {len(pairs)} pairs.")
+        logger.info(f"Running tournament with {len(pairs)} pairs.")
 
         # ---- Parallel LLM Debates ----
         def run_match(pair):
@@ -73,7 +74,7 @@ class RankingAgent:
                 print(
                     f"[{datetime.now().strftime('%H:%M:%S')}] START {hA.hypothesis_id} vs {hB.hypothesis_id}"
                 )
-                decision = _legacy.run_pairwise_debate(
+                decision = run_pairwise_debate(
                     hA,
                     hB,
                     research_goal
@@ -84,7 +85,7 @@ class RankingAgent:
                 return hA, hB, decision
 
             except Exception as e:
-                _legacy.logger.error(
+                logger.error(
                     f"Ranking failed for {hA.hypothesis_id} vs {hB.hypothesis_id}: {e}"
                 )
                 return None
@@ -106,7 +107,7 @@ class RankingAgent:
             # ------------------------------------------------------------
             if decision.outcome in {"A", "B", "TIE"}:
                 if not decision.scores_a or not decision.scores_b:
-                    _legacy.logger.warning(
+                    logger.warning(
                         "Skipping Elo update for %s vs %s because ranking "
                         "scores are missing.",
                         hA.hypothesis_id,
@@ -127,25 +128,25 @@ class RankingAgent:
             # Elo update
             # ------------------------------------------------------------
             if decision.outcome == "A":
-                _legacy.update_elo(
+                update_elo(
                     hA,
                     hB,
                     k_factor=k_factor
                 )
             elif decision.outcome == "B":
-                _legacy.update_elo(
+                update_elo(
                     hB,
                     hA,
                     k_factor=k_factor
                 )
             elif decision.outcome == "TIE":
-                _legacy.update_elo_tie(
+                update_elo_tie(
                     hA,
                     hB,
                     k_factor=k_factor
                 )
             elif decision.outcome == "ABSTAIN":
-                _legacy.logger.info(
+                logger.info(
                     f"Judge abstained: no clear winner determined between "
                     f"{hA.hypothesis_id} and {hB.hypothesis_id}."
                 )

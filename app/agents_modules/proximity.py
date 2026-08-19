@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from ..models import ContextMemory
-from ._compat import _legacy
+from ..utils import logger
 from .proximity_helpers import (
     BatchSimilarityCalculator,
     GraphOptimizer,
@@ -328,7 +328,7 @@ class ProximityAgent:
             threshold,
         )
 
-        _legacy.logger.info(
+        logger.info(
             "Identified %d clusters from %d hypotheses.",
             len(set(clusters.values())),
             len(clusters),
@@ -435,6 +435,6 @@ class ProximityAgent:
 
         self.scorer.clear_cache()
 
-        _legacy.logger.debug(
+        logger.debug(
             "Cleared similarity and embedding caches."
         )

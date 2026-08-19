@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..models import ContextMemory
-from ._compat import _legacy
+from ..utils import logger
 
 
 class MetaReviewAgent:
@@ -166,7 +166,7 @@ class MetaReviewAgent:
         # Top-ranked hypotheses
         # ----------------------------------------------------------------
         best_hypotheses = sorted(active_hypotheses, key=lambda h: h.elo_score, reverse=True)[:3]
-        _legacy.logger.info(
+        logger.info(
             "Top hypotheses for meta-review: %s",
             [h.hypothesis_id for h in best_hypotheses],
         )
@@ -188,5 +188,5 @@ class MetaReviewAgent:
             },
         }
         context.meta_review_feedback.append(overview)
-        _legacy.logger.info("Meta-review complete with %d critique(s).", len(comment_summary))
+        logger.info("Meta-review complete with %d critique(s).", len(comment_summary))
         return overview
