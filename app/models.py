@@ -221,8 +221,6 @@ class ClaimAssessment(BaseModel):
 
     status: Literal["SUPPORTED", "CONTRADICTED", "MIXED", "NOT_FOUND", "UNVERIFIED"] = "UNVERIFIED"
 
-    confidence: float = 0.0
-
     supporting_evidence: List[Dict] = []
     contradictory_evidence: List[Dict] = []
 
@@ -240,7 +238,6 @@ class ReflectionReport(BaseModel):
     recommendation: str = "UNREVIEWED"
 
 
-    #unused variables(keeping for potential future use)
     claims: List[ClaimAssessment] = []
     confidence: float = 0.0
 

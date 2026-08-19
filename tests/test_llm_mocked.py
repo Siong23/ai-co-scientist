@@ -532,6 +532,51 @@ def test_reflection_agent_does_not_create_zero_score_report_after_llm_failure():
     assert hypothesis.feasibility_review == "UNREVIEWED"
 
 
+def test_reflection_agent_stores_sub_claim_assessments_on_report():
+    hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-sub-claims")
+    review = {
+        "novelty_review": "HIGH",
+        "feasibility_review": "HIGH",
+        "alignment_score": 8,
+        "novelty_score": 8,
+        "feasibility_score": 8,
+        "plausibility_score": 8,
+        "testability_score": 8,
+        "evidence_quality_score": 8,
+        "expected_research_value_score": 8,
+        "strengths": [],
+        "weaknesses": [],
+        "recommendation": "ACCEPT",
+        "comment": "Looks plausible.",
+        "references": [],
+    }
+    claim_assessment = {
+        "claims": [
+            {
+                "claim": "The method improves recall.",
+                "status": "SUPPORTED",
+                "supporting_evidence": [{"source_id": "paper-1"}],
+                "contradictory_evidence": [],
+            }
+        ],
+        "confidence": 0.8,
+    }
+
+    with (
+        patch("app.agents_modules.reflection.call_llm_for_reflection", return_value=review),
+        patch("app.agents_modules.reflection.evaluate_claims", return_value=claim_assessment),
+    ):
+        ReflectionAgent().review_hypotheses(
+            [hypothesis],
+            ContextMemory(),
+            ResearchGoal(description="test goal", constraints=""),
+        )
+
+    assert hypothesis.reflection_report is not None
+    assert hypothesis.reflection_report.claims[0].claim == "The method improves recall."
+    assert hypothesis.reflection_report.confidence == 0.8
+
+
 def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():
     hypothesis = Hypothesis(
         title="Original title",
@@ -559,6 +604,10 @@ def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():
     with (
         patch("app.agents_modules.reflection.call_llm_for_reflection", return_value=review),
         patch("app.agents_modules.reflection.call_llm_for_hypothesis_revision") as mock_revision,
+        patch(
+            "app.agents_modules.reflection.evaluate_claims",
+            return_value={"claims": [], "confidence": 0.0},
+        ),
     ):
         ReflectionAgent().review_hypotheses(
             [hypothesis],

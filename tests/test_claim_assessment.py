@@ -1,16 +1,19 @@
 from langchain_core.documents import Document
 
 from app.agents_modules.reflection_helpers import (
-    evaluate_claim,
+    evaluate_claims,
     function_to_extract_claim,
     function_to_get_supporting_evidence,
 )
-from app.models import ClaimAssessment, Hypothesis
+from app.models import ClaimAssessment, Hypothesis, ReflectionReport
 
 
 class FakeRetriever:
     def retrieve(self, original_query, query_plan, *, force_web=False):
-        assert original_query == "The method improves recall in noisy data."
+        assert original_query in {
+            "The method improves recall in noisy data.",
+            "The method reduces false positives in noisy data.",
+        }
         assert query_plan.queries[0].search_intent == "counterevidence"
         assert force_web is True
         return [
@@ -26,14 +29,21 @@ class FakeRetriever:
         ]
 
 
-def test_claim_extraction_uses_hypothesis_section():
+def test_claim_extraction_uses_llm_to_split_hypothesis_section(monkeypatch):
     hypothesis = Hypothesis(
         "G1",
         "Recall claim",
         "Hypothesis: The method improves recall in noisy data.\n\nRationale: It combines two signals.",
     )
+    monkeypatch.setattr(
+        "app.agents_modules.reflection_helpers._call_llm",
+        lambda *args, **kwargs: '{"sub_claims": ["The method improves recall in noisy data.", "The method reduces false positives in noisy data."]}',
+    )
 
-    assert function_to_extract_claim(hypothesis) == "The method improves recall in noisy data."
+    assert function_to_extract_claim(hypothesis) == [
+        "The method improves recall in noisy data.",
+        "The method reduces false positives in noisy data.",
+    ]
 
 
 def test_supporting_evidence_requires_valid_source_id_and_matches_claim():
@@ -51,7 +61,7 @@ def test_supporting_evidence_requires_valid_source_id_and_matches_claim():
     assert evidence[0]["claim_relevance_score"] > 0
 
 
-def test_evaluate_claim_returns_complete_assessment():
+def test_evaluate_claims_returns_sub_claim_assessments_and_report_confidence(monkeypatch):
     hypothesis = Hypothesis(
         "G1",
         "Recall claim",
@@ -62,11 +72,22 @@ def test_evaluate_claim_returns_complete_assessment():
         {"source_id": "paper-1", "title": "Recall in noisy data", "abstract": "The method improves recall."},
     ]
 
-    assessment = evaluate_claim(hypothesis, retriever=FakeRetriever())
+    monkeypatch.setattr(
+        "app.agents_modules.reflection_helpers._call_llm",
+        lambda *args, **kwargs: '{"sub_claims": ["The method improves recall in noisy data."]}',
+    )
 
-    assert assessment["claim"] == "The method improves recall in noisy data."
-    assert assessment["status"] == "MIXED"
+    assessment = evaluate_claims(hypothesis, retriever=FakeRetriever())
+
     assert assessment["confidence"] > 0
-    assert assessment["contradictory_evidence"][0]["source_id"] == "arXiv:9999.00001"
-    validated = ClaimAssessment(**assessment)
-    assert validated.claim == assessment["claim"]
+    assert len(assessment["claims"]) == 1
+    sub_claim = assessment["claims"][0]
+    assert sub_claim["claim"] == "The method improves recall in noisy data."
+    assert sub_claim["status"] == "MIXED"
+    assert sub_claim["contradictory_evidence"][0]["source_id"] == "arXiv:9999.00001"
+    validated = ClaimAssessment(**sub_claim)
+    assert validated.claim == sub_claim["claim"]
+    assert "confidence" not in validated.model_fields_set
+
+    report = ReflectionReport(claims=assessment["claims"], confidence=assessment["confidence"])
+    assert report.confidence == assessment["confidence"]
