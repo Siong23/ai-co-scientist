@@ -24,7 +24,6 @@ from typing import Dict, List, Tuple
 from app.agents_modules.proximity import ProximityAgent
 from app.agents_modules.proximity_helpers import SimilarityConfig
 
-
 # ============================================================
 # Lightweight evaluation hypothesis/context
 # ============================================================

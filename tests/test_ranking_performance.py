@@ -55,8 +55,8 @@ from app.agents_modules.ranking import RankingAgent
 from app.agents_modules.ranking_helpers import (
     RANKING_LLM_MODEL,
     format_reflection_report,
-    parse_pairwise_result,
     parse_confidence,
+    parse_pairwise_result,
     run_pairwise_debate,
     update_elo,
     update_elo_tie,
