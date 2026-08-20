@@ -265,8 +265,7 @@ def render_report(run: Dict[str, Any]) -> str:
                     <tbody>
                 """)
                 for result in tournament:
-                    confidence = f"{result.get('confidence',0)*100:.0f}%"
-                    # confidence = f"{result.get('confidence', 0) * 100:.1f}%"
+                    confidence = f"{result.get('confidence', 1)}/10"
                     criteria = ", ".join(result.get("criteria", []))
                     title_lookup = {
                         h["id"]: h["title"]

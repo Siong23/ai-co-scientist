@@ -63,23 +63,15 @@ def score_hypothesis(
         "expected_research_value": report.expected_research_value_score,
     }
 
-def parse_confidence(response):
+def parse_confidence(response: str) -> int:
+    """Parse the ranking judge's required integer confidence score from 1 to 10."""
 
     match = re.search(
-        r"confidence\s*:\s*(0?\.\d+|1\.0|[0-9]+%)",
+        r"confidence\s*:\s*(10|[1-9])(?:\s*/\s*10)?\b",
         response,
-        re.IGNORECASE
+        re.IGNORECASE,
     )
-
-    if match:
-        value = match.group(1)
-
-        if "%" in value:
-            return float(value.replace("%","")) / 100
-
-        return float(value)
-
-    return 0.0
+    return int(match.group(1)) if match else 1
 
 def parse_decisive_criteria(response: str) -> List[str]:
 
@@ -266,6 +258,7 @@ def format_reflection_report(
                     "",
                     f"Claim {idx}: {claim_text}",
                     f"Status: {status}",
+                    f"Confidence: {getattr(claim, 'confidence', 1.0)}/10",
                     "Supporting Source IDs: "
                     + (
                         ", ".join(supporting_ids)
@@ -307,21 +300,11 @@ def format_reflection_report(
     else:
         output.append("- None provided.")
 
-    output.append("")
-    output.append("Contradictions:")
-
-    contradictions = getattr(report, "contradictions", None) or []
-
-    if contradictions:
-        output.extend(f"- {item}" for item in contradictions)
-    else:
-        output.append("- None provided.")
-
     output.extend(
         [
             "",
             f"Recommendation: {report.recommendation}",
-            f"Reflection Confidence: {report.confidence}",
+            f"Overall Reflection Confidence: {report.overall_confidence}/10",
         ]
     )
 
@@ -478,7 +461,8 @@ def judge_debate(
     If the decision is ABSTAIN, list the reasons that prevented a confident comparison as the decisive criteria.
 
     Confidence:
-    Provide your confidence as a decimal number between 0 and 1.
+    Provide an integer confidence score from 1 to 10, where 1 means minimal
+    confidence and 10 means maximum confidence.
     """
 
     return _call_llm(
@@ -647,7 +631,7 @@ def judge_hypotheses(
     - Criterion 2
 
     Confidence:
-    A decimal number between 0 and 1.
+    An integer from 1 to 10.
     """
 
     return _call_llm(
@@ -716,7 +700,7 @@ def run_pairwise_debate(
             outcome="ABSTAIN",
             scores_a={},
             scores_b={},
-            confidence=0.0,
+            confidence=1,
             reasoning=reason,
             decisive_criteria=[
                 "Required ReflectionReport is missing."
@@ -759,7 +743,7 @@ def run_pairwise_debate(
             outcome="ABSTAIN",
             scores_a=scores_a,
             scores_b=scores_b,
-            confidence=0.0,
+            confidence=1,
             reasoning=reason,
             decisive_criteria=[
                 "Invalid or incomplete ReflectionReport scores."

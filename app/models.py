@@ -1,6 +1,6 @@
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 # Import config to access defaults easily
 from .config import config
@@ -211,7 +211,7 @@ class PairwiseDecision(BaseModel):
 
     decisive_criteria: List[str] = []
 
-    confidence: float
+    confidence: StrictInt = Field(ge=1, le=10)
 
     reasoning: str
 
@@ -221,6 +221,7 @@ class ClaimAssessment(BaseModel):
 
     status: Literal["SUPPORTED", "CONTRADICTED", "MIXED", "NOT_FOUND", "UNVERIFIED"] = "UNVERIFIED"
 
+    confidence: float = Field(default=1.0, ge=1.0, le=10.0)
     supporting_evidence: List[Dict] = []
     contradictory_evidence: List[Dict] = []
 
@@ -239,7 +240,7 @@ class ReflectionReport(BaseModel):
 
 
     claims: List[ClaimAssessment] = []
-    confidence: float = 0.0
+    overall_confidence: float = Field(default=1.0, ge=1.0, le=10.0)
 
 
 ###############################################################################

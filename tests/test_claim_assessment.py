@@ -1,6 +1,8 @@
 from langchain_core.documents import Document
 
 from app.agents_modules.reflection_helpers import (
+    calculate_claim_confidence,
+    compute_overall_confidence,
     evaluate_claims,
     function_to_extract_claim,
     function_to_get_supporting_evidence,
@@ -77,17 +79,46 @@ def test_evaluate_claims_returns_sub_claim_assessments_and_report_confidence(mon
         lambda *args, **kwargs: '{"sub_claims": ["The method improves recall in noisy data."]}',
     )
 
-    assessment = evaluate_claims(hypothesis, retriever=FakeRetriever())
+    assessment = evaluate_claims(
+        hypothesis,
+        evidence_quality_score=8,
+        plausibility_score=7,
+        retriever=FakeRetriever(),
+    )
 
-    assert assessment["confidence"] > 0
+    assert 1.0 <= assessment["overall_confidence"] <= 10.0
     assert len(assessment["claims"]) == 1
     sub_claim = assessment["claims"][0]
     assert sub_claim["claim"] == "The method improves recall in noisy data."
     assert sub_claim["status"] == "MIXED"
+    assert 1.0 <= sub_claim["confidence"] <= 10.0
     assert sub_claim["contradictory_evidence"][0]["source_id"] == "arXiv:9999.00001"
     validated = ClaimAssessment(**sub_claim)
     assert validated.claim == sub_claim["claim"]
-    assert "confidence" not in validated.model_fields_set
+    assert validated.confidence == sub_claim["confidence"]
 
-    report = ReflectionReport(claims=assessment["claims"], confidence=assessment["confidence"])
-    assert report.confidence == assessment["confidence"]
+    report = ReflectionReport(
+        claims=assessment["claims"],
+        overall_confidence=assessment["overall_confidence"],
+    )
+    assert report.overall_confidence == assessment["overall_confidence"]
+
+
+def test_overall_confidence_combines_sub_claim_and_reflection_scores():
+    claims = [
+        ClaimAssessment(claim="Supported claim", confidence=10.0),
+        ClaimAssessment(claim="Unsupported claim", confidence=1.0),
+    ]
+
+    assert calculate_claim_confidence(
+        {
+            "status": "SUPPORTED",
+            "supporting_evidence": [{}, {}, {}],
+            "contradictory_evidence": [],
+        }
+    ) == 10.0
+    assert compute_overall_confidence(
+        claims,
+        evidence_quality_score=10,
+        plausibility_score=10,
+    ) == 6.85

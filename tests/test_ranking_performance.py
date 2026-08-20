@@ -49,11 +49,14 @@ from time import perf_counter
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from app.agents_modules.ranking import RankingAgent
 from app.agents_modules.ranking_helpers import (
     RANKING_LLM_MODEL,
+    format_reflection_report,
     parse_pairwise_result,
+    parse_confidence,
     run_pairwise_debate,
     update_elo,
     update_elo_tie,
@@ -81,9 +84,8 @@ def _reflection_report(
         expected_research_value_score=research_value,
         strengths=["Reasonably strong hypothesis."],
         weaknesses=[],
-        # contradictions=[],
         recommendation="ACCEPT",
-        confidence=0.8,
+        overall_confidence=8.0,
     )
 
 def _hypothesis(hypothesis_id: str, elo_score: float = 1200.0, reflection_report=None) -> Hypothesis:
@@ -100,7 +102,7 @@ def _decision(
     hypothesis_a,
     hypothesis_b,
     outcome="A",
-    confidence=0.8,
+    confidence=8,
 ):
     """Create a deterministic pairwise decision."""
 
@@ -128,7 +130,7 @@ def _decision(
 
 def _ranking_response(
     outcome: str,
-    confidence: float = 0.8,
+    confidence: int = 8,
     criterion: str = "scientific validity",
 ) -> str:
     """Create a deterministic LLM ranking response."""
@@ -144,6 +146,36 @@ def _ranking_response(
             Confidence:
             {confidence}
             """
+
+
+def test_pairwise_confidence_requires_integer_score_from_one_to_ten():
+    assert parse_confidence("Confidence: 8") == 8
+    assert parse_confidence("Confidence: 10/10") == 10
+    assert parse_confidence("Confidence: 0.8") == 1
+
+    with pytest.raises(ValidationError):
+        PairwiseDecision(
+            hypothesis_a_id="A",
+            hypothesis_b_id="B",
+            outcome="A",
+            confidence=8.0,
+            reasoning="Invalid decimal confidence.",
+        )
+
+    with pytest.raises(ValidationError):
+        PairwiseDecision(
+            hypothesis_a_id="A",
+            hypothesis_b_id="B",
+            outcome="A",
+            confidence=11,
+            reasoning="Out-of-range confidence.",
+        )
+
+
+def test_formatted_reflection_report_omits_obsolete_contradictions():
+    report = _reflection_report()
+
+    assert "Contradictions:" not in format_reflection_report(report)
 
 
 # ---------------------------------------------------------------------------
@@ -709,7 +741,7 @@ def test_tournament_records_results_in_context():
             h_a,
             h_b,
             outcome="A",
-            confidence=0.9,
+            confidence=9,
         )
 
     with patch(
@@ -743,7 +775,7 @@ def test_tournament_records_results_in_context():
     assert result["outcome"] == "A"
 
     # Verify decision metadata.
-    assert result["confidence"] == 0.9
+    assert result["confidence"] == 9
     assert result["reasoning"] == "A better matches the research goal."
 
     # Verify Elo scores after the comparison are recorded.

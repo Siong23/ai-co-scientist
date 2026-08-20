@@ -555,11 +555,12 @@ def test_reflection_agent_stores_sub_claim_assessments_on_report():
             {
                 "claim": "The method improves recall.",
                 "status": "SUPPORTED",
+                "confidence": 8.0,
                 "supporting_evidence": [{"source_id": "paper-1"}],
                 "contradictory_evidence": [],
             }
         ],
-        "confidence": 0.8,
+        "overall_confidence": 8.0,
     }
 
     with (
@@ -574,7 +575,8 @@ def test_reflection_agent_stores_sub_claim_assessments_on_report():
 
     assert hypothesis.reflection_report is not None
     assert hypothesis.reflection_report.claims[0].claim == "The method improves recall."
-    assert hypothesis.reflection_report.confidence == 0.8
+    assert hypothesis.reflection_report.claims[0].confidence == 8.0
+    assert hypothesis.reflection_report.overall_confidence == 8.0
 
 
 def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():
@@ -606,7 +608,7 @@ def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():
         patch("app.agents_modules.reflection.call_llm_for_hypothesis_revision") as mock_revision,
         patch(
             "app.agents_modules.reflection.evaluate_claims",
-            return_value={"claims": [], "confidence": 0.0},
+            return_value={"claims": [], "overall_confidence": 1.0},
         ),
     ):
         ReflectionAgent().review_hypotheses(

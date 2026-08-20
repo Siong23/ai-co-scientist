@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Dict, List
 
-from ..models import ContextMemory, Hypothesis, ResearchGoal
+from ..models import ClaimAssessment, ContextMemory, Hypothesis, ResearchGoal
 from ..rag_retriever import ResearchRetriever, SearchQuery, SearchQueryPlan, serialize_documents
 from ..utils import logger
 from .generation_helpers import _call_llm, call_llm_for_generation
@@ -561,14 +561,14 @@ def resolve_claim_status(supporting_evidence: list, contradictory_evidence: list
     
     return "UNVERIFIED"
 
-def _claim_confidence_contribution(
+def calculate_claim_confidence(
     assessment: dict[str, Any],
     n_threshold: int = 3,
     w1: float = 0.4,
     w2: float = 0.6,
     w3: float = 0.25,
 ) -> float:
-    """Calculate one sub-claim's contribution to aggregate reflection confidence."""
+    """Calculate a 1-10 confidence score for one assessed sub-claim."""
 
     status_weights = {
         "SUPPORTED": 1.0,
@@ -582,28 +582,20 @@ def _claim_confidence_contribution(
     contradictory_evidence = assessment.get("contradictory_evidence", [])
     evidence_ratio = min(1.0, len(supporting_evidence) / max(1, n_threshold))
     raw_score = (w1 * s_status) + (w2 * evidence_ratio) - (w3 * len(contradictory_evidence))
-    return max(0.0, min(1.0, raw_score))
-
-
-def calculate_reflection_confidence(claims: list[dict[str, Any]]) -> float:
-    """Return the mean evidence-based confidence across assessed sub-claims."""
-
-    if not claims:
-        return 0.0
-    return round(
-        sum(_claim_confidence_contribution(claim) for claim in claims) / len(claims),
-        3,
-    )
+    normalized_score = max(0.0, min(1.0, raw_score))
+    return round(1.0 + (9.0 * normalized_score), 2)
 
 
 def evaluate_claims(
     hypothesis: Hypothesis,
+    evidence_quality_score: float,
+    plausibility_score: float,
     retriever: ResearchRetriever | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Assess every LLM-extracted sub-claim and aggregate report confidence."""
+    """Assess every sub-claim and calculate the report's overall confidence."""
 
-    assessments = []
+    assessments: list[ClaimAssessment] = []
     for claim in function_to_extract_claim(hypothesis, model=model):
         supporting_evidence = function_to_get_supporting_evidence(hypothesis, claim)
         contradictory_evidence = function_to_get_contradictory_evidence(
@@ -611,15 +603,47 @@ def evaluate_claims(
             claim,
             retriever=retriever,
         )
-        assessments.append(
-            {
-                "claim": claim,
-                "status": resolve_claim_status(supporting_evidence, contradictory_evidence),
-                "supporting_evidence": supporting_evidence,
-                "contradictory_evidence": contradictory_evidence,
-            }
-        )
+        assessment = {
+            "claim": claim,
+            "status": resolve_claim_status(supporting_evidence, contradictory_evidence),
+            "supporting_evidence": supporting_evidence,
+            "contradictory_evidence": contradictory_evidence,
+        }
+        assessment["confidence"] = calculate_claim_confidence(assessment)
+        assessments.append(ClaimAssessment(**assessment))
+
+    overall_confidence = compute_overall_confidence(
+        assessments,
+        evidence_quality_score=evidence_quality_score,
+        plausibility_score=plausibility_score,
+    )
     return {
-        "claims": assessments,
-        "confidence": calculate_reflection_confidence(assessments),
+        "claims": [assessment.model_dump() for assessment in assessments],
+        "overall_confidence": overall_confidence,
     }
+
+
+def compute_overall_confidence(
+    claims: List[ClaimAssessment],
+    evidence_quality_score: float,
+    plausibility_score: float,
+    alpha: float = 0.70,
+    beta: float = 0.15,
+    gamma: float = 0.15,
+) -> float:
+    """Compute a 1-10 confidence score from sub-claim and review quality scores."""
+
+    if not claims:
+        average_claim_confidence = 1.0
+    else:
+        average_claim_confidence = sum(claim.confidence for claim in claims) / len(claims)
+
+    normalized_claims = (average_claim_confidence - 1.0) / 9.0
+    normalized_evidence = max(1.0, min(10.0, evidence_quality_score)) / 10.0
+    normalized_plausibility = max(1.0, min(10.0, plausibility_score)) / 10.0
+    raw_overall = (
+        (alpha * normalized_claims)
+        + (beta * normalized_evidence)
+        + (gamma * normalized_plausibility)
+    )
+    return round(1.0 + (9.0 * max(0.0, min(1.0, raw_overall))), 2)
