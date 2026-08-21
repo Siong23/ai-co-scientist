@@ -227,13 +227,13 @@ class ClaimAssessment(BaseModel):
 
 
 class ReflectionReport(BaseModel):
-    alignment_score: float = 0.0
-    novelty_score: float = 0.0
-    feasibility_score: float = 0.0
-    plausibility_score: float = 0.0
-    testability_score: float = 0.0
-    evidence_quality_score: float = 0.0
-    expected_research_value_score: float = 0.0
+    alignment_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    novelty_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    feasibility_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    plausibility_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    testability_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    evidence_quality_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    expected_research_value_score: float = Field(default=0.0, ge=0.0, le=10.0)
     strengths: List[str] = []
     weaknesses: List[str] = []
     recommendation: str = "UNREVIEWED"

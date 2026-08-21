@@ -39,7 +39,6 @@ def clean_markdown(text):
 
 def score_hypothesis(
     hypothesis: Hypothesis,
-    research_goal: ResearchGoal,
 ) -> Dict[str, float]:
 
     report = hypothesis.reflection_report
@@ -47,20 +46,15 @@ def score_hypothesis(
     if not report:
         return {}
 
-    alignment = (
-        report.novelty_score +
-        report.feasibility_score +
-        report.plausibility_score
-    ) / 3
-
     return {
-        "research_goal_alignment": alignment,
+        "research_goal_alignment": report.alignment_score,
         "novelty": report.novelty_score,
         "feasibility": report.feasibility_score,
         "scientific_plausibility": report.plausibility_score,
         "testability": report.testability_score,
         "evidence_quality": report.evidence_quality_score,
         "expected_research_value": report.expected_research_value_score,
+        "overall_confidence": report.overall_confidence,
     }
 
 def parse_confidence(response: str) -> int:
@@ -223,13 +217,13 @@ def format_reflection_report(
     output = [
         "=== Structured Reflection Report ===",
         "",
+        f"Alignment Score: {report.alignment_score}/10",
         f"Novelty Score: {report.novelty_score}/10",
         f"Feasibility Score: {report.feasibility_score}/10",
         f"Plausibility Score: {report.plausibility_score}/10",
         f"Testability Score: {report.testability_score}/10",
         f"Evidence Quality: {report.evidence_quality_score}/10",
-        f"Expected Research Value: "
-        f"{report.expected_research_value_score}/10",
+        f"Expected Research Value: {report.expected_research_value_score}/10",
         "",
         "Claims and Evidence Assessment:",
     ]
