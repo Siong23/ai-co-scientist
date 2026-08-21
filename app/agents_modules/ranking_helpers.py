@@ -326,7 +326,8 @@ def generate_debate_argument(
         if research_goal.constraints
         else "None"
     )
-
+    candidate_evidence = format_evidence_sources(candidate)
+    opponent_evidence = format_evidence_sources(opponent)
     prompt = f"""
     You are a domain expert participating in a scientific debate.
 
@@ -352,7 +353,7 @@ def generate_debate_argument(
     {review}
 
     Supporting Evidence Sources:
-    {format_evidence_sources(candidate)}
+    {candidate_evidence}
 
     --------------------------------------
 
@@ -364,7 +365,7 @@ def generate_debate_argument(
     {opponent_review}
 
     Supporting Evidence Sources:
-    {format_evidence_sources(opponent)}
+    {opponent_evidence}
 
     --------------------------------------
 
