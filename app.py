@@ -1245,7 +1245,7 @@ def create_gradio_interface():
         }
         """
 
-    with gr.Blocks(title="Open AI Co-Scientist - Hypothesis Evolution System") as demo:
+    with gr.Blocks(title="AI Co-Scientist - Hypothesis Evolution System") as demo:
         with gr.Sidebar(open=False, width=320, elem_id="research-history-sidebar"):
             gr.Markdown("## Research history")
             gr.Markdown(
@@ -1265,7 +1265,7 @@ def create_gradio_interface():
             sidebar_delete_status = gr.Markdown()
 
         # Header
-        gr.Markdown("# 🔬 Open AI Co-Scientist - Hypothesis Evolution System")
+        gr.Markdown("# 🔬 AI Co-Scientist - Hypothesis Evolution System")
         gr.Markdown("Generate, review, rank, and evolve research hypotheses using AI agents.")
 
         # Deployment status
