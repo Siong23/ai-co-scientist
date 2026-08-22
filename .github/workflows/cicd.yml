@@ -13,6 +13,8 @@ jobs:
 
   ci:
 
+    if: github.repository != 'ionicbond12203/AI-Scientist-Project'
+
     runs-on: ubuntu-latest
 
     steps:
@@ -46,7 +48,9 @@ jobs:
 
     needs: ci
 
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.repository != 'ionicbond12203/AI-Scientist-Project' &&
+      github.ref == 'refs/heads/main'
 
     runs-on:
       - self-hosted

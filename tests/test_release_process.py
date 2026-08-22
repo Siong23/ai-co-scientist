@@ -78,6 +78,14 @@ def load_workflow(name: str) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def test_private_repository_cicd_jobs_are_temporarily_disabled():
+    workflow = load_workflow("cicd.yml")
+
+    private_repo_guard = "github.repository != 'ionicbond12203/AI-Scientist-Project'"
+    assert private_repo_guard in workflow["jobs"]["ci"]["if"]
+    assert private_repo_guard in workflow["jobs"]["deploy"]["if"]
+
+
 def test_github_actions_use_node24_compatible_versions():
     node20_action_pins = {
         "actions/checkout@v4",
