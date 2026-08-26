@@ -644,6 +644,55 @@ def test_hypothesis_auditor_revises_and_passes_a_grounded_candidate():
     }
 
 
+def test_hypothesis_auditor_runs_candidates_concurrently_and_preserves_order():
+    candidates = [{"title": f"Draft {index}"} for index in range(4)]
+    first_attempts = threading.Barrier(len(candidates), timeout=3)
+    call_counts = {candidate["title"]: 0 for candidate in candidates}
+    call_counts_lock = threading.Lock()
+
+    def audit_candidate(prompt, **_kwargs):
+        title = next(candidate["title"] for candidate in candidates if candidate["title"] in prompt)
+        with call_counts_lock:
+            call_counts[title] += 1
+            attempt = call_counts[title]
+
+        if attempt == 1:
+            first_attempts.wait()
+
+        if title == "Draft 1" and attempt == 1:
+            return "malformed"
+        if title == "Draft 2":
+            return "malformed"
+
+        final_hypothesis = {
+            "title": title.replace("Draft", "Audited"),
+            "hypothesis": f"Grounded hypothesis for {title}.",
+            "rationale": "The retrieved source grounds the premise.",
+            "feasibility": "Compare with a baseline and reject if the measured outcome does not improve.",
+            "source_ids": ["arXiv:1111.1111"],
+        }
+        return _audit_payload(final_hypothesis)
+
+    with patch("app.agents.call_llm", side_effect=audit_candidate) as mock_call:
+        audits, error = call_llm_for_hypothesis_audit(
+            "Improve network performance.",
+            candidates,
+            "Source ID: arXiv:1111.1111\nAbstract: Baseline limitation.",
+            {"arXiv:1111.1111"},
+        )
+
+    assert error is None
+    assert audits is not None
+    assert [audit["candidate_index"] for audit in audits] == [0, 1, 2, 3]
+    assert [audit["passed"] for audit in audits] == [True, True, False, True]
+    assert [
+        audit["final_hypothesis"]["title"] if audit["final_hypothesis"] else None
+        for audit in audits
+    ] == ["Audited 0", "Audited 1", None, "Audited 3"]
+    assert call_counts == {"Draft 0": 1, "Draft 1": 2, "Draft 2": 2, "Draft 3": 1}
+    assert mock_call.call_count == 6
+
+
 def test_balanced_hypothesis_auditor_keeps_numeric_target_with_warning():
     final_hypothesis = {
         "title": "Invented precision",

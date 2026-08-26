@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Dict, List
 
@@ -1076,7 +1077,7 @@ def call_llm_for_hypothesis_audit(
     model: str | None = None,
     system_prompt: str | None = None,
 ) -> tuple[list[dict] | None, str | None]:
-    """Audit hypotheses one candidate at a time to ensure grounding and novelty.
+    """Audit hypotheses independently and concurrently to ensure grounding and novelty.
 
     Features:
       1. Single-candidate isolation: audits candidates individually to prevent
@@ -1288,6 +1289,33 @@ Requirements:
             },
         }
 
+    candidate_results: dict[int, tuple[dict | None, str | None]] = {}
+    valid_candidates = [
+        (candidate_index, candidate)
+        for candidate_index, candidate in enumerate(hypotheses)
+        if isinstance(candidate, dict)
+    ]
+
+    if len(valid_candidates) == 1:
+        candidate_index, candidate = valid_candidates[0]
+        candidate_results[candidate_index] = _call_single_candidate(
+            candidate,
+            candidate_index,
+        )
+    elif valid_candidates:
+        with ThreadPoolExecutor(max_workers=min(4, len(valid_candidates))) as executor:
+            results = executor.map(
+                lambda indexed_candidate: (
+                    indexed_candidate[0],
+                    _call_single_candidate(
+                        indexed_candidate[1],
+                        indexed_candidate[0],
+                    ),
+                ),
+                valid_candidates,
+            )
+            candidate_results = dict(results)
+
     audits: list[dict] = []
     audit_mode = _hypothesis_audit_mode()
     minimum_grounding_score = 5 if audit_mode == "strict" else 4
@@ -1302,10 +1330,7 @@ Requirements:
             )
             continue
 
-        raw_audit, audit_error = _call_single_candidate(
-            candidate,
-            candidate_index,
-        )
+        raw_audit, audit_error = candidate_results[candidate_index]
 
         if audit_error or raw_audit is None:
             logger.warning(
