@@ -66,20 +66,20 @@ class MetaReviewAgent:
         # ----------------------------------------------------------------
         # Topology critiques from proximity data
         # ----------------------------------------------------------------
-        next_steps: List[str] = [
-            "Refine top hypotheses based on review comments.",
-            "Seek external expert feedback on top candidates.",
-        ]
+        next_steps: List[str] = ["Refine top hypotheses based on review comments."]
 
         if proximity_data:
             clusters: Dict[int, List[str]] = proximity_data.get("clusters", {})
             cluster_labels: Dict[int, Dict[str, str]] = proximity_data.get("cluster_labels", {})
             outliers: List[str] = proximity_data.get("outliers", [])
             near_duplicates: List[Dict[str, Any]] = proximity_data.get("near_duplicates", [])
-            diversity_score: float = proximity_data.get("diversity_score", 0.0)
+            diversity_score = proximity_data.get("diversity_score")
+            connectivity = proximity_data.get("connectivity", {})
+            highly_connected = proximity_data.get("highly_connected", [])
+            isolated = proximity_data.get("isolated", outliers)
 
             # Diversity critique
-            if diversity_score < 0.35:
+            if isinstance(diversity_score, (int, float)) and diversity_score < 0.35:
                 comment_summary.append(
                     f"Hypothesis diversity is LOW (score {diversity_score:.2f}). "
                     "Most ideas are conceptually similar — consider generating hypotheses "
@@ -89,7 +89,7 @@ class MetaReviewAgent:
                     "Instruct the Generation agent to explore underrepresented sub-fields "
                     "or use the 'out_of_box' Evolution strategy to break from the current cluster."
                 )
-            elif diversity_score > 0.75:
+            elif isinstance(diversity_score, (int, float)) and diversity_score > 0.75:
                 comment_summary.append(
                     f"Hypothesis diversity is HIGH (score {diversity_score:.2f}). "
                     "The landscape is broad — ranking may benefit from additional iterations "
@@ -99,19 +99,50 @@ class MetaReviewAgent:
             # Cluster-level critique
             cluster_members = proximity_data.get("cluster_members")
             if isinstance(cluster_members, dict) and cluster_members:
-                n_clusters = len(cluster_members)
-                cluster_keys = list(cluster_members.keys())
+                normalized_clusters = {
+                    cluster_id: [hypothesis_id for hypothesis_id in members if hypothesis_id in context.hypotheses]
+                    for cluster_id, members in cluster_members.items()
+                    if isinstance(members, (list, tuple, set))
+                }
             elif isinstance(clusters, dict) and clusters:
                 if all(isinstance(v, (int, str)) for v in clusters.values()):
-                    unique_clusters = sorted(set(clusters.values()), key=lambda x: str(x))
-                    n_clusters = len(unique_clusters)
-                    cluster_keys = list(unique_clusters)
+                    normalized_clusters = {}
+                    for hypothesis_id, cluster_id in clusters.items():
+                        if hypothesis_id in context.hypotheses:
+                            normalized_clusters.setdefault(cluster_id, []).append(hypothesis_id)
                 else:
-                    n_clusters = len(clusters)
-                    cluster_keys = list(clusters.keys())
+                    normalized_clusters = {
+                        cluster_id: [hypothesis_id for hypothesis_id in members if hypothesis_id in context.hypotheses]
+                        for cluster_id, members in clusters.items()
+                        if isinstance(members, (list, tuple, set))
+                    }
             else:
-                n_clusters = len(clusters) if isinstance(clusters, (dict, list, set, tuple)) else 0
-                cluster_keys = list(clusters) if isinstance(clusters, (list, tuple)) else []
+                normalized_clusters = {}
+
+            normalized_clusters = {
+                cluster_id: members for cluster_id, members in normalized_clusters.items() if members
+            }
+            n_clusters = len(normalized_clusters)
+            cluster_keys = list(normalized_clusters)
+
+            # Recommendations should name the strongest connected candidate in each
+            # direction, rather than asking Evolution to operate on an arbitrary node.
+            representative_ids = []
+            for members in sorted(normalized_clusters.values(), key=len, reverse=True):
+                connected_members = [
+                    hypothesis_id
+                    for hypothesis_id in members
+                    if hypothesis_id in highly_connected
+                ]
+                candidates = connected_members or members
+                representative = max(
+                    candidates,
+                    key=lambda hypothesis_id: (
+                        connectivity.get(hypothesis_id, 0),
+                        context.hypotheses[hypothesis_id].elo_score,
+                    ),
+                )
+                representative_ids.append(representative)
 
             if n_clusters == 1 and len(active_hypotheses) > 2:
                 comment_summary.append(
@@ -135,8 +166,27 @@ class MetaReviewAgent:
                     + ". Each cluster represents a distinct research direction."
                 )
                 next_steps.append(
-                    "Consider running the Evolution agent on the top exemplar from "
-                    "each cluster to deepen the strongest research directions."
+                    "Run Evolution from the strongest connected hypothesis in each "
+                    f"cluster ({', '.join(representative_ids[:4])}) to deepen distinct directions."
+                )
+
+                largest_cluster = max(len(members) for members in normalized_clusters.values())
+                if largest_cluster / len(active_hypotheses) >= 0.75 and len(active_hypotheses) > 2:
+                    next_steps.append(
+                        "Prioritize hypotheses outside the dominant cluster in the next "
+                        "generation cycle to reduce concentration in the search space."
+                    )
+
+            if n_clusters == 0 and isolated:
+                next_steps.append(
+                    "Validate isolated hypotheses against the research goal and evidence "
+                    "before expanding them; their lack of semantic neighbors is not by itself "
+                    "evidence that they should be deactivated."
+                )
+            elif n_clusters == 1 and len(active_hypotheses) > 2:
+                next_steps.append(
+                    "Generate hypotheses using mechanisms or experimental approaches that "
+                    "are orthogonal to the current cluster before further ranking."
                 )
 
             # Outlier critique
@@ -155,8 +205,18 @@ class MetaReviewAgent:
             if near_duplicates:
                 comment_summary.append(
                     f"{len(near_duplicates)} near-duplicate hypothesis pair(s) were detected "
-                    "and the lower-Elo duplicate was automatically deactivated. Future "
+                    "and should be reviewed for redundant ranking and evidence. Future "
                     "generation cycles should avoid re-proposing these ideas."
+                )
+                next_steps.append(
+                    "Merge or deactivate confirmed near-duplicates after reviewing their "
+                    "evidence and Elo scores."
+                )
+
+            if isolated and n_clusters > 0:
+                next_steps.append(
+                    "Manually validate isolated hypotheses for breakthrough potential or "
+                    "off-topic content before using them as evolution parents."
                 )
 
         if not comment_summary:
