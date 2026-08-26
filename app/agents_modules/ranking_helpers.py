@@ -715,12 +715,10 @@ def run_pairwise_debate(
 
     scores_a = score_hypothesis(
         hypoA,
-        research_goal,
     )
 
     scores_b = score_hypothesis(
         hypoB,
-        research_goal,
     )
 
     # Defensive check
