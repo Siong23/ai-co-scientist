@@ -68,9 +68,8 @@ The structured LLM response should contain at least:
   "expected_research_value_score": 7,
   "strengths": [],
   "weaknesses": [],
-  "contradictions": [],
   "recommendation": "REVISE",
-  "confidence": 0.8
+  "overall_confidence": 8
 }
 ```
 

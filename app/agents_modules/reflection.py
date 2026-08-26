@@ -9,6 +9,7 @@ from ..utils import logger, redact_secrets
 from .reflection_helpers import (
     call_llm_for_hypothesis_revision,
     call_llm_for_reflection,
+    evaluate_claims,
 )
 
 
@@ -30,6 +31,8 @@ def _build_reflection_report(result: Dict) -> Optional[ReflectionReport]:
         strengths=result.get("strengths", []),
         weaknesses=result.get("weaknesses", []),
         recommendation=result.get("recommendation", "UNREVIEWED"),
+        claims=result.get("claims", []),
+        overall_confidence=result.get("overall_confidence", 1.0),
         review_comments=[result["comment"]] if result.get("comment") else [],
     )
 
@@ -64,6 +67,16 @@ class ReflectionAgent:
             h.review_reference_ids = list(result["references"])
 
             reflection_report = _build_reflection_report(result)
+            if reflection_report is not None:
+                result.update(
+                    evaluate_claims(
+                        h,
+                        evidence_quality_score=result["evidence_quality_score"],
+                        plausibility_score=result["plausibility_score"],
+                        model=research_goal.llm_model,
+                    )
+                )
+                reflection_report = _build_reflection_report(result)
             h.reflection_report = reflection_report
 
             # Reflection owns review artifacts only.  It must not rewrite a

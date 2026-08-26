@@ -1,6 +1,6 @@
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 # Import config to access defaults easily
 from .config import config
@@ -211,7 +211,7 @@ class PairwiseDecision(BaseModel):
 
     decisive_criteria: List[str] = []
 
-    confidence: float
+    confidence: StrictInt = Field(ge=1, le=10)
 
     reasoning: str
 
@@ -219,30 +219,28 @@ class PairwiseDecision(BaseModel):
 class ClaimAssessment(BaseModel):
     claim: str
 
-    status: Literal["SUPPORTED", "CONTRADICTED", "MIXED", "NOT_FOUND", "UNVERIFIED"]
+    status: Literal["SUPPORTED", "CONTRADICTED", "MIXED", "NOT_FOUND", "UNVERIFIED"] = "UNVERIFIED"
 
+    confidence: float = Field(default=1.0, ge=1.0, le=10.0)
     supporting_evidence: List[Dict] = []
     contradictory_evidence: List[Dict] = []
 
-    confidence: float = 0.0
-
 
 class ReflectionReport(BaseModel):
-    alignment_score: float = 0.0
-    novelty_score: float = 0.0
-    feasibility_score: float = 0.0
-    plausibility_score: float = 0.0
-    testability_score: float = 0.0
-    evidence_quality_score: float = 0.0
-    expected_research_value_score: float = 0.0
+    alignment_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    novelty_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    feasibility_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    plausibility_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    testability_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    evidence_quality_score: float = Field(default=0.0, ge=0.0, le=10.0)
+    expected_research_value_score: float = Field(default=0.0, ge=0.0, le=10.0)
     strengths: List[str] = []
     weaknesses: List[str] = []
     recommendation: str = "UNREVIEWED"
 
 
-    #unused variables(keeping for potential future use)
     claims: List[ClaimAssessment] = []
-    confidence: float = 0.0
+    overall_confidence: float = Field(default=1.0, ge=1.0, le=10.0)
 
 
 ###############################################################################
