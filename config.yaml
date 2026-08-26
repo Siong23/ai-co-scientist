@@ -65,7 +65,8 @@ elo_k_factor: 32
 # Dedicated ranking model. Set to null or remove to use the main llm_model for
 # pairwise tournament debates. A smaller, faster model reduces latency when many
 # comparisons run in parallel.
-ranking_llm_model: "qwen/qwen3.6-35b-a3b"
+# ranking_llm_model: "qwen/qwen3.6-35b-a3b"
+ranking_llm_model: null
 
 # Top K hypotheses for evolution
 top_k_hypotheses: 2

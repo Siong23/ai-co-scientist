@@ -61,6 +61,7 @@ from app.agents_modules.ranking_helpers import (
     update_elo,
     update_elo_tie,
 )
+from app.config import config
 from app.models import ContextMemory, Hypothesis, PairwiseDecision, ReflectionReport, ResearchGoal
 
 # ---------------------------------------------------------------------------
@@ -209,8 +210,8 @@ def test_pairwise_ranking_uses_one_llm_call():
     assert call_llm.call_count == 1
     print(f"\nLLM calls per pair: {call_llm.call_count}")
 
-    # Ensure the dedicated ranking model is used.
-    assert call_llm.call_args.kwargs["model"] == RANKING_LLM_MODEL
+    # With no dedicated ranking model configured, ranking reuses the main model.
+    assert call_llm.call_args.kwargs["model"] == config["llm_model"]
 
 
 # ---------------------------------------------------------------------------
