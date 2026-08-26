@@ -119,12 +119,11 @@ def test_evaluate_claims_reuses_sub_claims_from_reflection_without_another_llm_c
         raise AssertionError("claim extraction must reuse the reflection response")
 
     monkeypatch.setattr("app.agents_modules.reflection_helpers._call_llm", unexpected_call)
-    monkeypatch.setattr("app.agents_modules.reflection_helpers.ResearchRetriever", unexpected_call)
-
     assessment = evaluate_claims(
         hypothesis,
         evidence_quality_score=7,
         plausibility_score=8,
+        retriever=FakeRetriever(),
         sub_claims=[],
     )
 

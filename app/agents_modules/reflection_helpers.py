@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 from ..models import ClaimAssessment, ContextMemory, Hypothesis, ResearchGoal
 from ..rag_retriever import ResearchRetriever, SearchQuery, SearchQueryPlan, serialize_documents
 from ..utils import logger
-from .generation_helpers import _call_llm, _output_token_limit, call_llm_for_generation
+from .generation_helpers import _call_llm, call_llm_for_generation
 
 _SCORE_FIELDS = (
     "alignment_score",
@@ -220,7 +220,6 @@ def call_llm_for_reflection(
         prompt,
         temperature=temperature,
         model=model,
-        max_tokens=_output_token_limit("reflection", 1200),
         reasoning="off",
     )
     logger.info("LLM reflection response for hypothesis: %s", response)
@@ -278,7 +277,6 @@ def call_llm_for_reflection(
         repair_prompt,
         temperature=0.0,
         model=model,
-        max_tokens=_output_token_limit("format_repair", 1200),
         reasoning="off",
     )
     logger.info("LLM reflection repair response for hypothesis: %s", repaired_response)
@@ -621,10 +619,8 @@ def evaluate_claims(
 ) -> dict[str, Any]:
     """Assess sub-claims against stored evidence and optional counterevidence.
 
-    A retriever must be passed explicitly to perform new searches. Reflection's
-    normal workflow already receives evidence gathered by Generation, including
-    counterevidence queries, so silently creating a retriever here duplicated
-    provider calls once per claim and made cycle latency grow unpredictably.
+    Reflection searches for contradictory evidence for every sub-claim. Passing
+    a retriever remains optional; the configured retriever is used by default.
     """
 
     assessments: list[ClaimAssessment] = []
@@ -637,14 +633,10 @@ def evaluate_claims(
         claims = sub_claims or [_hypothesis_claim_text(hypothesis)]
     for claim in claims:
         supporting_evidence = function_to_get_supporting_evidence(hypothesis, claim)
-        contradictory_evidence = (
-            function_to_get_contradictory_evidence(
-                hypothesis,
-                claim,
-                retriever=retriever,
-            )
-            if retriever is not None
-            else []
+        contradictory_evidence = function_to_get_contradictory_evidence(
+            hypothesis,
+            claim,
+            retriever=retriever,
         )
         assessment = {
             "claim": claim,

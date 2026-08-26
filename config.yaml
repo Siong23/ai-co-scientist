@@ -42,7 +42,6 @@ llm_max_tokens:
   format_repair: 2048
   hypothesis_audit: 3072
   evolution: 2048
-  reflection: 1200
   supervisor_planning: 1600
 
 # The Evolution agent follows a rotating library of refinement strategies.
@@ -108,7 +107,7 @@ rag:
   results_per_query: 20
   top_k: 10
   minimum_relevant_sources: 1
-  corrective_retrieval_rounds: 1
+  corrective_retrieval_rounds: 2
   # The post-generation Novelty Auditor now performs one targeted critique per
   # hypothesis. Keep the older generic debate disabled to avoid three extra
   # large-model calls that repeat the same review work.
@@ -134,16 +133,6 @@ rag:
   query_fidelity_enabled: true
   query_fidelity_min_similarity: 0.35
   provisional_hypothesis_min_similarity: 0.30
-
-# The evidence gate above already guarantees minimum coverage. Autonomous
-# research adds counterevidence after that gate, but one focused step is the
-# default latency budget; increase this only for intentionally deep runs.
-agentic_research:
-  enabled: true
-  max_steps: 1
-  max_queries_per_step: 2
-  max_assumptions: 4
-  max_evidence_sources: 16
 
 # Relevant open-access papers are downloaded only after evidence coverage is
 # confirmed. Their bounded full-text chunks are persisted locally in Chroma and

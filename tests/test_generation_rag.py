@@ -65,8 +65,8 @@ def test_production_generation_defaults_enable_audit_and_agentic_research():
     assert agent.audit_enabled is True
     assert agent.agentic_research_enabled is True
     assert agent.grading_workers == 2
-    assert agent.agentic_max_steps == 1
-    assert agent.rag_retriever.corrective_retrieval_rounds == 1
+    assert agent.agentic_max_steps == 4
+    assert agent.rag_retriever.corrective_retrieval_rounds == 2
     assert GenerationAgent(agentic_research_enabled=False).agentic_research_enabled is False
 
 
