@@ -64,6 +64,9 @@ def test_production_generation_defaults_enable_audit_and_agentic_research():
 
     assert agent.audit_enabled is True
     assert agent.agentic_research_enabled is True
+    assert agent.grading_workers == 2
+    assert agent.agentic_max_steps == 1
+    assert agent.rag_retriever.corrective_retrieval_rounds == 1
     assert GenerationAgent(agentic_research_enabled=False).agentic_research_enabled is False
 
 
@@ -214,11 +217,7 @@ def _query_plan_payload(
     ][:query_count]
     queries: list[str | dict] = query_texts
     if hypothesis_guided:
-        requirement_ids = [
-            str(requirement["id"])
-            for requirement in requirements
-            if requirement.get("id")
-        ]
+        requirement_ids = [str(requirement["id"]) for requirement in requirements if requirement.get("id")]
         intents = [
             ("primary_hypothesis", "support"),
             ("alternative_hypothesis", "counterevidence"),
@@ -238,9 +237,7 @@ def _query_plan_payload(
                 "hypothesis_id": hypothesis_id,
                 "search_intent": intent,
             }
-            for index, (query, (hypothesis_id, intent)) in enumerate(
-                zip(query_texts, intents)
-            )
+            for index, (query, (hypothesis_id, intent)) in enumerate(zip(query_texts, intents))
         ]
     return json.dumps(
         {
@@ -353,9 +350,7 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["goal_scope"]
     assert [aspect.description for aspect in plan.explicit_requirements] == ["brief describe the malaysia history"]
     assert plan.exploration_directions == ("Compare alternative historical interpretations.",)
-    assert [
-        hypothesis.role for hypothesis in plan.provisional_hypotheses
-    ] == ["primary", "alternative", "null"]
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == ["primary", "alternative", "null"]
     assert mock_call.call_count == 2
     assert all(call.kwargs["temperature"] == 0.0 for call in mock_call.call_args_list)
     assert all(call.kwargs["model"] == "chosen-model" for call in mock_call.call_args_list)
@@ -428,9 +423,7 @@ def test_query_rewriter_accepts_dynamic_query_count_up_to_configured_maximum():
     assert error is None
     assert plan is not None
     assert len(plan.queries) == 3
-    rewriter_system_prompt = mock_call.call_args_list[1].kwargs[
-        "system_prompt"
-    ]
+    rewriter_system_prompt = mock_call.call_args_list[1].kwargs["system_prompt"]
     assert "between 3 and 5 distinct queries" in rewriter_system_prompt
 
 
@@ -460,9 +453,7 @@ def test_corrective_query_round_prioritizes_missing_requirements_and_caps_count(
 
 
 def test_query_rewriter_accepts_structured_query_objects():
-    rewritten = json.loads(
-        _query_plan_payload(query_count=5, hypothesis_guided=True)
-    )
+    rewritten = json.loads(_query_plan_payload(query_count=5, hypothesis_guided=True))
     hypothesis_metadata = [
         ("primary_hypothesis", "support"),
         ("alternative_hypothesis", "counterevidence"),
@@ -482,9 +473,7 @@ def test_query_rewriter_accepts_structured_query_objects():
             "hypothesis_id": hypothesis_id,
             "search_intent": intent,
         }
-        for query, (hypothesis_id, intent) in zip(
-            rewritten["queries"], hypothesis_metadata
-        )
+        for query, (hypothesis_id, intent) in zip(rewritten["queries"], hypothesis_metadata)
     ]
 
     with patch(
@@ -685,10 +674,12 @@ def test_hypothesis_auditor_runs_candidates_concurrently_and_preserves_order():
     assert audits is not None
     assert [audit["candidate_index"] for audit in audits] == [0, 1, 2, 3]
     assert [audit["passed"] for audit in audits] == [True, True, False, True]
-    assert [
-        audit["final_hypothesis"]["title"] if audit["final_hypothesis"] else None
-        for audit in audits
-    ] == ["Audited 0", "Audited 1", None, "Audited 3"]
+    assert [audit["final_hypothesis"]["title"] if audit["final_hypothesis"] else None for audit in audits] == [
+        "Audited 0",
+        "Audited 1",
+        None,
+        "Audited 3",
+    ]
     assert call_counts == {"Draft 0": 1, "Draft 1": 2, "Draft 2": 2, "Draft 3": 1}
     assert mock_call.call_count == 6
 
@@ -716,9 +707,7 @@ def test_balanced_hypothesis_auditor_keeps_numeric_target_with_warning():
     assert audits[0]["audit_report"]["scores"]["unsupported_specificity"] == 5.0
     assert audits[0]["audit_report"]["warnings"]
     assert audits[0]["audit_report"]["hard_failures"] == []
-    assert "proposed experimental targets" in " ".join(
-        audits[0]["audit_report"]["warnings"]
-    )
+    assert "proposed experimental targets" in " ".join(audits[0]["audit_report"]["warnings"])
 
 
 def test_strict_hypothesis_auditor_rejects_unsupported_numeric_target(monkeypatch):
@@ -743,9 +732,7 @@ def test_strict_hypothesis_auditor_rejects_unsupported_numeric_target(monkeypatc
     assert audits is not None
     assert audits[0]["passed"] is False
     assert audits[0]["audit_report"]["mode"] == "strict"
-    assert "unsupported numerical claims" in " ".join(
-        audits[0]["audit_report"]["hard_failures"]
-    )
+    assert "unsupported numerical claims" in " ".join(audits[0]["audit_report"]["hard_failures"])
 
 
 def test_hypothesis_auditor_treats_quality_score_and_model_verdict_as_advisory():
@@ -1557,8 +1544,7 @@ def test_query_fidelity_rejects_semantically_drifted_query():
     retriever.provisional_hypothesis_min_similarity = 0.5
     retriever.embeddings = Mock()
     retriever.embeddings.embed_documents.side_effect = lambda texts: [
-        [0.0, 1.0] if "medieval poetry" in text else [1.0, 0.0]
-        for text in texts
+        [0.0, 1.0] if "medieval poetry" in text else [1.0, 0.0] for text in texts
     ]
     plan = SearchQueryPlan(
         queries=(
@@ -1609,11 +1595,7 @@ def test_query_fidelity_rejects_semantically_drifted_query():
 
     assert valid is False
     assert "medieval poetry manuscript provenance" in reason
-    query_reports = [
-        item
-        for item in retriever.last_query_fidelity
-        if item.get("kind") == "query"
-    ]
+    query_reports = [item for item in retriever.last_query_fidelity if item.get("kind") == "query"]
     assert [item["accepted"] for item in query_reports] == [True, False]
     retriever.embeddings.embed_documents.assert_called_once()
 
@@ -1621,9 +1603,7 @@ def test_query_fidelity_rejects_semantically_drifted_query():
 def test_query_fidelity_fails_open_when_embeddings_are_unavailable():
     retriever = ArxivRAGRetriever(query_count=1)
     retriever.embeddings = Mock()
-    retriever.embeddings.embed_documents.side_effect = RuntimeError(
-        "embedding endpoint unavailable"
-    )
+    retriever.embeddings.embed_documents.side_effect = RuntimeError("embedding endpoint unavailable")
     plan = SearchQueryPlan(
         queries=(SearchQuery(query="focused research query"),),
         required_terms=(),
@@ -1665,9 +1645,7 @@ def test_forced_web_fallback_searches_tavily_for_academic_queries():
 
     assert documents == []
     retriever.arxiv.search_papers.assert_called_once()
-    retriever.tavily.search.assert_called_once_with(
-        query="targeted academic evidence"
-    )
+    retriever.tavily.search.assert_called_once_with(query="targeted academic evidence")
 
 
 def test_web_retrieval_uses_web_schema_without_paper_identifiers():
@@ -1696,9 +1674,7 @@ def test_web_retrieval_uses_web_schema_without_paper_identifiers():
     retriever.tavily = Mock(is_configured=True, last_error_status=None)
     retriever.tavily.search.return_value = [web_result]
     retriever.tavily.extract.return_value = {
-        "https://example.org/mec-security": (
-            "Extracted lightweight monitoring evidence for constrained MEC nodes."
-        )
+        "https://example.org/mec-security": ("Extracted lightweight monitoring evidence for constrained MEC nodes.")
     }
     fake_store = Mock()
     fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
@@ -1802,12 +1778,10 @@ def test_extracted_web_chunks_are_reranked_by_sub_question_and_globally_bounded(
     retriever.tavily = Mock(is_configured=True)
     retriever.tavily.extract.return_value = {
         "https://example.org/one": (
-            "<chunk 1> background noise\n"
-            "<chunk 2> alpha mechanism directly answers the question"
+            "<chunk 1> background noise\n<chunk 2> alpha mechanism directly answers the question"
         ),
         "https://example.org/two": (
-            "<chunk 1> unrelated navigation\n"
-            "<chunk 2> alpha benchmark provides decisive evidence"
+            "<chunk 1> unrelated navigation\n<chunk 2> alpha benchmark provides decisive evidence"
         ),
     }
     selected = [
@@ -1847,10 +1821,7 @@ def test_extracted_web_chunks_are_reranked_by_sub_question_and_globally_bounded(
         def similarity_search_with_score(self, query, k):
             assert query == "Which alpha evidence answers the question?"
             return sorted(
-                (
-                    (document, 0.95 if "alpha" in document.page_content else 0.1)
-                    for document in self.documents
-                ),
+                ((document, 0.95 if "alpha" in document.page_content else 0.1) for document in self.documents),
                 key=lambda item: item[1],
                 reverse=True,
             )[:k]
@@ -1889,9 +1860,9 @@ def test_web_search_snippet_is_not_evidence_when_extract_fails():
     retriever.tavily = Mock(is_configured=True)
     retriever.tavily.extract.return_value = {}
     fake_store = Mock()
-    fake_store.similarity_search.side_effect = lambda *args, **kwargs: (
-        fake_store.add_documents.call_args.kwargs["documents"]
-    )
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
 
     with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
         documents = retriever._rank_documents(
@@ -1991,9 +1962,7 @@ def test_structured_queries_route_to_academic_and_news_providers():
         max_results=retriever.results_per_query,
         sort_by="relevance",
     )
-    retriever.semantic_scholar.search_papers.assert_called_once_with(
-        query="hierarchical retrieval long context paper"
-    )
+    retriever.semantic_scholar.search_papers.assert_called_once_with(query="hierarchical retrieval long context paper")
     retriever.tavily.search.assert_called_once_with(
         query="Qwen long context benchmark update",
         time_range="month",
@@ -2017,9 +1986,7 @@ def test_pdf_promotion_does_not_evict_direct_web_evidence():
     retriever = ArxivRAGRetriever(query_count=1, top_k=1, minimum_relevant_sources=1)
     retriever.minimum_downloadable_sources = 1
     retriever.tavily = Mock(is_configured=True)
-    retriever.tavily.extract.return_value = {
-        web_result["arxiv_url"]: "Extracted directly relevant web evidence."
-    }
+    retriever.tavily.extract.return_value = {web_result["arxiv_url"]: "Extracted directly relevant web evidence."}
     fake_store = Mock()
     fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
         "documents"
@@ -2517,9 +2484,7 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
         "arXiv:2103.00003v1",
         "arXiv:2104.00004v3",
     ]
-    assert [
-        source["source_id"] for source in hypotheses[0].evidence_sources
-    ] == hypotheses[0].evidence_source_ids
+    assert [source["source_id"] for source in hypotheses[0].evidence_sources] == hypotheses[0].evidence_source_ids
     assert "IRRELEVANT_UNIQUE" in candidate_contexts[0]
     synthesis_prompt = mock_llm.call_args_list[1].args[0]
     generation_prompt = mock_llm.call_args_list[2].args[0]
@@ -2778,10 +2743,7 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "arXiv:2222.2222",
     ]
     assert mock_retrieve.call_count == 2
-    assert all(
-        call.kwargs["force_web"] is True
-        for call in mock_retrieve.call_args_list
-    )
+    assert all(call.kwargs["force_web"] is True for call in mock_retrieve.call_args_list)
     assert mock_retrieve.call_args_list[1].kwargs["rerank_query"] == "scientific goal"
     gap_plan = mock_retrieve.call_args_list[1].args[1]
     assert gap_plan.query_texts == (

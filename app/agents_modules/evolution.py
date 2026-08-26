@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 from ..config import config
@@ -24,6 +25,7 @@ class EvolutionAgent:
         strategies: tuple[EvolutionStrategy, ...] | None = None,
         max_candidates_per_cycle: int | None = None,
         quality_repair_attempts: int | None = None,
+        max_workers: int | None = None,
     ):
         evolution_config = config.get("evolution", {})
         configured = tuple(evolution_config.get("strategies", EVOLUTION_STRATEGIES))
@@ -37,6 +39,8 @@ class EvolutionAgent:
             int(configured_repairs if quality_repair_attempts is None else quality_repair_attempts),
         )
         self.max_tokens = int(config.get("llm_max_tokens", {}).get("evolution", 2048))
+        configured_workers = config.get("agent_parallelism", {}).get("evolution_workers", 3)
+        self.max_workers = max(1, int(configured_workers if max_workers is None else max_workers))
 
     def _strategies_for_cycle(self, context: ContextMemory, parent_count: int) -> list[EvolutionStrategy]:
         """Rotate through the strategy library while respecting parent-count requirements."""
@@ -65,23 +69,39 @@ class EvolutionAgent:
         parent_count = max(1, int(research_goal.top_k_hypotheses))
         top_candidates = sorted_by_elo[:parent_count]
         strategies = self._strategies_for_cycle(context, len(top_candidates))
-        new_hypotheses = []
+        tasks = []
         for strategy in strategies:
             parents = top_candidates if strategy in {"combination", "inspiration", "out_of_box"} else top_candidates[:1]
             evidence_sources = resolve_parent_evidence(
                 parents,
                 context.last_retrieved_sources,
             )
+            tasks.append((strategy, parents, evidence_sources))
+
+        if not tasks:
+            return []
+
+        def evolve(task):
+            strategy, parents, evidence_sources = task
+            diagnostics = []
             candidate = call_llm_for_evolution(
                 strategy,
                 parents,
                 research_goal,
                 max_tokens=self.max_tokens,
                 evidence_sources=evidence_sources,
-                diagnostics=context.last_evolution_attempts,
+                diagnostics=diagnostics,
                 quality_repair_attempts=self.quality_repair_attempts,
                 meta_review_feedback=getattr(context, "meta_review_feedback", None),
             )
+            return strategy, parents, evidence_sources, candidate, diagnostics
+
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(tasks))) as executor:
+            results = list(executor.map(evolve, tasks))
+
+        new_hypotheses = []
+        for strategy, parents, evidence_sources, candidate, diagnostics in results:
+            context.last_evolution_attempts.extend(diagnostics)
             if candidate is None:
                 continue
             evolved = create_evolved_hypothesis(

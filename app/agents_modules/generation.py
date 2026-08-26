@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple
 
 from ..config import config
@@ -283,6 +284,8 @@ class GenerationAgent:
             1000,
             int(rag_config.get("max_grading_context_chars", 24000)),
         )
+        configured_grading_workers = config.get("agent_parallelism", {}).get("generation_grading_workers", 2)
+        self.grading_workers = max(1, min(2, int(configured_grading_workers)))
         # Novelty and grounding audit toggle
         self.audit_enabled = (
             bool(rag_config.get("hypothesis_audit_enabled", False)) if audit_enabled is None else bool(audit_enabled)
@@ -755,9 +758,7 @@ Your refined contribution:
             merged_documents = merged_documents[: self.agentic_max_sources]
 
             if len(merged_documents) <= len(current_documents):
-                logger.info(
-                    "Agentic retrieval added no new evidence after deduplication; proceeding to generation."
-                )
+                logger.info("Agentic retrieval added no new evidence after deduplication; proceeding to generation.")
                 break
 
             candidate_context = format_documents_for_prompt(merged_documents)
@@ -788,6 +789,46 @@ Your refined contribution:
             )
 
         return current_documents, current_synthesis, assumptions
+
+    def _grade_candidate_evidence(
+        self,
+        research_goal: ResearchGoal,
+        query_plan: SearchQueryPlan,
+        candidate_context: str,
+        candidate_source_ids: set[str],
+    ):
+        """Run independent relevance and coverage judgments concurrently."""
+
+        def grade_relevance():
+            return call_llm_for_relevance_filter(
+                research_goal.description,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
+                explicit_requirements=query_plan.explicit_requirements,
+            )
+
+        def grade_coverage():
+            return call_llm_for_evidence_coverage(
+                research_goal.description,
+                query_plan.explicit_requirements,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
+                max_gap_queries=self.rag_retriever.query_count,
+            )
+
+        if self.grading_workers == 1:
+            relevant_source_ids, relevance_error = grade_relevance()
+            coverage, coverage_error = grade_coverage()
+        else:
+            with ThreadPoolExecutor(max_workers=self.grading_workers) as executor:
+                relevance_future = executor.submit(grade_relevance)
+                coverage_future = executor.submit(grade_coverage)
+                relevant_source_ids, relevance_error = relevance_future.result()
+                coverage, coverage_error = coverage_future.result()
+
+        return relevant_source_ids, relevance_error, coverage, coverage_error
 
     def generate_new_hypotheses(
         self,
@@ -915,12 +956,11 @@ Your refined contribution:
             candidate_source_ids = {str(document.metadata["source_id"]) for document in documents_for_grading}
 
             # 3A: Relevance filtering (advisory candidate selection)
-            relevant_source_ids, relevance_error = call_llm_for_relevance_filter(
-                research_goal.description,
+            relevant_source_ids, relevance_error, coverage, coverage_error = self._grade_candidate_evidence(
+                research_goal,
+                query_plan,
                 candidate_context,
                 candidate_source_ids,
-                model=research_goal.llm_model,
-                explicit_requirements=query_plan.explicit_requirements,
             )
 
             if relevance_error or relevant_source_ids is None:
@@ -938,15 +978,6 @@ Your refined contribution:
                 )
 
             # 3B: Explicit requirement coverage grading
-            coverage, coverage_error = call_llm_for_evidence_coverage(
-                research_goal.description,
-                query_plan.explicit_requirements,
-                candidate_context,
-                candidate_source_ids,
-                model=research_goal.llm_model,
-                max_gap_queries=self.rag_retriever.query_count,
-            )
-
             if coverage_error or coverage is None:
                 if documents_for_grading:
                     logger.warning(

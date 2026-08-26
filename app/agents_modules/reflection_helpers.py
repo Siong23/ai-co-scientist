@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 from ..models import ClaimAssessment, ContextMemory, Hypothesis, ResearchGoal
 from ..rag_retriever import ResearchRetriever, SearchQuery, SearchQueryPlan, serialize_documents
 from ..utils import logger
-from .generation_helpers import _call_llm, call_llm_for_generation
+from .generation_helpers import _call_llm, _output_token_limit, call_llm_for_generation
 
 _SCORE_FIELDS = (
     "alignment_score",
@@ -53,7 +53,7 @@ def _recommendation_from_scores(scores: Dict[str, int]) -> str:
 
 def _convert_score_to_review(score: int) -> str:
     """Convert a 1-10 numeric score to HIGH/MEDIUM/LOW review format.
-    
+
     LOW: 1-4
     MEDIUM: 5-7
     HIGH: 8-10
@@ -86,7 +86,7 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
         "evidence_quality_score",
         "expected_research_value_score",
     ]
-    
+
     scores = {}
     for field in score_fields:
         try:
@@ -127,6 +127,9 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
         "weaknesses": _parse_string_list(parsed_data.get("weaknesses", [])),
         "comment": str(parsed_data.get("comment", "No comment provided.")),
         "references": [],
+        # Reuse the review call for claim decomposition.  Reflection used to
+        # make a second 27B-model request per hypothesis solely for this field.
+        "sub_claims": _parse_string_list(parsed_data.get("sub_claims", [])),
     }
 
     raw_refs = parsed_data.get("references", [])
@@ -137,9 +140,7 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
         # An empty allow-list means that Reflection received no verified
         # evidence.  It must therefore reject every model-produced citation;
         # treating an empty set as unrestricted would preserve hallucinated IDs.
-        review_data["references"] = [
-            ref for ref in raw_refs if isinstance(ref, str) and ref in valid_source_ids
-        ]
+        review_data["references"] = [ref for ref in raw_refs if isinstance(ref, str) and ref in valid_source_ids]
     else:
         logger.warning("Invalid references format received: %s", raw_refs)
 
@@ -163,7 +164,8 @@ def call_llm_for_reflection(
     if retrieved_sources:
         formatted_sources = "\n\n".join(
             f"Source ID: {src.get('source_id', 'Unknown')}\nTitle: {src.get('title', 'Untitled')}\nAbstract: {src.get('abstract', 'No abstract')}"
-            for src in retrieved_sources if isinstance(src, dict)
+            for src in retrieved_sources
+            if isinstance(src, dict)
         )
     else:
         formatted_sources = "No verified literature sources currently available in context memory."
@@ -192,6 +194,7 @@ def call_llm_for_reflection(
         "- strengths: Array of concise, specific strengths of this hypothesis.\n"
         "- weaknesses: Array of concise, specific weaknesses of this hypothesis.\n"
         "- comment: Concise summary critique explaining the ratings and suggestions.\n"
+        "- sub_claims: Array containing the smallest set of independently verifiable claims from the hypothesis statement.\n"
         "- references: Array of exact Source IDs from the provided sources that support this hypothesis.\n\n"
         "STRICT CITATION RULE: In the 'references' array, return ONLY exact Source IDs from the 'Verified Retrieved Sources' list above. "
         "DO NOT invent, recall, or introduce any external paper titles, arXiv IDs, DOIs, or PMIDs from outside the provided text. "
@@ -208,6 +211,7 @@ def call_llm_for_reflection(
         '  "strengths": ["concise strength"],\n'
         '  "weaknesses": ["concise weakness"],\n'
         '  "comment": "Concise summary critique explaining the ratings and suggestions.",\n'
+        '  "sub_claims": ["one independently verifiable claim"],\n'
         '  "references": ["exact Source ID from the provided list above"]\n'
         "}"
     )
@@ -216,6 +220,7 @@ def call_llm_for_reflection(
         prompt,
         temperature=temperature,
         model=model,
+        max_tokens=_output_token_limit("reflection", 1200),
         reasoning="off",
     )
     logger.info("LLM reflection response for hypothesis: %s", response)
@@ -244,9 +249,7 @@ def call_llm_for_reflection(
         logger.info("Parsed reflection data: %s", review_data)
         return review_data
 
-    logger.warning(
-        "Reflection review response did not validate; retrying with a format-only repair prompt."
-    )
+    logger.warning("Reflection review response did not validate; retrying with a format-only repair prompt.")
     schema_instruction = (
         "Return ONLY valid JSON with this exact schema:\n"
         "{\n"
@@ -260,6 +263,7 @@ def call_llm_for_reflection(
         '  "strengths": ["concise strength"],\n'
         '  "weaknesses": ["concise weakness"],\n'
         '  "comment": "Concise summary critique explaining the ratings and suggestions.",\n'
+        '  "sub_claims": ["one independently verifiable claim"],\n'
         '  "references": ["exact Source ID from the provided list above"]\n'
         "}"
     )
@@ -274,6 +278,7 @@ def call_llm_for_reflection(
         repair_prompt,
         temperature=0.0,
         model=model,
+        max_tokens=_output_token_limit("format_repair", 1200),
         reasoning="off",
     )
     logger.info("LLM reflection repair response for hypothesis: %s", repaired_response)
@@ -399,9 +404,31 @@ def call_llm_for_hypothesis_revision(
         return None
     return revised[0]
 
+
 _CLAIM_STOP_WORDS = {
-    "a", "an", "and", "are", "as", "be", "by", "can", "for", "from", "in", "is", "it",
-    "of", "on", "or", "that", "the", "their", "this", "to", "will", "with",
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "be",
+    "by",
+    "can",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "will",
+    "with",
 }
 
 
@@ -480,10 +507,7 @@ def _claim_terms(claim: str) -> set[str]:
 
 
 def _evidence_text(source: dict[str, Any]) -> str:
-    return " ".join(
-        str(source.get(field, "") or "")
-        for field in ("title", "summary", "abstract", "content", "text")
-    )
+    return " ".join(str(source.get(field, "") or "") for field in ("title", "summary", "abstract", "content", "text"))
 
 
 def _rank_claim_evidence(claim: str, sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -558,8 +582,9 @@ def resolve_claim_status(supporting_evidence: list, contradictory_evidence: list
         return "CONTRADICTED"
     if has_support:
         return "SUPPORTED"
-    
+
     return "UNVERIFIED"
+
 
 def calculate_claim_confidence(
     assessment: dict[str, Any],
@@ -592,16 +617,34 @@ def evaluate_claims(
     plausibility_score: float,
     retriever: ResearchRetriever | None = None,
     model: str | None = None,
+    sub_claims: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Assess every sub-claim and calculate the report's overall confidence."""
+    """Assess sub-claims against stored evidence and optional counterevidence.
+
+    A retriever must be passed explicitly to perform new searches. Reflection's
+    normal workflow already receives evidence gathered by Generation, including
+    counterevidence queries, so silently creating a retriever here duplicated
+    provider calls once per claim and made cycle latency grow unpredictably.
+    """
 
     assessments: list[ClaimAssessment] = []
-    for claim in function_to_extract_claim(hypothesis, model=model):
+    if sub_claims is None:
+        claims = function_to_extract_claim(hypothesis, model=model)
+    else:
+        # A valid reflection payload always owns claim decomposition. If a
+        # model returns an empty array, use the statement deterministically
+        # instead of reintroducing a second LLM request.
+        claims = sub_claims or [_hypothesis_claim_text(hypothesis)]
+    for claim in claims:
         supporting_evidence = function_to_get_supporting_evidence(hypothesis, claim)
-        contradictory_evidence = function_to_get_contradictory_evidence(
-            hypothesis,
-            claim,
-            retriever=retriever,
+        contradictory_evidence = (
+            function_to_get_contradictory_evidence(
+                hypothesis,
+                claim,
+                retriever=retriever,
+            )
+            if retriever is not None
+            else []
         )
         assessment = {
             "claim": claim,
@@ -641,9 +684,5 @@ def compute_overall_confidence(
     normalized_claims = (average_claim_confidence - 1.0) / 9.0
     normalized_evidence = max(1.0, min(10.0, evidence_quality_score)) / 10.0
     normalized_plausibility = max(1.0, min(10.0, plausibility_score)) / 10.0
-    raw_overall = (
-        (alpha * normalized_claims)
-        + (beta * normalized_evidence)
-        + (gamma * normalized_plausibility)
-    )
+    raw_overall = (alpha * normalized_claims) + (beta * normalized_evidence) + (gamma * normalized_plausibility)
     return round(1.0 + (9.0 * max(0.0, min(1.0, raw_overall))), 2)

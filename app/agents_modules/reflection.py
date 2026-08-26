@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
+from ..config import config
 from ..models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 from ..utils import logger, redact_secrets
 from .reflection_helpers import (
@@ -38,6 +40,49 @@ def _build_reflection_report(result: Dict) -> Optional[ReflectionReport]:
 
 
 class ReflectionAgent:
+    def __init__(self, max_workers: int | None = None):
+        configured_workers = config.get("agent_parallelism", {}).get("reflection_workers", 3)
+        self.max_workers = max(1, int(configured_workers if max_workers is None else max_workers))
+
+    @staticmethod
+    def _review_one(
+        hypothesis: Hypothesis,
+        context: ContextMemory,
+        research_goal: ResearchGoal,
+        temperature: float,
+    ) -> Dict:
+        """Compute one independent review without mutating workflow state."""
+        result = dict(
+            call_llm_for_reflection(
+                hypothesis=hypothesis,
+                research_goal=research_goal,
+                context=context,
+                temperature=temperature,
+                model=research_goal.llm_model,
+            )
+        )
+        if _build_reflection_report(result) is not None:
+            result.update(
+                evaluate_claims(
+                    hypothesis,
+                    evidence_quality_score=result["evidence_quality_score"],
+                    plausibility_score=result["plausibility_score"],
+                    model=research_goal.llm_model,
+                    sub_claims=result.get("sub_claims"),
+                )
+            )
+        return result
+
+    @staticmethod
+    def _apply_review(hypothesis: Hypothesis, result: Dict) -> None:
+        """Apply a completed review on the coordinator thread."""
+        hypothesis.novelty_review = result["novelty_review"]
+        hypothesis.feasibility_review = result["feasibility_review"]
+        if result["comment"] != "Could not parse LLM response.":
+            hypothesis.review_comments.append(result["comment"])
+        hypothesis.review_reference_ids = list(result["references"])
+        hypothesis.reflection_report = _build_reflection_report(result)
+
     def review_hypotheses(
         self, hypotheses: List[Hypothesis], context: ContextMemory, research_goal: ResearchGoal
     ) -> None:
@@ -45,39 +90,19 @@ class ReflectionAgent:
         # Use reflection temperature from research_goal
         reflect_temp = research_goal.reflection_temperature
 
-        for h in hypotheses:
-            # Avoid re-reviewing if already reviewed (optional optimization)
-            # if h.novelty_review is not None and h.feasibility_review is not None:
-            #    continue
-            # Pass the specific temperature
-            result = call_llm_for_reflection(
-                hypothesis=h,
-                research_goal=research_goal,
-                context=context,
-                temperature=reflect_temp,
-                model=research_goal.llm_model,
-            )
-            h.novelty_review = result["novelty_review"]
-            h.feasibility_review = result["feasibility_review"]
-            if result["comment"] != "Could not parse LLM response.":
-                h.review_comments.append(result["comment"])
-            # This field describes the current review, so replace stale IDs
-            # instead of accumulating duplicates across repeated cycles.
-            # Hypothesis.references remains reserved for source dictionaries.
-            h.review_reference_ids = list(result["references"])
+        if not hypotheses:
+            return
 
-            reflection_report = _build_reflection_report(result)
-            if reflection_report is not None:
-                result.update(
-                    evaluate_claims(
-                        h,
-                        evidence_quality_score=result["evidence_quality_score"],
-                        plausibility_score=result["plausibility_score"],
-                        model=research_goal.llm_model,
-                    )
-                )
-                reflection_report = _build_reflection_report(result)
-            h.reflection_report = reflection_report
+        def review(hypothesis: Hypothesis) -> Dict:
+            return self._review_one(hypothesis, context, research_goal, reflect_temp)
+
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(hypotheses))) as executor:
+            # map preserves input order; shared model objects are mutated only
+            # after every worker has completed.
+            results = list(executor.map(review, hypotheses))
+
+        for h, result in zip(hypotheses, results):
+            self._apply_review(h, result)
 
             # Reflection owns review artifacts only.  It must not rewrite a
             # hypothesis under the same ID because that would invalidate its
@@ -91,34 +116,38 @@ class ReflectionAgent:
                 h.feasibility_review,
             )
 
-    def revise_hypotheses(
-        self, hypotheses: List[Hypothesis], research_goal: ResearchGoal
-    ) -> List[Hypothesis]:
+    def revise_hypotheses(self, hypotheses: List[Hypothesis], research_goal: ResearchGoal) -> List[Hypothesis]:
         """Revise REVISE-flagged hypotheses using LLM revision helper."""
-        revised_list = []
-        for hypo in hypotheses:
+        if not hypotheses:
+            return []
+
+        def revise(hypothesis: Hypothesis) -> Optional[Dict]:
             try:
-                revised = call_llm_for_hypothesis_revision(
-                    hypo,
+                return call_llm_for_hypothesis_revision(
+                    hypothesis,
                     research_goal,
                     temperature=research_goal.generation_temperature,
                     model=research_goal.llm_model,
                 )
-                if revised and isinstance(revised, dict):
-                    if revised.get("title"):
-                        hypo.title = revised["title"]
-                    new_text = revised.get("hypothesis") or revised.get("text")
-                    if new_text:
-                        hypo.text = new_text
-                    logger.info(
-                        "Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id
-                    )
-                    revised_list.append(hypo)
             except Exception as exc:
                 logger.warning(
                     "Hypothesis revision failed for %s: %s",
-                    hypo.hypothesis_id,
+                    hypothesis.hypothesis_id,
                     redact_secrets(str(exc)),
                 )
-        return revised_list
+                return None
 
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(hypotheses))) as executor:
+            revisions = list(executor.map(revise, hypotheses))
+
+        revised_list = []
+        for hypo, revised in zip(hypotheses, revisions):
+            if revised and isinstance(revised, dict):
+                if revised.get("title"):
+                    hypo.title = revised["title"]
+                new_text = revised.get("hypothesis") or revised.get("text")
+                if new_text:
+                    hypo.text = new_text
+                logger.info("Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id)
+                revised_list.append(hypo)
+        return revised_list

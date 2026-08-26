@@ -169,8 +169,9 @@ def call_llm(
         logger.error("LM Studio model is not configured.")
         return "Error: LLM model not configured."
 
+    started = time.perf_counter()
+    output_token_limit = max_tokens
     try:
-        output_token_limit = max_tokens
         if output_token_limit is None:
             output_token_limit = int(config.get("llm_default_max_tokens", 8192))
         output_token_limit = max(1, int(output_token_limit))
@@ -272,6 +273,15 @@ def call_llm(
         error = _format_lmstudio_error(exc, selected_model)
         logger.error("%s", error)
         return error
+    finally:
+        logger.info(
+            "LM Studio request finished: model=%s elapsed_seconds=%.2f prompt_chars=%d max_tokens=%s reasoning=%s",
+            selected_model,
+            time.perf_counter() - started,
+            len(prompt),
+            output_token_limit,
+            reasoning or "default",
+        )
 
 
 # --- ID Generation ---
