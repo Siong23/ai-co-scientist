@@ -383,6 +383,67 @@ def test_generation_results_explain_quality_gate_outcomes(gradio_app_module):
     assert "Weighted audit score is below 70/100." in html
 
 
+@pytest.mark.parametrize(
+    ("stored_confidence", "expected"),
+    [
+        (8, "8/10 (80%)"),
+        (0.8, "8/10 (80%)"),
+    ],
+)
+def test_ranking_confidence_supports_current_and_legacy_scales(
+    gradio_app_module,
+    stored_confidence,
+    expected,
+):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "ranking1": {
+                "hypotheses": [
+                    {"id": "H1", "title": "First", "elo_score": 1210},
+                    {"id": "H2", "title": "Second", "elo_score": 1190},
+                ],
+                "tournament_results": [
+                    {
+                        "hypothesis_a": "H1",
+                        "hypothesis_b": "H2",
+                        "outcome": "A",
+                        "confidence": stored_confidence,
+                        "reasoning": "Stronger evidence.",
+                        "criteria": ["Evidence quality"],
+                    }
+                ],
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert expected in html
+    assert "800%" not in html
+
+
+def test_ranking_two_explains_when_no_tournament_matches_are_eligible(
+    gradio_app_module,
+):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "ranking2": {
+                "hypotheses": [
+                    {"id": "H1", "title": "Only accepted hypothesis", "elo_score": 1200}
+                ],
+                "tournament_results": [],
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert "No tournament debates were run." in html
+    assert "only compares newly evolved hypotheses that passed reflection" in html
+
+
 def test_hypothesis_evidence_sources_are_clickable_and_validated(
     gradio_app_module,
 ):

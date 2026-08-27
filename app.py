@@ -465,6 +465,28 @@ def format_evidence_sources_html(
     return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>"
 
 
+def format_ranking_confidence(value: Any) -> str:
+    """Render current 1-10 and legacy 0-1 ranking confidence values."""
+    if isinstance(value, bool):
+        return "Not available"
+
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return "Not available"
+
+    if isinstance(value, int) and 1 <= value <= 10:
+        score = float(value)
+    elif 0 <= confidence <= 1:
+        score = confidence * 10
+    elif 1 <= confidence <= 10:
+        score = confidence
+    else:
+        return "Not available"
+
+    return f"{score:g}/10 ({score * 10:.0f}%)"
+
+
 def run_cycle_with_progress(
     timeout_seconds: int = CYCLE_TIMEOUT_SECONDS,
     poll_seconds: float = CYCLE_PROGRESS_INTERVAL_SECONDS,
@@ -844,7 +866,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                             {winner}</p>
 
                             <p><b>🎯 Confidence</b><br>
-                            {match.get("confidence", 0) * 100:.0f}%</p>
+                            {format_ranking_confidence(match.get("confidence"))}</p>
 
                             <p><b>💡 Why it won</b><br>
                             {match.get("reasoning", "No reason provided.")}</p>
@@ -857,6 +879,21 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         </div>
                     </details>
                     """
+            else:
+                if step_name == "ranking2":
+                    explanation = (
+                        "Ranking 2 only compares newly evolved hypotheses that passed reflection, "
+                        "and no eligible new pair was available."
+                    )
+                else:
+                    explanation = (
+                        "Fewer than two eligible hypotheses were available, or no new hypothesis "
+                        "required another comparison."
+                    )
+                html += (
+                    "<p><strong>No tournament debates were run.</strong> "
+                    f"{explanation}</p>"
+                )
 
         elif step_name == "evolution":
             hypotheses = step_data.get("hypotheses", [])
