@@ -57,6 +57,7 @@ from app.agents_modules.ranking_helpers import (
     format_reflection_report,
     parse_confidence,
     parse_pairwise_result,
+    parse_short_justification,
     run_pairwise_debate,
     update_elo,
     update_elo_tie,
@@ -171,6 +172,44 @@ def test_pairwise_confidence_requires_integer_score_from_one_to_ten():
             confidence=11,
             reasoning="Out-of-range confidence.",
         )
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["Short Justification", "Justification", "Reasoning", "Why it won", "Winner Explanation"],
+)
+def test_pairwise_justification_parser_accepts_common_headings(heading):
+    response = f"""Decision:
+A
+
+{heading}:
+Hypothesis A has stronger experimental evidence.
+
+Decisive Criteria:
+- Evidence quality
+
+Confidence:
+8
+"""
+
+    assert parse_short_justification(response) == (
+        "Hypothesis A has stronger experimental evidence."
+    )
+
+
+def test_pairwise_justification_parser_accepts_unlabelled_decision_explanation():
+    response = """Decision: B
+Hypothesis B presents a more feasible validation plan.
+
+Decisive Criteria:
+- Feasibility
+
+Confidence: 7
+"""
+
+    assert parse_short_justification(response) == (
+        "Hypothesis B presents a more feasible validation plan."
+    )
 
 
 def test_formatted_reflection_report_omits_obsolete_contradictions():

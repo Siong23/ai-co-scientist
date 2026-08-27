@@ -846,7 +846,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     else:
                         winner = "Abstain"
                     html += f"""
-                    <details style="
+                    <details open style="
                         border:1px solid #ddd;
                         border-radius:10px;
                         padding:15px;
@@ -869,7 +869,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                             {format_ranking_confidence(match.get("confidence"))}</p>
 
                             <p><b>💡 Why it won</b><br>
-                            {match.get("reasoning", "No reason provided.")}</p>
+                            {match.get("reasoning") or "No reason was provided by the ranking judge."}</p>
 
                             <p><b>📌 Decisive Criteria</b></p>
 

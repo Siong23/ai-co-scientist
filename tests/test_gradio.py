@@ -444,6 +444,38 @@ def test_ranking_two_explains_when_no_tournament_matches_are_eligible(
     assert "only compares newly evolved hypotheses that passed reflection" in html
 
 
+def test_ranking_result_displays_fallback_when_winner_reason_is_empty(
+    gradio_app_module,
+):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "ranking1": {
+                "hypotheses": [
+                    {"id": "H1", "title": "First", "elo_score": 1210},
+                    {"id": "H2", "title": "Second", "elo_score": 1190},
+                ],
+                "tournament_results": [
+                    {
+                        "hypothesis_a": "H1",
+                        "hypothesis_b": "H2",
+                        "outcome": "A",
+                        "confidence": 8,
+                        "reasoning": "",
+                        "criteria": [],
+                    }
+                ],
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert "Why it won" in html
+    assert "No reason was provided by the ranking judge." in html
+    assert '<details open style="' in html
+
+
 def test_hypothesis_evidence_sources_are_clickable_and_validated(
     gradio_app_module,
 ):

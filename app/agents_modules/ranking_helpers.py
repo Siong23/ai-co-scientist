@@ -638,15 +638,19 @@ def judge_hypotheses(
 
 
 def parse_short_justification(response: str) -> str:
-
-    match = re.search(
-        r"Short Justification:\s*(.*?)(?:Decisive Criteria:|Confidence:|$)",
-        response,
-        re.IGNORECASE | re.DOTALL,
+    section_end = r"(?=\n\s*(?:Decisive\s+Criteria|Criteria|Confidence|Decision)\s*:|$)"
+    patterns = (
+        rf"(?:Short\s+Justification|Justification|Reasoning|Why\s+it\s+won|Winner\s+Explanation)"
+        rf"\s*:\s*(.*?){section_end}",
+        rf"Decision\s*:\s*(?:A|B|TIE|ABSTAIN)\b\s*(.*?){section_end}",
     )
 
-    if match:
-        return clean_markdown(match.group(1).strip())
+    for pattern in patterns:
+        match = re.search(pattern, response, re.IGNORECASE | re.DOTALL)
+        if match:
+            justification = clean_markdown(match.group(1).strip())
+            if justification:
+                return justification
 
     return ""
 
@@ -766,6 +770,16 @@ def run_pairwise_debate(
     reasoning = clean_markdown(
         parse_short_justification(response)
     )
+    if not reasoning:
+        decision_label = {
+            "A": "Hypothesis A was selected",
+            "B": "Hypothesis B was selected",
+            "TIE": "The hypotheses were judged to be tied",
+            "ABSTAIN": "The ranking judge abstained",
+        }[outcome]
+        reasoning = (
+            f"{decision_label}, but the ranking judge did not provide a parseable justification."
+        )
 
     logger.info(
         "Pairwise ranking response:\n%s",
