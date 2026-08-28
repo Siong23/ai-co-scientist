@@ -5,8 +5,9 @@ from __future__ import annotations
 import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Iterable, List
+from typing import Iterable, List, Mapping, Optional
 
+from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..utils import logger
 from .ranking_helpers import run_pairwise_debate, update_elo, update_elo_tie
@@ -19,6 +20,7 @@ class RankingAgent:
         context: ContextMemory,
         research_goal: ResearchGoal,
         new_hypotheses: Iterable[Hypothesis] | None = None,
+        proximity_data: Optional[Mapping] = None,
     ) -> None:
         """Rank active hypotheses, optionally comparing only newly introduced ones."""
         # Use k_factor from research_goal
@@ -57,6 +59,25 @@ class RankingAgent:
         if not pairs:
             logger.info("No new hypotheses require ranking comparisons.")
             return
+
+        if proximity_data and config.get("ranking", {}).get("proximity_guided_matching", True):
+            proximity_graph = proximity_data.get("graph", proximity_data)
+            adjacency = proximity_graph.get("adjacency_graph", {})
+            pair_scores = {}
+            for h_a, h_b in pairs:
+                for edge in adjacency.get(h_a.hypothesis_id, []):
+                    if edge.get("other_id") == h_b.hypothesis_id:
+                        pair_scores[frozenset((h_a.hypothesis_id, h_b.hypothesis_id))] = edge.get("similarity", 0.0)
+                        break
+            pairs.sort(
+                key=lambda pair: pair_scores.get(
+                    frozenset((pair[0].hypothesis_id, pair[1].hypothesis_id)), 0.0
+                ),
+                reverse=True,
+            )
+            max_matches = int(config.get("ranking", {}).get("max_matches_per_cycle", 0))
+            if max_matches > 0:
+                pairs = pairs[:max_matches]
 
         for h in active_hypotheses:
             logger.info(

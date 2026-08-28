@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from ..models import ContextMemory
+from ..models import ContextMemory, ResearchGoal
 from ..utils import logger
 from .proximity_helpers import (
     BatchSimilarityCalculator,
@@ -34,6 +34,7 @@ class ProximityAgent:
     def _resolve_threshold(
         self,
         similarity_threshold: Optional[float],
+        hypothesis_count: Optional[int] = None,
     ) -> float:
         """
         Resolve the similarity threshold.
@@ -41,7 +42,10 @@ class ProximityAgent:
         Explicitly checks for None so that 0.0 remains a valid threshold.
         """
         if similarity_threshold is None:
-            return self.similarity_config.similarity_threshold
+            threshold = self.similarity_config.similarity_threshold
+            if self.similarity_config.dynamic_thresholding and hypothesis_count and hypothesis_count > 3:
+                threshold += min(0.2, 0.02 * (hypothesis_count - 3))
+            return min(1.0, threshold)
 
         if not 0.0 <= similarity_threshold <= 1.0:
             raise ValueError(
@@ -68,8 +72,9 @@ class ProximityAgent:
         self,
         context: ContextMemory,
         method: Optional[str] = None,
-        similarity_threshold: float = 0.3,
+        similarity_threshold: Optional[float] = None,
         top_k: Optional[int] = None,
+        research_goal: Optional[ResearchGoal] = None,
     ):
         """
         Build a proximity graph using pairwise similarity scoring.
@@ -84,11 +89,6 @@ class ProximityAgent:
         # ---------------------------------------------------------
         # Validate parameters
         # ---------------------------------------------------------
-        if not 0.0 <= similarity_threshold <= 1.0:
-            raise ValueError(
-                "similarity_threshold must be between 0.0 and 1.0"
-            )
-
         if top_k is not None and top_k < 0:
             raise ValueError(
                 "top_k must be non-negative"
@@ -98,6 +98,7 @@ class ProximityAgent:
         # Get active hypotheses
         # ---------------------------------------------------------
         hypotheses = context.get_active_hypotheses()
+        similarity_threshold = self._resolve_threshold(similarity_threshold, len(hypotheses))
 
         if not hypotheses:
             return {
@@ -126,8 +127,8 @@ class ProximityAgent:
                 hypothesis_b = hypotheses[j]
 
                 similarity = self.scorer.score(
-                    hypothesis_a.text,
-                    hypothesis_b.text,
+                    self._similarity_text(hypothesis_a.text, research_goal, method),
+                    self._similarity_text(hypothesis_b.text, research_goal, method),
                     method=method,
                 )
 
@@ -189,12 +190,26 @@ class ProximityAgent:
             "edges": edges,
         }
 
+    @staticmethod
+    def _similarity_text(text: str, research_goal: Optional[ResearchGoal], method: str) -> str:
+        """Condition semantic proximity on the research goal when available."""
+        if research_goal is None or method.lower() in {"jaccard", "sequence"}:
+            return text
+        return (
+            f"Research goal: {research_goal.description}\n"
+            f"Preferences: {research_goal.preferences}\n"
+            f"Idea attributes: {research_goal.idea_attributes}\n"
+            f"Constraints: {research_goal.constraints or {}}\n"
+            f"Hypothesis: {text}"
+        )
+
     def build_proximity_graph_optimized(
         self,
         context: ContextMemory,
         method: Optional[str] = None,
-        similarity_threshold: float = 0.3,
+        similarity_threshold: Optional[float] = None,
         top_k: Optional[int] = None,
+        research_goal: Optional[ResearchGoal] = None,
     ):
         """
         Build a proximity graph using batch similarity calculation.
@@ -215,11 +230,6 @@ class ProximityAgent:
         # ---------------------------------------------------------
         # Validate parameters
         # ---------------------------------------------------------
-        if not 0.0 <= similarity_threshold <= 1.0:
-            raise ValueError(
-                "similarity_threshold must be between 0.0 and 1.0"
-            )
-
         if top_k is not None and top_k < 0:
             raise ValueError(
                 "top_k must be non-negative"
@@ -229,6 +239,7 @@ class ProximityAgent:
         # Get active hypotheses only
         # ---------------------------------------------------------
         hypotheses = context.get_active_hypotheses()
+        similarity_threshold = self._resolve_threshold(similarity_threshold, len(hypotheses))
 
         if not hypotheses:
             return {
@@ -246,7 +257,7 @@ class ProximityAgent:
         ]
 
         texts = [
-            hypothesis.text
+            self._similarity_text(hypothesis.text, research_goal, method)
             for hypothesis in hypotheses
         ]
 
@@ -311,16 +322,19 @@ class ProximityAgent:
         self,
         context: ContextMemory,
         similarity_threshold: Optional[float] = None,
+        research_goal: Optional[ResearchGoal] = None,
     ) -> Dict[str, int]:
         """Identify clusters of similar hypotheses."""
 
         threshold = self._resolve_threshold(
-            similarity_threshold
+            similarity_threshold,
+            len(context.get_active_hypotheses()),
         )
 
         graph = self.build_proximity_graph(
             context,
             similarity_threshold=threshold,
+            research_goal=research_goal,
         )
 
         clusters = self.optimizer.identify_clusters(
@@ -356,6 +370,8 @@ class ProximityAgent:
         self,
         context: ContextMemory,
         similarity_threshold: Optional[float] = None,
+        research_goal: Optional[ResearchGoal] = None,
+        near_duplicate_threshold: Optional[float] = None,
     ) -> Dict:
         """
         Produce higher-level proximity information for Meta-review.
@@ -368,12 +384,14 @@ class ProximityAgent:
             isolated
         """
         threshold = self._resolve_threshold(
-            similarity_threshold
+            similarity_threshold,
+            len(context.get_active_hypotheses()),
         )
 
         graph = self.build_proximity_graph(
             context,
             similarity_threshold=threshold,
+            research_goal=research_goal,
         )
 
         adjacency = graph["adjacency_graph"]
@@ -420,7 +438,66 @@ class ProximityAgent:
             if degree == 0
         ]
 
-        return {
+        duplicate_threshold = near_duplicate_threshold
+        if duplicate_threshold is None:
+            duplicate_threshold = max(0.9, threshold)
+        if not 0.0 <= duplicate_threshold <= 1.0:
+            raise ValueError("near_duplicate_threshold must be between 0.0 and 1.0")
+
+        near_duplicates = []
+        for source_id, source_edges in adjacency.items():
+            for edge in source_edges:
+                target_id = edge["other_id"]
+                if source_id >= target_id or edge["similarity"] < duplicate_threshold:
+                    continue
+                source = context.hypotheses[source_id]
+                target = context.hypotheses[target_id]
+                if not source.is_active or not target.is_active:
+                    continue
+                survivor, duplicate = max(
+                    (source, target),
+                    key=lambda hypothesis: (
+                        getattr(hypothesis, "elo_score", 0.0),
+                        hypothesis.hypothesis_id,
+                    ),
+                )
+                duplicate.is_active = False
+                duplicate.deactivation_reason = f"near_duplicate_of_{survivor.hypothesis_id}"
+                near_duplicates.append(
+                    {
+                        "duplicate_id": duplicate.hypothesis_id,
+                        "canonical_id": survivor.hypothesis_id,
+                        "similarity": edge["similarity"],
+                        "reason": duplicate.deactivation_reason,
+                    }
+                )
+
+        cluster_exemplars = {}
+        exemplar_ids = []
+        for cluster_id, members in cluster_members.items():
+            active_members = [member for member in members if context.hypotheses[member].is_active]
+            if not active_members:
+                continue
+            exemplar = max(
+                active_members,
+                key=lambda hypothesis_id: (
+                    getattr(context.hypotheses[hypothesis_id], "elo_score", 0.0),
+                    connectivity.get(hypothesis_id, 0),
+                    hypothesis_id,
+                ),
+            )
+            cluster_exemplars[cluster_id] = exemplar
+            exemplar_ids.append(exemplar)
+
+        pair_scores = [
+            edge["similarity"]
+            for source_id, source_edges in adjacency.items()
+            for edge in source_edges
+            if source_id < edge["other_id"]
+        ]
+        diversity_score = 1.0 - (sum(pair_scores) / len(pair_scores)) if pair_scores else 1.0
+
+        result = {
             "graph": graph,
             "clusters": clusters,
             "cluster_members": cluster_members,
@@ -428,7 +505,18 @@ class ProximityAgent:
             "connectivity": connectivity,
             "highly_connected": highly_connected,
             "isolated": isolated,
+            "outliers": isolated,
+            "near_duplicates": near_duplicates,
+            "exemplar_ids": exemplar_ids,
+            "cluster_exemplars": cluster_exemplars,
+            "diversity_score": diversity_score,
+            "cluster_labels": {
+                cluster_id: {"label": f"Cluster {index}"}
+                for index, cluster_id in enumerate(cluster_members, start=1)
+            },
         }
+        context.proximity_analysis = result
+        return result
 
     def clear_similarity_cache(self):
         """Clear similarity and embedding caches."""
