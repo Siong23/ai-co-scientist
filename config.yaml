@@ -72,6 +72,22 @@ ranking:
   proximity_guided_matching: true
   max_matches_per_cycle: 0
 
+# The production UI uses the dynamic Supervisor. The heuristic planner keeps
+# orchestration deterministic and avoids an extra LLM request per workflow
+# step; set planner_mode to auto to enable LLM planning with safe fallback.
+supervisor:
+  mode: "dynamic"
+  planner_mode: "heuristic"
+  max_steps: 10
+  convergence:
+    min_snapshots: 2
+    top_elo_delta: 2.0
+    max_ranking_batches_before_evolution: 2
+  finalization:
+    min_accepted_hypotheses: 2
+    min_completed_matches: 1
+    require_evidence: true
+
 # Top K hypotheses for evolution
 top_k_hypotheses: 2
 

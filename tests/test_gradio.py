@@ -7,7 +7,7 @@ no network calls.
 import importlib.util
 import os
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -95,9 +95,7 @@ def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, 
     assert any("Existing saved run" in str(choice) for choice in sidebar_history[0]["props"]["choices"])
     assert sidebar_history[0]["props"]["buttons"][0]["value"] == "Delete"
     assert sidebar_history[0]["props"]["buttons"][0]["variant"] == "stop"
-    assert (
-        "#research-history-sidebar {\n            background: var(--block-background-fill) !important;" in demo.css
-    )
+    assert "#research-history-sidebar {\n            background: var(--block-background-fill) !important;" in demo.css
     assert "#sidebar-run-list {\n            background: var(--block-background-fill) !important;" in demo.css
     assert "background: #ffffff !important;" not in demo.css
     assert "var(--body-text-color) 6%, transparent" in demo.css
@@ -134,9 +132,7 @@ def test_sidebar_delete_refreshes_history_table_and_choices(gradio_app_module, m
         run_id="run-sidebar-delete",
     )
 
-    status, history, delete_dropdown, sidebar_history = gradio_app_module.delete_history_run(
-        "run-sidebar-delete"
-    )
+    status, history, delete_dropdown, sidebar_history = gradio_app_module.delete_history_run("run-sidebar-delete")
 
     assert status == "Deleted saved run run-sidebar-delete."
     assert "Delete from sidebar" not in history
@@ -363,12 +359,8 @@ def test_generation_results_explain_quality_gate_outcomes(gradio_app_module):
                     {
                         "verdict": "REJECT",
                         "weighted_score": 66.5,
-                        "hard_failures": [
-                            "The final hypothesis contains unsupported claims."
-                        ],
-                        "warnings": [
-                            "Weighted audit score is below 70/100."
-                        ],
+                        "hard_failures": ["The final hypothesis contains unsupported claims."],
+                        "warnings": ["Weighted audit score is below 70/100."],
                     }
                 ],
             }
@@ -430,9 +422,7 @@ def test_ranking_two_explains_when_no_tournament_matches_are_eligible(
         "iteration": 1,
         "steps": {
             "ranking2": {
-                "hypotheses": [
-                    {"id": "H1", "title": "Only accepted hypothesis", "elo_score": 1200}
-                ],
+                "hypotheses": [{"id": "H1", "title": "Only accepted hypothesis", "elo_score": 1200}],
                 "tournament_results": [],
             }
         },
@@ -562,6 +552,27 @@ def test_advanced_settings_exposes_available_model_choices(gradio_app_module):
     assert len(model_dropdowns) == 1
     assert "local/alternative-model" in str(model_dropdowns[0]["props"]["choices"])
     assert model_dropdowns[0]["props"]["interactive"] is True
+
+
+def test_execute_cycle_uses_configured_supervisor_entrypoint(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.chdir(tmp_path)
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Supervisor dispatch test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    cycle_supervisor.run.assert_called_once()
+    assert "completed successfully" in result["status"]
 
 
 def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkeypatch, tmp_path):

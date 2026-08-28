@@ -151,6 +151,14 @@ class ContextMemory:
         self.last_hypothesis_audits: List[Dict] = []
         # Latest topology analysis shared by Ranking, Evolution, and Meta-review.
         self.proximity_analysis: Dict = {}
+        # JSON-serializable scheduling state owned by the Supervisor. Keeping
+        # this in context lets convergence signals carry across cycles.
+        self.supervisor_state: Dict = {
+            "status": "idle",
+            "pending_tasks": [],
+            "elo_snapshots": [],
+            "last_finalization": {},
+        }
 
     def add_hypothesis(self, hypothesis: Hypothesis):
         self.hypotheses[hypothesis.hypothesis_id] = hypothesis
@@ -241,7 +249,6 @@ class ReflectionReport(BaseModel):
     strengths: List[str] = []
     weaknesses: List[str] = []
     recommendation: str = "UNREVIEWED"
-
 
     claims: List[ClaimAssessment] = []
     overall_confidence: float = Field(default=1.0, ge=1.0, le=10.0)

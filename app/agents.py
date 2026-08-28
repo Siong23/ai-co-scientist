@@ -58,6 +58,7 @@ from .agents_modules.supervisor_planner import (
     assess_supervisor_state,
     build_supervisor_planning_prompt,
     decide_action_heuristically,
+    evaluate_finalization_readiness,
     parse_supervisor_decision,
 )
 from .evidence import EvidenceChunk, EvidenceDocument, EvidenceSource
@@ -128,6 +129,7 @@ __all__ = [
     "build_evolution_prompt",
     "create_evolved_hypothesis",
     "decide_action_heuristically",
+    "evaluate_finalization_readiness",
     "format_documents_for_prompt",
     "format_literature_synthesis",
     "format_references",

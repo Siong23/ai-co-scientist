@@ -291,7 +291,7 @@ def execute_cycle(
         logger.info(f"Running cycle {iteration}")
 
         # Run the cycle
-        cycle_details = cycle_supervisor.run_cycle(
+        cycle_details = cycle_supervisor.run(
             research_goal,
             context,
             progress_callback=capture_progress,
@@ -326,6 +326,7 @@ def execute_cycle(
         # of reporting success over an empty result (issue llnl#36).
         errors = cycle_details.get("errors", [])
         produced_any = bool(cycle_details.get("steps", {}).get("generation", {}).get("hypotheses"))
+        finalization = cycle_details.get("finalization", {})
         if errors:
             categories = sorted({classify_llm_error(e) for e in errors})
             cause = "; ".join(categories)
@@ -336,6 +337,13 @@ def execute_cycle(
                     f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n\n{to_bold('Execution Time:')} {formatted_time}.\n"
                     f"See the results panel for details. {to_bold('Log:')} {log_file}"
                 )
+        elif finalization and not finalization.get("ready", False):
+            unmet = "; ".join(finalization.get("reasons", [])) or "final quality requirements were not met"
+            status_msg = (
+                f"⚠️ Cycle {iteration} reached its compute budget before finalization ({unmet}).\n\n"
+                f"{to_bold('Execution Time:')} {formatted_time}\n"
+                f"{to_bold('Log:')} {log_file}"
+            )
         else:
             status_msg = (
                 f"✅ Cycle {iteration} completed successfully!\n\n"
@@ -890,10 +898,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         "Fewer than two eligible hypotheses were available, or no new hypothesis "
                         "required another comparison."
                     )
-                html += (
-                    "<p><strong>No tournament debates were run.</strong> "
-                    f"{explanation}</p>"
-                )
+                html += f"<p><strong>No tournament debates were run.</strong> {explanation}</p>"
 
         elif step_name == "evolution":
             hypotheses = step_data.get("hypotheses", [])

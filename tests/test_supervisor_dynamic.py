@@ -12,6 +12,7 @@ from app.agents import (
     SupervisorPlanner,
     assess_supervisor_state,
     decide_action_heuristically,
+    evaluate_finalization_readiness,
     parse_supervisor_decision,
 )
 from app.models import ReflectionReport
@@ -113,6 +114,7 @@ def test_decide_action_heuristically():
     assert d4.action == "EVOLVE"
 
     # After evolution -> PROXIMITY
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
     state = assess_supervisor_state(
         context,
         goal,
@@ -231,6 +233,9 @@ def test_supervisor_run_dynamic_cycle():
     assert len(details["supervisor_decisions"]) > 0
     assert details["iteration"] == 1
     assert "meta_review" in details["steps"]
+    assert details["finalization"]["ready"] is False
+    assert details["supervisor_state"]["status"] == "incomplete"
+    assert context.supervisor_state["pending_tasks"] == []
     assert any(event.get("step") == "supervisor_planning" for event in details["research_trace"])
 
 
@@ -252,6 +257,107 @@ def test_assess_supervisor_state_with_proximity_data():
     assert state["cluster_count"] == 2
     assert state["unranked_accepted_count"] == 2
     assert state["unranked_accepted_ids"] == ["H1", "H2"]
+
+
+def test_supervisor_detects_elo_plateau_and_routes_to_evolution():
+    context = ContextMemory()
+    context.add_hypothesis(_sample_hypothesis("H1", "ACCEPT", elo=1301.0))
+    context.add_hypothesis(_sample_hypothesis("H2", "ACCEPT", elo=1199.0))
+    context.supervisor_state["elo_snapshots"] = [
+        {"top_elo": 1300.0, "ratings": {"H1": 1300.0, "H2": 1200.0}},
+        {"top_elo": 1301.0, "ratings": {"H1": 1301.0, "H2": 1199.0}},
+    ]
+    goal = ResearchGoal(description="Test plateau", num_hypotheses=2)
+    history = [{"action": "GENERATE"}, {"action": "REFLECT"}, {"action": "RANK"}]
+
+    state = assess_supervisor_state(context, goal, history=history)
+    decision = decide_action_heuristically(state, goal)
+
+    assert state["ratings_converged"] is True
+    assert state["top_elo_delta"] == 1.0
+    assert decision.action == "EVOLVE"
+    assert "plateaued" in decision.reasoning
+
+
+def test_supervisor_does_not_compare_plateau_across_different_candidate_sets():
+    context = ContextMemory()
+    context.add_hypothesis(_sample_hypothesis("H1", "ACCEPT", elo=1300.0))
+    context.add_hypothesis(_sample_hypothesis("H2", "ACCEPT", elo=1200.0))
+    context.supervisor_state["elo_snapshots"] = [
+        {"top_elo": 1300.0, "ratings": {"H1": 1300.0, "H2": 1200.0}},
+        {"top_elo": 1300.0, "ratings": {"H1": 1300.0, "H3": 1200.0}},
+    ]
+
+    state = assess_supervisor_state(context, ResearchGoal(description="Candidate-set test"))
+
+    assert state["ratings_converged"] is False
+    assert state["top_elo_delta"] is None
+
+
+def test_supervisor_ranks_unranked_evolved_candidates():
+    context = ContextMemory()
+    context.add_hypothesis(_sample_hypothesis("H1", "ACCEPT"))
+    context.add_hypothesis(_sample_hypothesis("H2", "ACCEPT"))
+    context.add_hypothesis(_sample_hypothesis("E1", "ACCEPT"))
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
+    goal = ResearchGoal(description="Evolved ranking", num_hypotheses=2)
+    history = [
+        {"action": "GENERATE"},
+        {"action": "REFLECT"},
+        {"action": "RANK"},
+        {"action": "RANK"},
+        {"action": "EVOLVE"},
+        {"action": "REFLECT"},
+    ]
+
+    state = assess_supervisor_state(context, goal, history=history)
+    decision = decide_action_heuristically(state, goal)
+
+    assert state["unranked_accepted_ids"] == ["E1"]
+    assert decision.action == "RANK"
+
+
+def test_finalization_gate_requires_review_ranking_and_evidence():
+    context = ContextMemory()
+    h1 = _sample_hypothesis("H1", "ACCEPT", elo=1210.0)
+    h2 = _sample_hypothesis("H2", "ACCEPT", elo=1190.0)
+    context.add_hypothesis(h1)
+    context.add_hypothesis(h2)
+    goal = ResearchGoal(description="Test finalization", num_hypotheses=2)
+
+    blocked = evaluate_finalization_readiness(context, goal)
+    assert blocked["ready"] is False
+    assert blocked["unranked_finalist_ids"] == ["H1", "H2"]
+    assert blocked["missing_evidence_ids"] == ["H1", "H2"]
+
+    h1.evidence_source_ids = ["source:1"]
+    h2.evidence_source_ids = ["source:2"]
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
+
+    ready = evaluate_finalization_readiness(context, goal)
+    assert ready["ready"] is True
+    assert ready["reasons"] == []
+
+
+def test_supervisor_run_dispatches_configured_mode():
+    supervisor = SupervisorAgent(mode="dynamic")
+    supervisor.run_dynamic_cycle = Mock(return_value={"mode": "dynamic"})
+    supervisor.run_cycle = Mock(return_value={"mode": "sequential"})
+    context = ContextMemory()
+    goal = ResearchGoal(description="Dispatch test")
+
+    result = supervisor.run(goal, context)
+
+    assert result == {"mode": "dynamic"}
+    supervisor.run_dynamic_cycle.assert_called_once()
+    supervisor.run_cycle.assert_not_called()
+
+
+def test_supervisor_defaults_to_dynamic_production_mode():
+    supervisor = SupervisorAgent()
+
+    assert supervisor.mode == "dynamic"
+    assert supervisor.planner_mode == "heuristic"
 
 
 def test_supervisor_dynamic_cycle_safe_rank_filtering():
