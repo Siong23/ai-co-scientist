@@ -10,6 +10,9 @@ results
 .audit/
 .loop/
 .cache/
+.codex-work/
+.pytest_cache/
+.ruff_cache/
 /chroma_db/
 app/paper/*.pdf
 app/paper/*.part
