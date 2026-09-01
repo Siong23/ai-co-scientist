@@ -379,6 +379,11 @@ class ExperimentOrchestrator:
         accepted: List[Any] = []
 
         for hypothesis in self.get_active_hypotheses(context):
+            if not self._is_valid_hypothesis(
+                hypothesis
+            ):
+                continue
+
             report = getattr(
                 hypothesis,
                 "reflection_report",
@@ -401,7 +406,9 @@ class ExperimentOrchestrator:
             )
 
             if recommendation == "ACCEPT":
-                accepted.append(hypothesis)
+                accepted.append(
+                    hypothesis
+                )
 
         return accepted
 
@@ -1585,156 +1592,6 @@ class ExperimentOrchestrator:
 
         return output_path
 
-    # ========================================================
-    # Execute Generated Experiment
-    # ========================================================
-
-    # def execute_generated_experiment(
-    #     self,
-    #     experiment_id: str,
-    #     code_path: Path,
-    #     timeout_seconds: Optional[int] = None,
-    # ) -> Dict[str, Any]:
-    #     """
-    #     Execute a generated Python/PyTorch experiment.
-
-    #     The generated code runs as a separate process.
-
-    #     This method returns execution information but does not
-    #     interpret scientific results. Scientific evaluation
-    #     should be performed from the generated metrics/artifacts.
-    #     """
-
-    #     code_path = Path(
-    #         code_path
-    #     )
-
-    #     if not code_path.exists():
-    #         raise FileNotFoundError(
-    #             f"Generated code does not exist: {code_path}"
-    #         )
-
-    #     started_at = time.perf_counter()
-
-    #     command = [
-    #         self.python_executable,
-    #         str(code_path),
-    #     ]
-
-    #     try:
-    #         completed = subprocess.run(
-    #             command,
-    #             cwd=code_path.parent,
-    #             capture_output=True,
-    #             text=True,
-    #             timeout=timeout_seconds,
-    #             check=False,
-    #         )
-
-    #         elapsed = (
-    #             time.perf_counter()
-    #             - started_at
-    #         )
-
-    #         execution_result = {
-    #             "experiment_id": experiment_id,
-    #             "success": (
-    #                 completed.returncode == 0
-    #             ),
-    #             "return_code": completed.returncode,
-    #             "stdout": completed.stdout,
-    #             "stderr": completed.stderr,
-    #             "execution_seconds": elapsed,
-    #         }
-
-    #     except subprocess.TimeoutExpired as error:
-    #         elapsed = (
-    #             time.perf_counter()
-    #             - started_at
-    #         )
-
-    #         execution_result = {
-    #             "experiment_id": experiment_id,
-    #             "success": False,
-    #             "return_code": None,
-    #             "stdout": (
-    #                 error.stdout
-    #                 if error.stdout
-    #                 else ""
-    #             ),
-    #             "stderr": (
-    #                 error.stderr
-    #                 if error.stderr
-    #                 else ""
-    #             ),
-    #             "error": (
-    #                 "Generated experiment exceeded "
-    #                 "the configured timeout."
-    #             ),
-    #             "execution_seconds": elapsed,
-    #         }
-
-    #     output_path = (
-    #         self.create_run_directory(
-    #             experiment_id
-    #         )
-    #         / "execution_result.json"
-    #     )
-
-    #     self.save_json(
-    #         execution_result,
-    #         output_path,
-    #     )
-
-    #     execution_result[
-    #         "execution_result_path"
-    #     ] = str(output_path)
-
-    #     return execution_result
-
-    # ========================================================
-    # Load Experiment Metrics
-    # ========================================================
-
-    # def load_metrics(
-    #     self,
-    #     experiment_id: str,
-    # ) -> Dict[str, Any]:
-    #     """
-    #     Load metrics.json produced by the generated
-    #     experiment, when available.
-    #     """
-
-    #     metrics_path = (
-    #         self.create_run_directory(
-    #             experiment_id
-    #         )
-    #         / "metrics.json"
-    #     )
-
-    #     if not metrics_path.exists():
-    #         return {}
-
-    #     try:
-    #         with open(
-    #             metrics_path,
-    #             "r",
-    #             encoding="utf-8",
-    #         ) as file:
-    #             data = json.load(file)
-
-    #         if isinstance(data, dict):
-    #             return data
-
-    #         return {
-    #             "value": data
-    #         }
-
-    #     except (
-    #         OSError,
-    #         json.JSONDecodeError,
-    #     ):
-    #         return {}
 
     # ========================================================
     # Run Generated Experiment

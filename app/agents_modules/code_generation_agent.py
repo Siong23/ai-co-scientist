@@ -526,7 +526,6 @@ IMPORTANT RULES:
 30. The ExperimentRunner provides the environment variable
     EXPERIMENT_OUTPUT_DIR. All generated artifacts MUST be saved
     inside this directory.
-
 31. Use:
 
         output_dir = Path(
@@ -535,16 +534,13 @@ IMPORTANT RULES:
                 "."
             )
         )
-
 32. Save the following files using these exact names:
 
         metrics.json
         training_history.json
         best_model.pt
-
 33. Save all visualization files inside EXPERIMENT_OUTPUT_DIR
     or one of its subdirectories.
-
 34. The dataset path may be provided through the DATASET_PATH
     environment variable. Prefer DATASET_PATH when it is available.
 
@@ -791,6 +787,7 @@ Do not wrap the JSON object in Markdown fences.
             "IMPLEMENT HERE",
             "YOUR CODE HERE",
             "PASS # IMPLEMENT",
+            "NOTIMPLEMENTEDERROR",
         ]
 
         upper_code = pytorch_code.upper()
