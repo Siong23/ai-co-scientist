@@ -24,6 +24,7 @@ class EvolutionAgent:
         strategies: tuple[EvolutionStrategy, ...] | None = None,
         max_candidates_per_cycle: int | None = None,
         quality_repair_attempts: int | None = None,
+        transport_retry_attempts: int | None = None,
     ):
         evolution_config = config.get("evolution", {})
         configured = tuple(evolution_config.get("strategies", EVOLUTION_STRATEGIES))
@@ -35,6 +36,15 @@ class EvolutionAgent:
         self.quality_repair_attempts = max(
             0,
             int(configured_repairs if quality_repair_attempts is None else quality_repair_attempts),
+        )
+        configured_transport_retries = evolution_config.get("transport_retry_attempts", 2)
+        self.transport_retry_attempts = max(
+            0,
+            int(
+                configured_transport_retries
+                if transport_retry_attempts is None
+                else transport_retry_attempts
+            ),
         )
         self.max_tokens = int(config.get("llm_max_tokens", {}).get("evolution", 2048))
 
@@ -83,6 +93,7 @@ class EvolutionAgent:
                 evidence_sources=evidence_sources,
                 diagnostics=context.last_evolution_attempts,
                 quality_repair_attempts=self.quality_repair_attempts,
+                transport_retry_attempts=self.transport_retry_attempts,
                 meta_review_feedback=getattr(context, "meta_review_feedback", None),
             )
             if candidate is None:

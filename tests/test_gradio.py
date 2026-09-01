@@ -466,6 +466,29 @@ def test_ranking_result_displays_fallback_when_winner_reason_is_empty(
     assert '<details open style="' in html
 
 
+def test_dynamic_ranking_steps_use_latest_round_for_final_rankings(gradio_app_module):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "ranking_3": {
+                "hypotheses": [{"id": "H1", "title": "Round three leader", "elo_score": 1250}],
+                "tournament_results": [],
+            },
+            "ranking_4": {
+                "hypotheses": [{"id": "H2", "title": "Round four leader", "elo_score": 1290}],
+                "tournament_results": [],
+            },
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+    final_section = html.split("Final Rankings - Top Hypotheses", 1)[1]
+
+    assert "Round four leader" in final_section
+    assert "Round three leader" not in final_section
+    assert "No ranking step found" not in final_section
+
+
 def test_hypothesis_evidence_sources_are_clickable_and_validated(
     gradio_app_module,
 ):

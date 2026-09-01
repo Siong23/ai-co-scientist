@@ -196,6 +196,7 @@ def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
             "parent_ids": ["H1", "H2"],
             "status": "rejected",
             "reason": "llm_error",
+            "transport_retries": 2,
             "response_excerpt": "Error: provider unavailable",
         },
         {
@@ -203,9 +204,33 @@ def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
             "parent_ids": ["H1"],
             "status": "rejected",
             "reason": "llm_error",
+            "transport_retries": 2,
             "response_excerpt": "Error: provider unavailable",
         },
     ]
+
+
+def test_transient_evolution_transport_failure_is_retried():
+    context, _, _ = _context()
+    agent = EvolutionAgent(
+        strategies=("simplification",),
+        max_candidates_per_cycle=1,
+        transport_retry_attempts=2,
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            "Error: provider temporarily unavailable",
+            '{"title": "Recovered child", "hypothesis": "A decisive intervention tests X causally."}',
+        ],
+    ) as call_llm:
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert [hypothesis.title for hypothesis in evolved] == ["Recovered child"]
+    assert call_llm.call_count == 2
+    assert context.last_evolution_attempts[0]["status"] == "accepted"
+    assert context.last_evolution_attempts[0]["transport_retries"] == 1
 
 
 def test_supervisor_handles_nested_proximity_result():

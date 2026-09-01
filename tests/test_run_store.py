@@ -1,7 +1,16 @@
 import json
 
 from app.models import ResearchGoal
-from app.run_store import delete_run, history_html, list_runs, render_report, report_file_url, save_run, write_report
+from app.run_store import (
+    _final_hypotheses,
+    delete_run,
+    history_html,
+    list_runs,
+    render_report,
+    report_file_url,
+    save_run,
+    write_report,
+)
 
 FAKE_KEY = "LMSTUDIO-THIS-FAKE-KEY-MUST-NOT-PERSIST"
 
@@ -39,6 +48,15 @@ def _cycle_details():
             },
         },
     }
+
+
+def test_final_hypotheses_uses_latest_dynamic_ranking_round():
+    steps = {
+        "ranking_3": {"hypotheses": [{"id": "H3", "elo_score": 1300}]},
+        "ranking_4": {"hypotheses": [{"id": "H4", "elo_score": 1260}]},
+    }
+
+    assert _final_hypotheses(steps) == [{"id": "H4", "elo_score": 1260}]
 
 
 def test_save_run_persists_json_and_redacts_secrets(tmp_path, monkeypatch):

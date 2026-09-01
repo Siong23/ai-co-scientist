@@ -310,6 +310,7 @@ def call_llm_for_evolution(
     evidence_sources: Sequence[Mapping] | None = None,
     diagnostics: list[dict] | None = None,
     quality_repair_attempts: int = 1,
+    transport_retry_attempts: int = 2,
     meta_review_feedback: Sequence[Mapping] | str | None = None,
 ) -> dict[str, str] | None:
     """Create one evolved candidate through the shared, mockable LLM boundary."""
@@ -325,15 +326,28 @@ def call_llm_for_evolution(
     response = ""
     parsed = None
     reason = "no_response"
+    transport_retries = 0
     for attempt in range(max(0, quality_repair_attempts) + 1):
-        response = _call_llm(
-            prompt,
-            temperature=research_goal.generation_temperature,
-            model=research_goal.llm_model,
-            max_tokens=max_tokens,
-            reasoning="off",
-        )
-        parsed, reason = _parse_evolution_response(response)
+        for transport_attempt in range(max(0, transport_retry_attempts) + 1):
+            response = _call_llm(
+                prompt,
+                temperature=research_goal.generation_temperature,
+                model=research_goal.llm_model,
+                max_tokens=max_tokens,
+                reasoning="off",
+            )
+            parsed, reason = _parse_evolution_response(response)
+            if parsed is not None or reason not in {"llm_error", "empty_response"}:
+                break
+            if transport_attempt >= max(0, transport_retry_attempts):
+                break
+            transport_retries += 1
+            logger.warning(
+                "Evolution strategy %s hit a transient LLM failure; retrying (%d/%d).",
+                strategy,
+                transport_attempt + 1,
+                max(0, transport_retry_attempts),
+            )
         if parsed is None:
             break
 
@@ -366,6 +380,8 @@ def call_llm_for_evolution(
     }
     if quality_rejections:
         attempt["quality_rejections"] = quality_rejections
+    if transport_retries:
+        attempt["transport_retries"] = transport_retries
     if parsed is None:
         excerpt = redact_secrets(" ".join(str(response).split()))[:500]
         attempt["response_excerpt"] = excerpt

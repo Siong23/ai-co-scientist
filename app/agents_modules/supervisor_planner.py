@@ -164,6 +164,11 @@ def evaluate_finalization_readiness(
     min_accepted = min(min_accepted, max(1, int(research_goal.num_hypotheses)))
     min_matches = max(0, int(gate_config.get("min_completed_matches", 1)))
     require_evidence = bool(gate_config.get("require_evidence", True))
+    min_overall_confidence = float(gate_config.get("min_overall_confidence", 5.0))
+    min_claim_confidence = float(gate_config.get("min_claim_confidence", 4.0))
+    min_audit_score = float(gate_config.get("min_audit_score", 70.0))
+    require_successful_evolution = bool(gate_config.get("require_successful_evolution", True))
+    min_hypothesis_clusters = max(1, int(gate_config.get("min_hypothesis_clusters", 2)))
 
     accepted = []
     for hypothesis in context.get_active_hypotheses():
@@ -181,11 +186,35 @@ def evaluate_finalization_readiness(
     ranked_ids = {
         str(match.get(key)) for match in completed_matches for key in ("hypothesis_a", "hypothesis_b") if match.get(key)
     }
-    missing_evidence = [
-        hypothesis.hypothesis_id
-        for hypothesis in finalists
-        if require_evidence and not getattr(hypothesis, "evidence_source_ids", [])
-    ]
+    missing_evidence = []
+    low_confidence_finalists = []
+    unsupported_claim_finalists = []
+    failed_audit_finalists = []
+    for hypothesis in finalists:
+        evidence_ids = {str(source_id) for source_id in getattr(hypothesis, "evidence_source_ids", [])}
+        stored_source_ids = {
+            str(source.get("source_id"))
+            for source in (getattr(hypothesis, "evidence_sources", []) or [])
+            if isinstance(source, dict) and source.get("source_id")
+        }
+        if require_evidence and (not evidence_ids or not evidence_ids.intersection(stored_source_ids)):
+            missing_evidence.append(hypothesis.hypothesis_id)
+
+        report = getattr(hypothesis, "reflection_report", None)
+        claims = list(getattr(report, "claims", []) or [])
+        overall_confidence = float(getattr(report, "overall_confidence", 1.0) or 1.0)
+        claim_confidences = [float(getattr(claim, "confidence", 1.0)) for claim in claims]
+        if overall_confidence < min_overall_confidence or not claim_confidences or min(claim_confidences) < min_claim_confidence:
+            low_confidence_finalists.append(hypothesis.hypothesis_id)
+        if require_evidence and any(not getattr(claim, "supporting_evidence", []) for claim in claims):
+            unsupported_claim_finalists.append(hypothesis.hypothesis_id)
+
+        audit_verdict = str(getattr(hypothesis, "audit_verdict", "") or "").upper()
+        audit_score = getattr(hypothesis, "audit_score", None)
+        if audit_verdict and audit_verdict not in {"PASS", "PASS_WITH_WARNINGS"}:
+            failed_audit_finalists.append(hypothesis.hypothesis_id)
+        elif audit_score is not None and float(audit_score) < min_audit_score:
+            failed_audit_finalists.append(hypothesis.hypothesis_id)
     unranked_finalists = [
         hypothesis.hypothesis_id for hypothesis in finalists if hypothesis.hypothesis_id not in ranked_ids
     ]
@@ -199,6 +228,33 @@ def evaluate_finalization_readiness(
         reasons.append("Finalists missing completed tournament comparisons: " + ", ".join(unranked_finalists) + ".")
     if missing_evidence:
         reasons.append("Finalists missing verified evidence citations: " + ", ".join(missing_evidence) + ".")
+    if low_confidence_finalists:
+        reasons.append(
+            "Finalists below claim-confidence thresholds: " + ", ".join(low_confidence_finalists) + "."
+        )
+    if unsupported_claim_finalists:
+        reasons.append(
+            "Finalists have core claims without supporting evidence: "
+            + ", ".join(unsupported_claim_finalists)
+            + "."
+        )
+    if failed_audit_finalists:
+        reasons.append("Finalists failed the generation quality audit: " + ", ".join(failed_audit_finalists) + ".")
+
+    evolution_attempts = list(getattr(context, "last_evolution_attempts", []) or [])
+    successful_evolution = any(
+        isinstance(attempt, dict) and attempt.get("status") == "accepted" for attempt in evolution_attempts
+    )
+    if require_successful_evolution and not successful_evolution:
+        reasons.append("Need at least one successful Evolution candidate before finalization.")
+
+    proximity = getattr(context, "proximity_analysis", {}) or {}
+    clusters = proximity.get("clusters", {}) if isinstance(proximity, dict) else {}
+    cluster_count = len(clusters) if isinstance(clusters, (dict, list)) else 0
+    if len(finalists) >= 2 and cluster_count < min_hypothesis_clusters:
+        reasons.append(
+            f"Need at least {min_hypothesis_clusters} hypothesis clusters; found {cluster_count}."
+        )
 
     return {
         "ready": not reasons,
@@ -210,6 +266,12 @@ def evaluate_finalization_readiness(
         "finalist_ids": [hypothesis.hypothesis_id for hypothesis in finalists],
         "unranked_finalist_ids": unranked_finalists,
         "missing_evidence_ids": missing_evidence,
+        "low_confidence_finalist_ids": low_confidence_finalists,
+        "unsupported_claim_finalist_ids": unsupported_claim_finalists,
+        "failed_audit_finalist_ids": failed_audit_finalists,
+        "successful_evolution": successful_evolution,
+        "cluster_count": cluster_count,
+        "required_cluster_count": min_hypothesis_clusters,
     }
 
 

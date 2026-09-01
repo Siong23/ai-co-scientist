@@ -5,7 +5,9 @@ from app.agents_modules.reflection_helpers import (
     compute_overall_confidence,
     evaluate_claims,
     function_to_extract_claim,
+    function_to_get_contradictory_evidence,
     function_to_get_supporting_evidence,
+    recommendation_after_claim_assessment,
 )
 from app.models import ClaimAssessment, Hypothesis, ReflectionReport
 
@@ -74,10 +76,15 @@ def test_evaluate_claims_returns_sub_claim_assessments_and_report_confidence(mon
         {"source_id": "paper-1", "title": "Recall in noisy data", "abstract": "The method improves recall."},
     ]
 
-    monkeypatch.setattr(
-        "app.agents_modules.reflection_helpers._call_llm",
-        lambda *args, **kwargs: '{"sub_claims": ["The method improves recall in noisy data."]}',
-    )
+    def fake_llm(prompt, *args, **kwargs):
+        if "natural-language-inference verifier" in prompt:
+            return (
+                '{"verdicts": [{"source_id": "arXiv:9999.00001", '
+                '"is_contradictory": true, "reason": "Reports lower recall."}]}'
+            )
+        return '{"sub_claims": ["The method improves recall in noisy data."]}'
+
+    monkeypatch.setattr("app.agents_modules.reflection_helpers._call_llm", fake_llm)
 
     assessment = evaluate_claims(
         hypothesis,
@@ -122,3 +129,49 @@ def test_overall_confidence_combines_sub_claim_and_reflection_scores():
         evidence_quality_score=10,
         plausibility_score=10,
     ) == 6.85
+
+
+def test_irrelevant_search_result_is_not_treated_as_counterevidence(monkeypatch):
+    class IrrelevantRetriever:
+        def retrieve(self, *args, **kwargs):
+            return [
+                Document(
+                    page_content="Gravitational wave strain calibration for distant compact binaries.",
+                    metadata={
+                        "source_id": "arXiv:2605.27227v2",
+                        "source_type": "academic",
+                        "title": "LIGO calibration study",
+                        "abstract": "Gravitational wave strain calibration for compact binaries.",
+                    },
+                )
+            ]
+
+    monkeypatch.setattr(
+        "app.agents_modules.reflection_helpers._call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("irrelevant source reached verifier")),
+    )
+    hypothesis = Hypothesis("G1", "5G allocation", "Hypothesis: MARL improves 5G slice bandwidth allocation.")
+
+    assert (
+        function_to_get_contradictory_evidence(
+            hypothesis,
+            "MARL improves 5G slice bandwidth allocation during traffic spikes.",
+            retriever=IrrelevantRetriever(),
+        )
+        == []
+    )
+
+
+def test_claim_confidence_can_downgrade_but_not_upgrade_review():
+    weak_claim = {"status": "SUPPORTED", "confidence": 1.0}
+    strong_claim = {"status": "SUPPORTED", "confidence": 8.0}
+
+    assert recommendation_after_claim_assessment(
+        {"recommendation": "ACCEPT", "claims": [weak_claim], "overall_confidence": 3.2}
+    ) == "REVISE"
+    assert recommendation_after_claim_assessment(
+        {"recommendation": "REVISE", "claims": [strong_claim], "overall_confidence": 8.0}
+    ) == "REVISE"
+    assert recommendation_after_claim_assessment(
+        {"recommendation": "ACCEPT", "claims": [strong_claim], "overall_confidence": 8.0}
+    ) == "ACCEPT"

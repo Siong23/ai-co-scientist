@@ -373,7 +373,14 @@ def _settings_table(goal: Dict[str, Any]) -> str:
 
 
 def _final_hypotheses(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
-    for step_name in ("ranking_final", "ranking2", "ranking", "ranking1"):
+    ranking_steps = []
+    for index, step_name in enumerate(steps):
+        match = re.fullmatch(r"ranking(?:_?(\d+)|_final)?", step_name)
+        if not match:
+            continue
+        priority = float("inf") if step_name == "ranking_final" else int(match.group(1) or 0)
+        ranking_steps.append((priority, index, step_name))
+    for _, _, step_name in sorted(ranking_steps, reverse=True):
         hypotheses = steps.get(step_name, {}).get("hypotheses", [])
         if hypotheses:
             return sorted(hypotheses, key=lambda item: item.get("elo_score", 0), reverse=True)

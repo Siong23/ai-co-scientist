@@ -10,6 +10,7 @@ from .reflection_helpers import (
     call_llm_for_hypothesis_revision,
     call_llm_for_reflection,
     evaluate_claims,
+    recommendation_after_claim_assessment,
 )
 
 
@@ -76,6 +77,7 @@ class ReflectionAgent:
                         model=research_goal.llm_model,
                     )
                 )
+                result["recommendation"] = recommendation_after_claim_assessment(result)
                 reflection_report = _build_reflection_report(result)
             h.reflection_report = reflection_report
 

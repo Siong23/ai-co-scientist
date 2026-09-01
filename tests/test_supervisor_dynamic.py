@@ -15,7 +15,7 @@ from app.agents import (
     evaluate_finalization_readiness,
     parse_supervisor_decision,
 )
-from app.models import ReflectionReport
+from app.models import ClaimAssessment, ReflectionReport
 
 
 def _sample_hypothesis(hypothesis_id: str, rec: str | None = None, elo: float = 1200.0) -> Hypothesis:
@@ -31,6 +31,15 @@ def _sample_hypothesis(hypothesis_id: str, rec: str | None = None, elo: float = 
             evidence_quality_score=8,
             expected_research_value_score=8,
             recommendation=rec,
+            claims=[
+                ClaimAssessment(
+                    claim=f"Supported claim for {hypothesis_id}",
+                    status="SUPPORTED",
+                    confidence=8.0,
+                    supporting_evidence=[{"source_id": f"source:{hypothesis_id}"}],
+                )
+            ],
+            overall_confidence=8.0,
         )
     return h
 
@@ -332,11 +341,36 @@ def test_finalization_gate_requires_review_ranking_and_evidence():
 
     h1.evidence_source_ids = ["source:1"]
     h2.evidence_source_ids = ["source:2"]
+    h1.evidence_sources = [{"source_id": "source:1"}]
+    h2.evidence_sources = [{"source_id": "source:2"}]
+    context.last_evolution_attempts = [{"strategy": "grounding", "status": "accepted"}]
+    context.proximity_analysis = {"clusters": {0: ["H1"], 1: ["H2"]}}
     context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
 
     ready = evaluate_finalization_readiness(context, goal)
     assert ready["ready"] is True
     assert ready["reasons"] == []
+
+
+def test_finalization_gate_blocks_failed_evolution_and_single_mechanism_cluster():
+    context = ContextMemory()
+    h1 = _sample_hypothesis("H1", "ACCEPT", elo=1210.0)
+    h2 = _sample_hypothesis("H2", "ACCEPT", elo=1190.0)
+    for index, hypothesis in enumerate((h1, h2), start=1):
+        hypothesis.evidence_source_ids = [f"source:{index}"]
+        hypothesis.evidence_sources = [{"source_id": f"source:{index}"}]
+        context.add_hypothesis(hypothesis)
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
+    context.last_evolution_attempts = [{"strategy": "grounding", "status": "rejected", "reason": "llm_error"}]
+    context.proximity_analysis = {"clusters": {0: ["H1", "H2"]}}
+
+    result = evaluate_finalization_readiness(context, ResearchGoal(description="Quality gate", num_hypotheses=2))
+
+    assert result["ready"] is False
+    assert result["successful_evolution"] is False
+    assert result["cluster_count"] == 1
+    assert any("successful Evolution" in reason for reason in result["reasons"])
+    assert any("hypothesis clusters" in reason for reason in result["reasons"])
 
 
 def test_supervisor_run_dispatches_configured_mode():

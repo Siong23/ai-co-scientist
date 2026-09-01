@@ -58,6 +58,9 @@ evolution:
   # Retry once only when a syntactically valid child fails the Evolution
   # quality gate (near-copy, multiple hypotheses, or stitched combination).
   quality_repair_attempts: 1
+  # Retry transient provider errors or empty responses before abandoning a
+  # scientific evolution strategy.
+  transport_retry_attempts: 2
 
 # Elo K-factor
 elo_k_factor: 32
@@ -87,6 +90,11 @@ supervisor:
     min_accepted_hypotheses: 2
     min_completed_matches: 1
     require_evidence: true
+    min_overall_confidence: 5.0
+    min_claim_confidence: 4.0
+    min_audit_score: 70.0
+    require_successful_evolution: true
+    min_hypothesis_clusters: 2
 
 # Top K hypotheses for evolution
 top_k_hypotheses: 2

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import threading
 import time
 from copy import deepcopy
@@ -493,6 +494,19 @@ def format_ranking_confidence(value: Any) -> str:
         return "Not available"
 
     return f"{score:g}/10 ({score * 10:.0f}%)"
+
+
+def _ordered_ranking_step_names(steps: Dict[str, Any]) -> List[str]:
+    """Return fixed and dynamically numbered ranking steps newest first."""
+
+    ranked = []
+    for index, step_name in enumerate(steps):
+        match = re.fullmatch(r"ranking(?:_?(\d+)|_final)?", step_name)
+        if not match:
+            continue
+        priority = float("inf") if step_name == "ranking_final" else int(match.group(1) or 0)
+        ranked.append((priority, index, step_name))
+    return [step_name for _, _, step_name in sorted(ranked, reverse=True)]
 
 
 def run_cycle_with_progress(
@@ -1009,7 +1023,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
     # Prefer ranking steps, else fallback to step with most hypotheses
     final_hypotheses = []
     final_step = None
-    step_order = ["ranking_final", "ranking2", "ranking", "ranking1"]
+    step_order = _ordered_ranking_step_names(steps)
     for step_name in step_order:
         if step_name in steps and steps[step_name].get("hypotheses"):
             final_hypotheses = steps[step_name]["hypotheses"]
@@ -1027,7 +1041,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 max_count = len(hypos)
 
     # Assertions: final list should not be empty and no duplicate IDs (only for ranking steps)
-    ranking_steps = ["ranking_final", "ranking2", "ranking", "ranking1"]
+    ranking_steps = set(step_order)
     if final_hypotheses:
         ids = [h.get("id") for h in final_hypotheses]
         if final_step in ranking_steps:
