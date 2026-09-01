@@ -52,13 +52,16 @@ from __future__ import annotations
 import json
 import math
 import re
-import subprocess
+# import subprocess
 import sys
 import time
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
+
+from ..agents_modules.code_generation_agent import CodeGenerationAgent
+from .experiment_runner import ExperimentRunner
 
 
 # ============================================================
@@ -152,6 +155,15 @@ class ExperimentOrchestrator:
         )
 
         self._create_directories()
+
+        self.code_generation_agent = CodeGenerationAgent(
+            output_directory=GENERATED_CODE_DIR
+        )
+
+        self.experiment_runner = ExperimentRunner(
+            output_directory=RUNS_DIR,
+            python_executable=self.python_executable,
+        )
 
     # ========================================================
     # Directory Management
@@ -402,38 +414,37 @@ class ExperimentOrchestrator:
         context: Any,
     ) -> List[Any]:
         """
-        Return the final active hypotheses suitable for
-        experiment selection.
+        Return final active hypotheses explicitly accepted
+        by the ReflectionAgent.
 
-        Primary rule:
-            Reflection recommendation must be ACCEPT.
-
-        Fallback:
-            If the current context does not contain reflection
-            reports, return active hypotheses only when they
-            contain a valid hypothesis text.
-
-        The fallback prevents the orchestrator from silently
-        failing when it is used independently for testing.
+        Only hypotheses with an ACCEPT recommendation are
+        eligible for automated experiment execution.
         """
+        return self.get_accepted_hypotheses(context)
 
-        accepted = self.get_accepted_hypotheses(
-            context
-        )
+        # if hypothesis is None:
+        #     raise ValueError(
+        #         "No final Reflection-accepted active hypothesis "
+        #         "is available for experiment generation."
+        #     )
 
-        if accepted:
-            return accepted
+        # accepted = self.get_accepted_hypotheses(
+        #     context
+        # )
 
-        return [
-            hypothesis
-            for hypothesis in self.get_active_hypotheses(context)
-            if self._is_valid_hypothesis(hypothesis)
-            and getattr(
-                hypothesis,
-                "reflection_report",
-                None,
-            ) is None
-        ]
+        # if accepted:
+        #     return accepted
+
+        # return [
+        #     hypothesis
+        #     for hypothesis in self.get_active_hypotheses(context)
+        #     if self._is_valid_hypothesis(hypothesis)
+        #     and getattr(
+        #         hypothesis,
+        #         "reflection_report",
+        #         None,
+        #     ) is None
+        # ]
 
     def _is_valid_hypothesis(
         self,
@@ -962,19 +973,20 @@ class ExperimentOrchestrator:
         )
 
         specification = {
+            "dataset": {
+                "name": self.dataset_name,
+                "path": (
+                    str(self.dataset_path)
+                    if self.dataset_path
+                    else None
+                ),
+                "task": (
+                    "5G network intrusion "
+                    "detection classification"
+                ),
+            },
+
             "experiment": {
-                "dataset": {
-                    "name": self.dataset_name,
-                    "path": (
-                        str(self.dataset_path)
-                        if self.dataset_path
-                        else None
-                    ),
-                    "task": (
-                        "5G network intrusion "
-                        "detection classification"
-                    ),
-                },
                 "device": self.device,
                 "framework": "PyTorch",
                 "language": "Python",
@@ -1524,28 +1536,20 @@ class ExperimentOrchestrator:
         specification: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Integration point for the future CodeGenerationAgent.
+        Generate PyTorch experiment code from the structured
+        experiment specification.
 
-        Expected contract:
-
-            Experiment specification
-                    |
-                    v
-            CodeGenerationAgent
-                    |
-                    v
-            generated Python/PyTorch code
-
-        This method deliberately does not fabricate model
-        architecture or training code.
-
-        A CodeGenerationAgent should be connected here once
-        its implementation is finalized.
+        The CodeGenerationAgent receives the experiment
+        specification produced from the selected AI Co-Scientist
+        hypothesis and returns generated experiment code.
         """
 
-        raise NotImplementedError(
-            "CodeGenerationAgent has not yet "
-            "been connected to ExperimentOrchestrator."
+        # raise NotImplementedError(
+        #     "CodeGenerationAgent has not yet "
+        #     "been connected to ExperimentOrchestrator."
+        # )
+        return self.code_generation_agent.generate(
+            specification
         )
 
     # ========================================================
@@ -1585,152 +1589,152 @@ class ExperimentOrchestrator:
     # Execute Generated Experiment
     # ========================================================
 
-    def execute_generated_experiment(
-        self,
-        experiment_id: str,
-        code_path: Path,
-        timeout_seconds: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute a generated Python/PyTorch experiment.
+    # def execute_generated_experiment(
+    #     self,
+    #     experiment_id: str,
+    #     code_path: Path,
+    #     timeout_seconds: Optional[int] = None,
+    # ) -> Dict[str, Any]:
+    #     """
+    #     Execute a generated Python/PyTorch experiment.
 
-        The generated code runs as a separate process.
+    #     The generated code runs as a separate process.
 
-        This method returns execution information but does not
-        interpret scientific results. Scientific evaluation
-        should be performed from the generated metrics/artifacts.
-        """
+    #     This method returns execution information but does not
+    #     interpret scientific results. Scientific evaluation
+    #     should be performed from the generated metrics/artifacts.
+    #     """
 
-        code_path = Path(
-            code_path
-        )
+    #     code_path = Path(
+    #         code_path
+    #     )
 
-        if not code_path.exists():
-            raise FileNotFoundError(
-                f"Generated code does not exist: {code_path}"
-            )
+    #     if not code_path.exists():
+    #         raise FileNotFoundError(
+    #             f"Generated code does not exist: {code_path}"
+    #         )
 
-        started_at = time.perf_counter()
+    #     started_at = time.perf_counter()
 
-        command = [
-            self.python_executable,
-            str(code_path),
-        ]
+    #     command = [
+    #         self.python_executable,
+    #         str(code_path),
+    #     ]
 
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=code_path.parent,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+    #     try:
+    #         completed = subprocess.run(
+    #             command,
+    #             cwd=code_path.parent,
+    #             capture_output=True,
+    #             text=True,
+    #             timeout=timeout_seconds,
+    #             check=False,
+    #         )
 
-            elapsed = (
-                time.perf_counter()
-                - started_at
-            )
+    #         elapsed = (
+    #             time.perf_counter()
+    #             - started_at
+    #         )
 
-            execution_result = {
-                "experiment_id": experiment_id,
-                "success": (
-                    completed.returncode == 0
-                ),
-                "return_code": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
-                "execution_seconds": elapsed,
-            }
+    #         execution_result = {
+    #             "experiment_id": experiment_id,
+    #             "success": (
+    #                 completed.returncode == 0
+    #             ),
+    #             "return_code": completed.returncode,
+    #             "stdout": completed.stdout,
+    #             "stderr": completed.stderr,
+    #             "execution_seconds": elapsed,
+    #         }
 
-        except subprocess.TimeoutExpired as error:
-            elapsed = (
-                time.perf_counter()
-                - started_at
-            )
+    #     except subprocess.TimeoutExpired as error:
+    #         elapsed = (
+    #             time.perf_counter()
+    #             - started_at
+    #         )
 
-            execution_result = {
-                "experiment_id": experiment_id,
-                "success": False,
-                "return_code": None,
-                "stdout": (
-                    error.stdout
-                    if error.stdout
-                    else ""
-                ),
-                "stderr": (
-                    error.stderr
-                    if error.stderr
-                    else ""
-                ),
-                "error": (
-                    "Generated experiment exceeded "
-                    "the configured timeout."
-                ),
-                "execution_seconds": elapsed,
-            }
+    #         execution_result = {
+    #             "experiment_id": experiment_id,
+    #             "success": False,
+    #             "return_code": None,
+    #             "stdout": (
+    #                 error.stdout
+    #                 if error.stdout
+    #                 else ""
+    #             ),
+    #             "stderr": (
+    #                 error.stderr
+    #                 if error.stderr
+    #                 else ""
+    #             ),
+    #             "error": (
+    #                 "Generated experiment exceeded "
+    #                 "the configured timeout."
+    #             ),
+    #             "execution_seconds": elapsed,
+    #         }
 
-        output_path = (
-            self.create_run_directory(
-                experiment_id
-            )
-            / "execution_result.json"
-        )
+    #     output_path = (
+    #         self.create_run_directory(
+    #             experiment_id
+    #         )
+    #         / "execution_result.json"
+    #     )
 
-        self.save_json(
-            execution_result,
-            output_path,
-        )
+    #     self.save_json(
+    #         execution_result,
+    #         output_path,
+    #     )
 
-        execution_result[
-            "execution_result_path"
-        ] = str(output_path)
+    #     execution_result[
+    #         "execution_result_path"
+    #     ] = str(output_path)
 
-        return execution_result
+    #     return execution_result
 
     # ========================================================
     # Load Experiment Metrics
     # ========================================================
 
-    def load_metrics(
-        self,
-        experiment_id: str,
-    ) -> Dict[str, Any]:
-        """
-        Load metrics.json produced by the generated
-        experiment, when available.
-        """
+    # def load_metrics(
+    #     self,
+    #     experiment_id: str,
+    # ) -> Dict[str, Any]:
+    #     """
+    #     Load metrics.json produced by the generated
+    #     experiment, when available.
+    #     """
 
-        metrics_path = (
-            self.create_run_directory(
-                experiment_id
-            )
-            / "metrics.json"
-        )
+    #     metrics_path = (
+    #         self.create_run_directory(
+    #             experiment_id
+    #         )
+    #         / "metrics.json"
+    #     )
 
-        if not metrics_path.exists():
-            return {}
+    #     if not metrics_path.exists():
+    #         return {}
 
-        try:
-            with open(
-                metrics_path,
-                "r",
-                encoding="utf-8",
-            ) as file:
-                data = json.load(file)
+    #     try:
+    #         with open(
+    #             metrics_path,
+    #             "r",
+    #             encoding="utf-8",
+    #         ) as file:
+    #             data = json.load(file)
 
-            if isinstance(data, dict):
-                return data
+    #         if isinstance(data, dict):
+    #             return data
 
-            return {
-                "value": data
-            }
+    #         return {
+    #             "value": data
+    #         }
 
-        except (
-            OSError,
-            json.JSONDecodeError,
-        ):
-            return {}
+    #     except (
+    #         OSError,
+    #         json.JSONDecodeError,
+    #     ):
+    #         return {}
 
     # ========================================================
     # Run Generated Experiment
@@ -1739,82 +1743,63 @@ class ExperimentOrchestrator:
     def run_generated_experiment(
         self,
         experiment_id: str,
-        code: str,
+        generated_result: Dict[str, Any],
         timeout_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Save and execute generated PyTorch code.
+        Execute generated PyTorch code through ExperimentRunner.
 
-        This is intentionally separate from the scientific
-        hypothesis-selection stage.
+        ExperimentRunner is responsible for:
+
+            - Creating the execution directory
+            - Saving generated code
+            - Saving experiment metadata
+            - Executing the experiment
+            - Capturing stdout/stderr
+            - Collecting metrics
+            - Collecting training history
+            - Finding checkpoints
+            - Finding visualizations
+            - Validating outputs
         """
 
-        started_at = time.perf_counter()
+        if not isinstance(
+            generated_result,
+            dict,
+        ):
+            raise TypeError(
+                "generated_result must be a dictionary."
+            )
 
-        result: Dict[str, Any] = {
-            "success": False,
-            "experiment_id": experiment_id,
-            "generated_code_path": None,
-            "execution": None,
-            "metrics": {},
-            "errors": [],
-        }
+        original_timeout = (
+            self.experiment_runner.timeout_seconds
+        )
+
+        if timeout_seconds is not None:
+            self.experiment_runner.timeout_seconds = max(
+                1,
+                int(timeout_seconds),
+            )
 
         try:
-            code_path = (
-                self.save_generated_code(
-                    experiment_id,
-                    code,
+            runner_result = (
+                self.experiment_runner.run_generated_result(
+                    generated_result=generated_result,
+                    dataset_path=self.dataset_path,
+                    run_name=experiment_id,
                 )
             )
 
-            result[
-                "generated_code_path"
-            ] = str(code_path)
-
-            execution = (
-                self.execute_generated_experiment(
-                    experiment_id,
-                    code_path,
-                    timeout_seconds=timeout_seconds,
-                )
-            )
-
-            result[
-                "execution"
-            ] = execution
-
-            result[
-                "metrics"
-            ] = self.load_metrics(
+            runner_result["experiment_id"] = (
                 experiment_id
             )
 
-            result[
-                "success"
-            ] = bool(
-                execution.get(
-                    "success",
-                    False,
-                )
-            )
-
-        except Exception as error:
-            result[
-                "errors"
-            ].append(
-                str(error)
-            )
+            return runner_result
 
         finally:
-            result[
-                "total_execution_seconds"
-            ] = (
-                time.perf_counter()
-                - started_at
+            self.experiment_runner.timeout_seconds = (
+                original_timeout
             )
-
-        return result
 
     # ========================================================
     # Full Experiment Pipeline
@@ -1911,100 +1896,147 @@ class ExperimentOrchestrator:
         )
 
         try:
-            code_generation = (
-                self.generate_pytorch_code(
-                    specification
-                )
+            code_generation = self.generate_pytorch_code(
+                specification
             )
 
-            result[
-                "code_generation"
-            ] = code_generation
+            result["code_generation"] = code_generation
 
-        except NotImplementedError as error:
-            result[
-                "code_generation"
-            ] = {
-                "success": False,
-                "status": "not_connected",
-                "message": str(error),
-            }
+            if not isinstance(code_generation, dict):
+                result["errors"].append(
+                    "Code generation did not return a dictionary."
+                )
+                result["success"] = False
 
-            # Preparation itself remains successful.
-            # The experiment has not failed scientifically;
-            # code generation simply has not been connected yet.
+            elif not code_generation.get("success", False):
+                result["errors"].append(
+                    code_generation.get(
+                        "error",
+                        "Code generation failed."
+                    )
+                )
+                result["success"] = False
 
         except Exception as error:
-            result[
-                "errors"
-            ].append(
+            result["errors"].append(
                 f"Code generation failed: {error}"
             )
+            result["success"] = False
 
         # ----------------------------------------------------
         # Optional execution
         # ----------------------------------------------------
 
-        if execute_generated_code:
+        if (
+            execute_generated_code
+            and result.get(
+                "success",
+                False,
+            )
+        ):
+
             code_generation = (
                 result.get(
                     "code_generation"
                 )
             )
 
-            if not isinstance(
-                code_generation,
-                dict,
-            ):
-                result[
-                    "errors"
-                ].append(
-                    "Code generation did not return a dictionary."
-                )
+            experiment_id = (
+                preparation[
+                    "experiment_id"
+                ]
+            )
 
-            else:
-                generated_code = (
-                    code_generation.get(
-                        "code"
+            try:
+                execution = (
+                    self.run_generated_experiment(
+                        experiment_id=experiment_id,
+                        generated_result=code_generation,
+                        timeout_seconds=timeout_seconds,
                     )
                 )
 
-                if not generated_code:
+                result[
+                    "execution"
+                ] = execution
+
+                if not execution.get(
+                    "success",
+                    False,
+                ):
                     result[
                         "errors"
-                    ].append(
-                        "No generated PyTorch code was returned."
-                    )
-
-                else:
-                    execution = (
-                        self.run_generated_experiment(
-                            experiment_id=(
-                                preparation[
-                                    "experiment_id"
-                                ]
-                            ),
-                            code=generated_code,
-                            timeout_seconds=timeout_seconds,
+                    ].extend(
+                        execution.get(
+                            "errors",
+                            [],
                         )
                     )
 
-                    result[
-                        "execution"
-                    ] = execution
-
-                    if not execution.get(
-                        "success",
-                        False,
+                    if (
+                        not execution.get(
+                            "errors"
+                        )
                     ):
                         result[
                             "errors"
-                        ].extend(
+                        ].append(
                             execution.get(
-                                "errors",
-                                [],
+                                "status",
+                                "Experiment execution failed."
                             )
                         )
+
+                    result[
+                        "success"
+                    ] = False
+
+            except Exception as error:
+                result[
+                    "errors"
+                ].append(
+                    f"Experiment execution failed: {error}"
+                )
+
+                result[
+                    "success"
+                ] = False
+
+
+        # ----------------------------------------------------
+        # Final status
+        # ----------------------------------------------------
+
+        if not result["errors"]:
+
+            if execute_generated_code:
+                execution = result.get(
+                    "execution"
+                )
+
+                result[
+                    "success"
+                ] = bool(
+                    execution
+                    and execution.get(
+                        "success",
+                        False,
+                    )
+                )
+
+            else:
+                result[
+                    "success"
+                ] = bool(
+                    result.get(
+                        "code_generation",
+                        {},
+                    ).get(
+                        "success",
+                        False,
+                    )
+                )
+
 
         result[
             "total_seconds"

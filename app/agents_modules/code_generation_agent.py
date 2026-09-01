@@ -523,6 +523,30 @@ IMPORTANT RULES:
 28. Do not use placeholder code such as "TODO", "implement here", or
     "pass" for required experiment functionality.
 29. Return ONLY valid JSON according to the requested schema.
+30. The ExperimentRunner provides the environment variable
+    EXPERIMENT_OUTPUT_DIR. All generated artifacts MUST be saved
+    inside this directory.
+
+31. Use:
+
+        output_dir = Path(
+            os.environ.get(
+                "EXPERIMENT_OUTPUT_DIR",
+                "."
+            )
+        )
+
+32. Save the following files using these exact names:
+
+        metrics.json
+        training_history.json
+        best_model.pt
+
+33. Save all visualization files inside EXPERIMENT_OUTPUT_DIR
+    or one of its subdirectories.
+
+34. The dataset path may be provided through the DATASET_PATH
+    environment variable. Prefer DATASET_PATH when it is available.
 
 The generated code must be suitable for later automated execution by
 an Experiment Runner.
