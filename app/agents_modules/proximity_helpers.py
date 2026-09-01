@@ -20,6 +20,7 @@ class SimilarityConfig:
 
     # Minimum similarity required for an edge to remain in the graph.
     similarity_threshold: float = 0.3
+    dynamic_thresholding: bool = True
 
     # Similarity methods:
     # jaccard, sequence, semantic, combined

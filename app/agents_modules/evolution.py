@@ -61,9 +61,12 @@ class EvolutionAgent:
             logger.info("No active hypotheses to evolve.")
             return []
 
-        sorted_by_elo = sorted(active, key=lambda h: h.elo_score, reverse=True)
         parent_count = max(1, int(research_goal.top_k_hypotheses))
-        top_candidates = sorted_by_elo[:parent_count]
+        top_candidates = self._select_parents(
+            active,
+            parent_count,
+            getattr(context, "proximity_analysis", None),
+        )
         strategies = self._strategies_for_cycle(context, len(top_candidates))
         new_hypotheses = []
         for strategy in strategies:
@@ -108,3 +111,27 @@ class EvolutionAgent:
             )
 
         return new_hypotheses
+
+    @staticmethod
+    def _select_parents(
+        active: List[Hypothesis],
+        parent_count: int,
+        proximity_data: dict | None,
+    ) -> List[Hypothesis]:
+        """Prefer one strong exemplar per cluster, then fill by Elo."""
+        by_id = {hypothesis.hypothesis_id: hypothesis for hypothesis in active}
+        selected = []
+        exemplar_ids = (proximity_data or {}).get("exemplar_ids", [])
+        for hypothesis_id in exemplar_ids:
+            hypothesis = by_id.get(hypothesis_id)
+            if hypothesis is not None and hypothesis not in selected:
+                selected.append(hypothesis)
+            if len(selected) >= parent_count:
+                return selected
+
+        for hypothesis in sorted(active, key=lambda item: (item.elo_score, item.hypothesis_id), reverse=True):
+            if hypothesis not in selected:
+                selected.append(hypothesis)
+            if len(selected) >= parent_count:
+                break
+        return selected

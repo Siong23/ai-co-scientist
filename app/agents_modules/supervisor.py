@@ -372,6 +372,7 @@ class SupervisorAgent:
         context: ContextMemory,
         publish: Callable[..., None],
         cycle_details: Dict[str, Any],
+        research_goal: Optional[ResearchGoal] = None,
     ) -> Dict[str, Any]:
         """Execute proximity graph construction and diversity analysis."""
         logger.info("Supervisor Step: Proximity Analysis")
@@ -384,11 +385,11 @@ class SupervisorAgent:
         )
         proximity_result = None
         if hasattr(self.proximity_agent, "get_proximity_analysis"):
-            res = self.proximity_agent.get_proximity_analysis(context)
+            res = self.proximity_agent.get_proximity_analysis(context, research_goal=research_goal)
             if isinstance(res, dict):
                 proximity_result = res
         if proximity_result is None and hasattr(self.proximity_agent, "build_proximity_graph"):
-            res = self.proximity_agent.build_proximity_graph(context)
+            res = self.proximity_agent.build_proximity_graph(context, research_goal=research_goal)
             if isinstance(res, dict):
                 proximity_result = res
         if not isinstance(proximity_result, dict):
@@ -409,6 +410,9 @@ class SupervisorAgent:
             "connectivity": proximity_result.get("connectivity", {}),
             "highly_connected": proximity_result.get("highly_connected", []),
             "isolated": proximity_result.get("isolated", []),
+            "near_duplicates": proximity_result.get("near_duplicates", []),
+            "exemplar_ids": proximity_result.get("exemplar_ids", []),
+            "diversity_score": proximity_result.get("diversity_score"),
         }
         publish(
             "proximity",
@@ -522,6 +526,11 @@ class SupervisorAgent:
         )
         rankable_hypos = reflection_routing["accepted"]
 
+        proximity_result = self.proximity_agent.get_proximity_analysis(
+            context,
+            research_goal=research_goal,
+        )
+
         # 3. Ranking 1
         rankable_ids = {h.hypothesis_id for h in rankable_hypos}
         rankable_new = [h for h in new_hypotheses if h.hypothesis_id in rankable_ids]
@@ -549,6 +558,11 @@ class SupervisorAgent:
                 step_name="reflection_evolved",
             )
 
+        self.proximity_agent.get_proximity_analysis(
+            context,
+            research_goal=research_goal,
+        )
+
         # 5. Ranking 2
         active_hypos = context.get_active_hypotheses()
         final_routing = _reflection_routing(active_hypos)
@@ -565,10 +579,8 @@ class SupervisorAgent:
             step_name="ranking2",
         )
 
-        # 6. Proximity
-        proximity_result = self.step_proximity(context, publish, cycle_details)
-
         # 7. Meta-review
+        proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
         self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
 
         context.iteration_number += 1
@@ -703,7 +715,7 @@ class SupervisorAgent:
                 last_evolved_hypotheses = self.step_evolution(research_goal, context, publish, cycle_details)
 
             elif decision.action == "PROXIMITY":
-                proximity_result = self.step_proximity(context, publish, cycle_details)
+                proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
 
             elif decision.action == "META_REVIEW":
                 self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
@@ -713,7 +725,7 @@ class SupervisorAgent:
         # If meta-review was never run, perform a final synthesis
         if "meta_review" not in cycle_details.get("steps", {}):
             if proximity_result is None and len(context.get_active_hypotheses()) >= 2:
-                proximity_result = self.step_proximity(context, publish, cycle_details)
+                proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
             self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
 
         context.iteration_number += 1

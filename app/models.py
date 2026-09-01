@@ -53,6 +53,7 @@ class Hypothesis:
         # source dictionaries in references/evidence_sources.
         self.review_reference_ids: List[str] = []
         self.is_active: bool = True
+        self.deactivation_reason: Optional[str] = kwargs.get("deactivation_reason")
         self.parent_ids: List[str] = []
         self.evolution_strategy: Optional[str] = None
         # A hypothesis has one current aggregate review.  None explicitly means
@@ -77,6 +78,7 @@ class Hypothesis:
             "references": self.references,
             "review_reference_ids": self.review_reference_ids,
             "is_active": self.is_active,
+            "deactivation_reason": self.deactivation_reason,
             "parent_ids": self.parent_ids,  # Include parent IDs
             "evolution_strategy": self.evolution_strategy,
             "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs
@@ -147,6 +149,8 @@ class ContextMemory:
         self.last_evolution_attempts: List[Dict] = []
         # Quality-gate reports for every generated candidate, including rejects.
         self.last_hypothesis_audits: List[Dict] = []
+        # Latest topology analysis shared by Ranking, Evolution, and Meta-review.
+        self.proximity_analysis: Dict = {}
 
     def add_hypothesis(self, hypothesis: Hypothesis):
         self.hypotheses[hypothesis.hypothesis_id] = hypothesis
