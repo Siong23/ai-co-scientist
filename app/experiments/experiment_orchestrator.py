@@ -1766,12 +1766,27 @@ class ExperimentOrchestrator:
                 result["success"] = False
 
             elif not code_generation.get("success", False):
-                result["errors"].append(
-                    code_generation.get(
-                        "error",
-                        "Code generation failed."
-                    )
+                generation_errors = code_generation.get(
+                    "errors",
+                    [],
                 )
+                if isinstance(generation_errors, list):
+                    result["errors"].extend(
+                        str(error)
+                        for error in generation_errors
+                        if str(error).strip()
+                    )
+                elif generation_errors:
+                    result["errors"].append(
+                        str(generation_errors)
+                    )
+                else:
+                    result["errors"].append(
+                        code_generation.get(
+                            "error",
+                            "Code generation failed."
+                        )
+                    )
                 result["success"] = False
 
         except Exception as error:
