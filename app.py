@@ -11,6 +11,9 @@ import gradio as gr
 from numpy.ma import count  # noqa: F401
 
 from app.agents import SupervisorAgent
+from app.experiments.experiment_orchestrator import (
+    ExperimentOrchestrator,
+)
 from app.config import config
 from app.models import ContextMemory, ResearchGoal
 from app.research_trace import format_research_trace_html, merge_trace_event, normalize_trace_event
@@ -34,6 +37,7 @@ from app.utils import (
     redact_secrets,
 )
 
+
 # Global state for the Gradio app
 global_context = ContextMemory()
 supervisor = SupervisorAgent()
@@ -42,6 +46,9 @@ available_models: List[str] = []
 CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
 CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "1800"))
+EXPERIMENT_DATASET_PATH = os.getenv("EXPERIMENT_DATASET_PATH", "")
+EXPERIMENT_DEVICE = os.getenv("EXPERIMENT_DEVICE", "cpu",)
+EXPERIMENT_TIMEOUT_SECONDS = int(os.getenv("EXPERIMENT_TIMEOUT_SECONDS", "3600",))
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 
 # Configure logging for Gradio
@@ -253,6 +260,149 @@ def format_execution_time(seconds: float) -> str:
     return f"{seconds} sec"
 
 
+def format_experiment_results_html(
+    experiment_result: Dict[str, Any],
+) -> str:
+    """
+    Format automated experiment results for the Gradio UI.
+    """
+
+    if not experiment_result:
+        return ""
+
+    import html as html_lib
+
+    if not experiment_result.get(
+        "success",
+        False,
+    ):
+        errors = experiment_result.get(
+            "errors",
+            [],
+        )
+
+        error_items = "".join(
+            f"<li>{html_lib.escape(str(error))}</li>"
+            for error in errors
+        )
+
+        return f"""
+        <div style="
+            margin-top: 20px;
+            padding: 15px;
+            border: 2px solid #e74c3c;
+            border-radius: 8px;
+        ">
+            <h2>❌ Automated Experiment Failed</h2>
+            <ul>
+                {error_items or "<li>No detailed error was returned.</li>"}
+            </ul>
+        </div>
+        """
+
+    preparation = experiment_result.get(
+        "experiment_preparation",
+        {},
+    )
+
+    selected = preparation.get(
+        "selected_hypothesis",
+        {},
+    )
+
+    execution = experiment_result.get(
+        "execution",
+        {},
+    )
+
+    metrics = {}
+
+    if isinstance(execution, dict):
+        metrics = execution.get(
+            "metrics",
+            {},
+        )
+
+    if not isinstance(metrics, dict):
+        metrics = {}
+
+    experiment_id = preparation.get(
+        "experiment_id",
+        "Unknown",
+    )
+
+    hypothesis_title = selected.get(
+        "title"
+    ) or "Untitled Hypothesis"
+
+    hypothesis_id = selected.get(
+        "hypothesis_id"
+    ) or "Unknown"
+
+    accuracy = metrics.get(
+        "accuracy",
+        "Not available",
+    )
+
+    precision = metrics.get(
+        "precision_weighted",
+        "Not available",
+    )
+
+    recall = metrics.get(
+        "recall_weighted",
+        "Not available",
+    )
+
+    f1_score = metrics.get(
+        "f1_weighted",
+        "Not available",
+    )
+
+    return f"""
+    <div style="
+        margin-top: 20px;
+        padding: 20px;
+        border: 2px solid #28a745;
+        border-radius: 8px;
+    ">
+        <h2>🧪 Automated Experiment Results</h2>
+
+        <p>
+            <strong>Experiment ID:</strong>
+            {html_lib.escape(str(experiment_id))}
+        </p>
+
+        <p>
+            <strong>Selected Hypothesis:</strong>
+            {html_lib.escape(str(hypothesis_title))}
+        </p>
+
+        <p>
+            <strong>Hypothesis ID:</strong>
+            {html_lib.escape(str(hypothesis_id))}
+        </p>
+
+        <hr>
+
+        <h3>📊 Evaluation Metrics</h3>
+
+        <ul>
+            <li><strong>Accuracy:</strong> {accuracy}</li>
+            <li><strong>Weighted Precision:</strong> {precision}</li>
+            <li><strong>Weighted Recall:</strong> {recall}</li>
+            <li><strong>Weighted F1 Score:</strong> {f1_score}</li>
+        </ul>
+
+        <p>
+            Generated code, checkpoints, metrics,
+            training history, and visualizations are saved
+            in the experiment results directory.
+        </p>
+    </div>
+    """
+
+
 def execute_cycle(
     research_goal: ResearchGoal,
     context: ContextMemory,
@@ -298,6 +448,119 @@ def execute_cycle(
         )
         cycle_details.setdefault("research_trace", research_trace)
 
+        # ================================================
+        # Automated Experiment Pipeline
+        # ================================================
+
+        print("\n" + "=" * 60)
+        print("AI CO-SCIENTIST WORKFLOW COMPLETED")
+        print("STARTING AUTOMATED EXPERIMENT PIPELINE")
+        print("=" * 60)
+
+        print("\n[1/2] Running AI Co-Scientist workflow...")
+
+        logger.info(
+            "Starting automated experiment pipeline."
+        )
+
+        capture_progress(
+            {
+                "step": "experiment",
+                "status": "running",
+                "title": "Automated Experiment",
+                "summary": (
+                    "Selecting the best hypothesis and "
+                    "starting the PyTorch experiment."
+                ),
+                "details": [],
+            }
+        )
+
+        print("\n[2/2] Running automated deep-learning experiment...")
+
+        dataset_path = (
+            EXPERIMENT_DATASET_PATH
+            if EXPERIMENT_DATASET_PATH
+            else None
+        )
+
+        experiment_orchestrator = (
+            ExperimentOrchestrator(
+                dataset_name="5G-NIDD",
+                dataset_path=dataset_path,
+                device=EXPERIMENT_DEVICE,
+            )
+        )
+
+        experiment_result = (
+            experiment_orchestrator.run_experiment(
+                context=context,
+                research_goal=research_goal,
+                execute_generated_code=True,
+                timeout_seconds=(
+                    EXPERIMENT_TIMEOUT_SECONDS
+                ),
+            )
+        )
+
+        cycle_details[
+            "experiment_result"
+        ] = experiment_result
+
+        if experiment_result.get(
+            "success",
+            False,
+        ):
+            print("\n✓ AUTOMATED EXPERIMENT COMPLETED")
+
+            capture_progress(
+                {
+                    "step": "experiment",
+                    "status": "completed",
+                    "title": "Automated Experiment",
+                    "summary": (
+                        "PyTorch experiment completed "
+                        "successfully."
+                    ),
+                    "details": [],
+                }
+            )
+
+        else:
+            experiment_errors = (
+                experiment_result.get(
+                    "errors",
+                    [],
+                )
+            )
+
+            print(
+                "\n✗ AUTOMATED EXPERIMENT FAILED"
+            )
+
+            for error in experiment_errors:
+                print(f"  - {error}")
+
+            capture_progress(
+                {
+                    "step": "experiment",
+                    "status": "error",
+                    "title": "Automated Experiment",
+                    "summary": (
+                        "The experiment pipeline completed "
+                        "with errors."
+                    ),
+                    "details": [
+                        str(error)
+                        for error in experiment_errors
+                    ],
+                }
+            )
+
+        print("\n" + "=" * 60)
+        print("COMPLETE AUTOMATED PIPELINE FINISHED")
+        print("=" * 60)
+
         # Log execution time
         total_time = time.perf_counter() - start_time
         formatted_time = format_execution_time(total_time)
@@ -318,6 +581,12 @@ def execute_cycle(
 
         # Format results for display (also logs final rankings)
         results_html = format_cycle_results(cycle_details, log_file=log_file)
+
+        experiment_result = cycle_details.get("experiment_result", {},)
+
+        experiment_results_html = (format_experiment_results_html(experiment_result))
+
+        results_html += experiment_results_html
 
         # Get references
         references_html = get_references_html(cycle_details, research_goal=research_goal)
