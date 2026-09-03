@@ -29,6 +29,7 @@ execute training itself.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -36,7 +37,6 @@ from typing import Any, Dict, Optional
 
 from ..config import config
 from ..utils import logger
-
 
 # ============================================================
 # LLM Boundary
@@ -129,8 +129,8 @@ class CodeGenerationAgent:
             are saved.
         """
         self.model = model or config.get(
-            "llm_model",
-            None,
+            "code_generation_model",
+            config.get("llm_model", None),
         )
 
         self.temperature = (
@@ -522,7 +522,7 @@ IMPORTANT RULES:
     metadata.
 28. Do not use placeholder code such as "TODO", "implement here", or
     "pass" for required experiment functionality.
-29. Return ONLY valid JSON according to the requested schema.
+29. Return ONLY complete executable Python source code.
 30. The ExperimentRunner provides the environment variable
     EXPERIMENT_OUTPUT_DIR. All generated artifacts MUST be saved
     inside this directory.
@@ -556,17 +556,34 @@ an Experiment Runner.
         Build the user prompt containing the complete experiment
         specification.
         """
+        prompt_specification = dict(specification)
+        selected_hypothesis = specification.get(
+            "selected_hypothesis",
+            {},
+        )
+        if isinstance(selected_hypothesis, dict):
+            prompt_specification["selected_hypothesis"] = {
+                key: selected_hypothesis.get(key)
+                for key in ("hypothesis_id", "title", "text")
+            }
+
+        prompt_specification.pop(
+            "ai_co_scientist_provenance",
+            None,
+        )
+        prompt_specification["scientific_evaluation"] = {}
+
         specification_json = json.dumps(
             self._to_serializable(
-                specification
+                prompt_specification
             ),
             ensure_ascii=False,
             indent=2,
         )
 
         return f"""
-Generate a complete PyTorch experiment from the following
-AI Co-Scientist experiment specification.
+    Generate only the complete executable Python source code for a PyTorch
+    experiment from the following AI Co-Scientist experiment specification.
 
 EXPERIMENT SPECIFICATION
 ========================
@@ -576,34 +593,8 @@ EXPERIMENT SPECIFICATION
 OUTPUT REQUIREMENTS
 ===================
 
-Return exactly one JSON object with these top-level fields:
-
-{{
-    "model_recommendation": {{
-        "model_name": "...",
-        "architecture": "...",
-        "reasoning": "...",
-        "input_representation": "...",
-        "expected_advantage": "..."
-    }},
-    "experiment_plan": {{
-        "task": "...",
-        "preprocessing": [...],
-        "data_split": "...",
-        "loss_function": "...",
-        "optimizer": "...",
-        "scheduler": "...",
-        "batch_size": 0,
-        "epochs": 0,
-        "early_stopping": true
-    }},
-    "assumptions": [...],
-    "dependencies": [...],
-    "pytorch_code": "FULL PYTHON SOURCE CODE HERE"
-}}
-
-The "pytorch_code" field must contain the COMPLETE executable
-Python source code.
+Return only Python source code. Do not return JSON, Markdown fences,
+explanations, analysis, or commentary.
 
 The generated code must:
 
@@ -627,10 +618,7 @@ implement that architecture rather than defaulting to a generic
 MLP.
 
 If the hypothesis does not provide enough implementation detail,
-make the smallest scientifically reasonable assumptions and record
-them in "assumptions".
-
-Do not wrap the JSON object in Markdown fences.
+make the smallest scientifically reasonable assumptions in the code.
 """.strip()
 
     # ========================================================
@@ -687,9 +675,14 @@ Do not wrap the JSON object in Markdown fences.
                     cleaned[start:end + 1]
                 )
             except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Invalid JSON returned by CodeGenerationAgent: {exc}"
-                ) from exc
+                try:
+                    payload = ast.literal_eval(
+                        cleaned[start:end + 1]
+                    )
+                except (SyntaxError, ValueError) as literal_error:
+                    raise ValueError(
+                        f"Invalid structured response returned by CodeGenerationAgent: {literal_error}"
+                    ) from exc
 
         if not isinstance(
             payload,
@@ -700,6 +693,62 @@ Do not wrap the JSON object in Markdown fences.
             )
 
         return payload
+
+    @staticmethod
+    def extract_fenced_python(
+        response: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Build a minimal result when the model returns fenced Python only."""
+        matches = re.findall(
+            r"```(?:python|py)\s*\n(.*?)```",
+            response,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not matches:
+            return None
+
+        code = max(matches, key=len).strip()
+        if not code:
+            return None
+
+        return {
+            "model_recommendation": {},
+            "experiment_plan": {},
+            "assumptions": [
+                "The model returned executable Python in a fenced code block."
+            ],
+            "dependencies": [],
+            "pytorch_code": code,
+        }
+
+    @staticmethod
+    def extract_python_source(
+        response: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Extract executable Python when the model ignores the JSON wrapper."""
+        fenced = CodeGenerationAgent.extract_fenced_python(response)
+        if fenced is not None:
+            return fenced
+
+        source_start = response.find("import torch")
+        if source_start == -1:
+            source_start = response.find("from torch")
+        if source_start == -1:
+            return None
+
+        code = response[source_start:].strip()
+        if not code:
+            return None
+
+        return {
+            "model_recommendation": {},
+            "experiment_plan": {},
+            "assumptions": [
+                "The model returned executable Python without a JSON wrapper."
+            ],
+            "dependencies": [],
+            "pytorch_code": code,
+        }
 
     # ========================================================
     # Generated Response Validation
@@ -780,6 +829,14 @@ Do not wrap the JSON object in Markdown fences.
             raise ValueError(
                 "Generated PyTorch code is empty."
             )
+
+        try:
+            ast.parse(pytorch_code)
+        except SyntaxError as exc:
+            raise ValueError(
+                "Generated PyTorch code is not valid Python: "
+                f"{exc.msg} at line {exc.lineno}."
+            ) from exc
 
         # Basic protection against incomplete generation.
         forbidden_placeholders = [
@@ -871,13 +928,112 @@ Do not wrap the JSON object in Markdown fences.
                     response
                 )
 
-            generated = self.extract_json(
-                response
-            )
+            try:
+                generated = self.extract_json(
+                    response
+                )
+            except ValueError as parse_error:
+                generated = self.extract_python_source(response)
+                if generated is not None:
+                    self.validate_generated_response(generated)
+                else:
+                    repair_prompt = f"""
+    The previous response was not valid structured JSON. Return exactly one
+    valid JSON object with model_recommendation, experiment_plan, assumptions,
+    dependencies, and pytorch_code. Preserve the complete PyTorch source code.
+    Do not add Markdown, explanations, or extra text.
 
-            self.validate_generated_response(
-                generated
-            )
+    Previous response:
+    {response}
+
+    Parser error:
+    {parse_error}
+    """.strip()
+                    repaired_response = _call_llm(
+                        repair_prompt,
+                        temperature=0.0,
+                        model=self.model,
+                        system_prompt=system_prompt,
+                        max_tokens=_output_token_limit(
+                            "code_generation",
+                            self.DEFAULT_MAX_TOKENS,
+                        ),
+                        reasoning="off",
+                    )
+                    if not isinstance(repaired_response, str):
+                        repaired_response = str(repaired_response)
+                    if repaired_response.startswith("Error:"):
+                        raise RuntimeError(repaired_response) from parse_error
+                    try:
+                        generated = self.extract_json(repaired_response)
+                    except ValueError as repaired_parse_error:
+                        generated = self.extract_python_source(repaired_response)
+                        if generated is None:
+                            generated = self.extract_python_source(response)
+                        if generated is None:
+                            code_only_prompt = f"""
+Generate only the complete executable Python source code for this PyTorch
+experiment. Do not return JSON. Do not return explanations. Do not use
+Markdown fences. The source must import torch, load the local dataset from
+DATASET_PATH, train and evaluate the model, and save all artifacts inside
+EXPERIMENT_OUTPUT_DIR.
+
+Selected hypothesis:
+{specification["selected_hypothesis"].get("text", "")}
+
+Dataset:
+{specification["dataset"].get("name", "5G-NIDD")}
+""".strip()
+                            code_only_response = _call_llm(
+                                code_only_prompt,
+                                temperature=0.0,
+                                model=self.model,
+                                system_prompt=system_prompt,
+                                max_tokens=_output_token_limit(
+                                    "code_generation",
+                                    self.DEFAULT_MAX_TOKENS,
+                                ),
+                                reasoning="off",
+                            )
+                            if not isinstance(code_only_response, str):
+                                code_only_response = str(code_only_response)
+                            generated = self.extract_python_source(code_only_response)
+                        if generated is None:
+                            raise repaired_parse_error
+
+            try:
+                self.validate_generated_response(
+                    generated
+                )
+            except ValueError as code_error:
+                code_only_prompt = f"""
+Return only complete, executable Python source code for a PyTorch experiment.
+Do not return JSON, Markdown, explanations, analysis, or commentary. Start
+with a Python import and end with the executable experiment code.
+
+Selected hypothesis:
+{specification["selected_hypothesis"].get("text", "")}
+
+Dataset:
+{specification["dataset"].get("name", "5G-NIDD")}
+""".strip()
+                code_only_response = _call_llm(
+                    code_only_prompt,
+                    temperature=0.0,
+                    model=self.model,
+                    max_tokens=_output_token_limit(
+                        "code_generation",
+                        self.DEFAULT_MAX_TOKENS,
+                    ),
+                    reasoning="off",
+                )
+                if not isinstance(code_only_response, str):
+                    code_only_response = str(code_only_response)
+                repaired_code = self.extract_python_source(code_only_response)
+                if repaired_code is None:
+                    raise code_error
+                self.validate_generated_response(repaired_code)
+                generated = repaired_code
 
             result.update(
                 {

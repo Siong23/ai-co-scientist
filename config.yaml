@@ -13,6 +13,8 @@ lmstudio_base_url: "http://100.117.90.5:1234/v1"
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
 
 llm_model: "qwen/qwen3.8-27b"
+# Dedicated model for generating executable PyTorch experiments.
+code_generation_model: "qwen/qwen3-coder-next"
 # query_rewrite_model: "qwen/qwen3.6-35b-a3b"
 query_rewrite_model: "qwen/qwen3.8-27b"
 
@@ -43,6 +45,7 @@ llm_max_tokens:
   hypothesis_audit: 3072
   evolution: 2048
   supervisor_planning: 1600
+  code_generation: 8000
 
 # The Evolution agent follows a rotating library of refinement strategies.
 # It creates new tournament candidates and never overwrites top-ranked parents.

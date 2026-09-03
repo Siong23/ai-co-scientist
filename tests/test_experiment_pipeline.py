@@ -88,6 +88,34 @@ def test_code_generation_agent_generates_valid_experiment(monkeypatch):
     assert calls[0]["reasoning"] == "off"
 
 
+def test_code_generation_agent_extracts_fenced_python_response():
+    result = CodeGenerationAgent.extract_fenced_python(
+        "Here is the experiment:\n```python\nimport torch\nprint('ok')\n```"
+    )
+
+    assert result is not None
+    assert result["pytorch_code"] == "import torch\nprint('ok')"
+
+
+def test_code_generation_agent_uses_dedicated_model_by_default():
+    agent = CodeGenerationAgent()
+
+    assert agent.model == "qwen/qwen3-coder-next"
+
+
+def test_code_generation_agent_rejects_invalid_python():
+    response = {
+        "model_recommendation": {},
+        "experiment_plan": {},
+        "assumptions": [],
+        "dependencies": [],
+        "pytorch_code": "import torch\nthis is not valid Python",
+    }
+
+    with pytest.raises(ValueError, match="not valid Python"):
+        CodeGenerationAgent.validate_generated_response(response)
+
+
 def test_experiment_runner_collects_standard_output_files(tmp_path):
     runner = ExperimentRunner(output_directory=tmp_path / "runs")
     run_directory = runner.create_run_directory("demo_run")

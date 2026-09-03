@@ -318,10 +318,17 @@ def format_experiment_results_html(
     metrics = {}
 
     if isinstance(execution, dict):
-        metrics = execution.get(
-            "metrics",
+
+        outputs = execution.get(
+            "outputs",
             {},
         )
+
+        if isinstance(outputs, dict):
+            metrics = outputs.get(
+                "metrics",
+                {},
+            )
 
     if not isinstance(metrics, dict):
         metrics = {}
@@ -438,6 +445,12 @@ def execute_cycle(
         # Start timing the cycle execution
         start_time = time.perf_counter()
 
+        print("\n" + "=" * 60)
+        print("AI CO-SCIENTIST AUTOMATED PIPELINE")
+        print("=" * 60)
+
+        print("\n[1/2] Running AI Co-Scientist workflow...")
+
         logger.info(f"Running cycle {iteration}")
 
         # Run the cycle
@@ -457,7 +470,7 @@ def execute_cycle(
         print("STARTING AUTOMATED EXPERIMENT PIPELINE")
         print("=" * 60)
 
-        print("\n[1/2] Running AI Co-Scientist workflow...")
+        print("\n[2/2] Running automated deep-learning experiment...")
 
         logger.info(
             "Starting automated experiment pipeline."
@@ -475,8 +488,6 @@ def execute_cycle(
                 "details": [],
             }
         )
-
-        print("\n[2/2] Running automated deep-learning experiment...")
 
         dataset_path = (
             EXPERIMENT_DATASET_PATH
