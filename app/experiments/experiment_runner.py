@@ -427,7 +427,7 @@ class ExperimentRunner:
         Returns a structured execution result.
         """
 
-        code_path = Path(code_path)
+        code_path = Path(code_path).resolve()
 
         if not code_path.exists():
             raise FileNotFoundError(

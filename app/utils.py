@@ -221,6 +221,14 @@ def call_llm(
                 except Exception as exc:
                     response = getattr(exc, "response", None)
                     status_code = getattr(response, "status_code", None)
+                    response_text = str(getattr(response, "text", ""))
+                    if status_code == 400 and "does not expose reasoning configuration" in response_text:
+                        logger.info(
+                            "LM Studio model %s does not support native reasoning controls; "
+                            "falling back to the OpenAI-compatible API.",
+                            selected_model,
+                        )
+                        break
                     retryable = isinstance(status_code, int) and 500 <= status_code < 600 and attempt < retry_count
                     if not retryable:
                         raise

@@ -499,6 +499,13 @@ IMPORTANT RULES:
 8. Include deterministic/reproducible random seeds.
 9. Include preprocessing appropriate for tabular/network intrusion data.
 10. Handle categorical and numerical features appropriately.
+    Never use unconditional ``df.dropna()`` on the entire dataset. The
+    5G-NIDD dataset contains legitimate missing network fields. Handle
+    missing numeric values with training-set statistics and missing
+    categorical values with an explicit sentinel such as ``"Unknown"``.
+    Fit imputers, encoders, and scalers using training data only. Verify
+    that preprocessing leaves at least one sample and raise a clear error
+    if it does not.
 11. Avoid data leakage.
 12. Create separate training, validation, and test partitions.
 13. Automatically determine the number of classes from the training data
@@ -526,7 +533,10 @@ IMPORTANT RULES:
 30. The ExperimentRunner provides the environment variable
     EXPERIMENT_OUTPUT_DIR. All generated artifacts MUST be saved
     inside this directory.
-31. Use:
+31. Target the installed PyTorch API. In particular, do not pass
+    ``verbose`` to ``torch.optim.lr_scheduler.ReduceLROnPlateau``;
+    this argument is unsupported by the project's PyTorch version.
+32. Use:
 
         output_dir = Path(
             os.environ.get(
@@ -534,14 +544,14 @@ IMPORTANT RULES:
                 "."
             )
         )
-32. Save the following files using these exact names:
+33. Save the following files using these exact names:
 
         metrics.json
         training_history.json
         best_model.pt
-33. Save all visualization files inside EXPERIMENT_OUTPUT_DIR
+34. Save all visualization files inside EXPERIMENT_OUTPUT_DIR
     or one of its subdirectories.
-34. The dataset path may be provided through the DATASET_PATH
+35. The dataset path may be provided through the DATASET_PATH
     environment variable. Prefer DATASET_PATH when it is available.
 
 The generated code must be suitable for later automated execution by
@@ -600,8 +610,12 @@ The generated code must:
 
 - load the specified local dataset;
 - preprocess the data;
+- do not call `dropna()` on the entire dataset;
+- handle missing numeric and categorical values explicitly;
 - split the data into train/validation/test sets;
 - prevent preprocessing leakage from validation/test data;
+- fit imputers, encoders, and scalers using training data only;
+- verify that preprocessing produces at least one sample;
 - construct the selected model;
 - train the model;
 - validate the model;

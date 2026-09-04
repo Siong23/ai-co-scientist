@@ -21,6 +21,14 @@ def _native_response(content: str):
     return response
 
 
+def _openai_response(content: str):
+    completion = MagicMock()
+    choice = MagicMock()
+    choice.message.content = content
+    completion.choices = [choice]
+    return completion
+
+
 def test_generation_happy_path_parses_hypotheses():
     payload = json.dumps(
         [
@@ -262,11 +270,15 @@ def test_generation_passes_selected_model_to_llm_boundary():
 
 
 def test_401_propagates_as_error_hypothesis():
-    with patch.object(
-        utils.requests,
-        "post",
-        side_effect=Exception("Error code: 401 - No auth credentials found"),
-    ):
+    native_response = MagicMock(status_code=400, text="does not expose reasoning configuration")
+    native_response.raise_for_status.side_effect = utils.requests.HTTPError(
+        "400 Client Error",
+        response=native_response,
+    )
+    with patch.object(utils.requests, "post", return_value=native_response), patch.object(utils, "OpenAI") as mock_openai:
+        mock_openai.return_value.chat.completions.create.side_effect = Exception(
+            "Error code: 401 - No auth credentials found"
+        )
         result = call_llm_for_generation("test goal", num_hypotheses=2)
 
     assert len(result) == 1

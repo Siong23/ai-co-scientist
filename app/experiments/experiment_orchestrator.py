@@ -77,6 +77,7 @@ CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"
 METRICS_DIR = RESULTS_DIR / "metrics"
 VISUALIZATION_DIR = RESULTS_DIR / "visualizations"
 RUNS_DIR = RESULTS_DIR / "runs"
+DEFAULT_DATASET_PATH = Path("data/5g_nidd/5g_nidd.csv")
 
 
 # ============================================================
@@ -144,7 +145,7 @@ class ExperimentOrchestrator:
         self.dataset_path = (
             Path(dataset_path)
             if dataset_path
-            else None
+            else DEFAULT_DATASET_PATH
         )
 
         self.device = device

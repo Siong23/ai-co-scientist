@@ -2,7 +2,7 @@
 ranking (issue llnl#36). Offline: the LLM boundary is mocked at app.agents.call_llm.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.documents import Document
@@ -288,11 +288,15 @@ def test_surfaced_error_never_contains_key(monkeypatch):
     'No endpoints found' branch returns immediately — no retry sleeps)."""
     fake_key = "LMSTUDIO-LEAK-CANARY"
     monkeypatch.setenv("LMSTUDIO_API_KEY", fake_key)
-    with patch.object(
-        utils.requests,
-        "post",
-        side_effect=Exception(f"model not found; key was {fake_key}"),
-    ):
+    native_response = MagicMock(status_code=400, text="does not expose reasoning configuration")
+    native_response.raise_for_status.side_effect = utils.requests.HTTPError(
+        "400 Client Error",
+        response=native_response,
+    )
+    with patch.object(utils.requests, "post", return_value=native_response), patch.object(utils, "OpenAI") as mock_openai:
+        mock_openai.return_value.chat.completions.create.side_effect = Exception(
+            f"model not found; key was {fake_key}"
+        )
         details = SupervisorAgent().run_cycle(_goal(), ContextMemory())
 
     assert details.get("errors"), "expected the model-unavailable error to surface"

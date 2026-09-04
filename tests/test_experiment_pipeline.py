@@ -133,6 +133,24 @@ def test_experiment_runner_collects_standard_output_files(tmp_path):
     assert outputs["checkpoint_path"].endswith("best_model.pt")
 
 
+def test_experiment_orchestrator_uses_repository_dataset_by_default():
+    orchestrator = ExperimentOrchestrator()
+
+    assert orchestrator.dataset_path == Path("data/5g_nidd/5g_nidd.csv")
+
+
+def test_experiment_runner_executes_relative_code_path_from_run_directory(tmp_path):
+    runner = ExperimentRunner(output_directory=tmp_path / "runs", timeout_seconds=10)
+    run_directory = runner.create_run_directory("relative_path")
+    code_path = runner.prepare_generated_code("print('experiment ran')", run_directory)
+
+    result = runner.execute(code_path, run_directory)
+
+    assert result["success"] is True
+    assert result["return_code"] == 0
+    assert result["stdout"].strip() == "experiment ran"
+
+
 def test_experiment_orchestrator_selects_best_accepted_hypothesis():
     class FakeReport:
         def __init__(self, recommendation):

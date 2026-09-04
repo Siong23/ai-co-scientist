@@ -113,17 +113,19 @@ def test_call_llm_honors_an_explicit_output_limit():
     assert mock_openai.return_value.chat.completions.create.call_args.kwargs["max_tokens"] == 321
 
 
-def test_call_llm_uses_native_api_to_disable_reasoning(monkeypatch):
+def test_call_llm_falls_back_when_model_rejects_reasoning_control(monkeypatch):
     monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
-    response = MagicMock()
-    response.json.return_value = {
-        "output": [{"type": "message", "content": '{"ok": true}'}],
-    }
-
+    native_response = MagicMock(status_code=400)
+    native_response.text = "Model does not expose reasoning configuration."
+    native_response.raise_for_status.side_effect = utils.requests.HTTPError(
+        "400 Client Error",
+        response=native_response,
+    )
     with (
-        patch.object(utils.requests, "post", return_value=response) as mock_post,
+        patch.object(utils.requests, "post", return_value=native_response) as mock_post,
         patch.object(utils, "OpenAI") as mock_openai,
     ):
+        mock_openai.return_value.chat.completions.create.return_value = _completion('{"ok": true}')
         result = call_llm(
             "return JSON",
             temperature=0.0,
@@ -134,23 +136,16 @@ def test_call_llm_uses_native_api_to_disable_reasoning(monkeypatch):
         )
 
     assert result == '{"ok": true}'
-    mock_post.assert_called_once_with(
-        "http://localhost:1234/api/v1/chat",
-        headers={},
-        json={
-            "model": "selected-model",
-            "input": "return JSON",
-            "temperature": 0.0,
-            "max_output_tokens": 64,
-            "reasoning": "off",
-            "store": False,
-            "stream": False,
-            "system_prompt": "JSON only",
-        },
-        timeout=utils.config.get("llm_request_timeout_seconds", 180),
+    mock_post.assert_called_once()
+    mock_openai.return_value.chat.completions.create.assert_called_once_with(
+        model="selected-model",
+        messages=[
+            {"role": "system", "content": "JSON only"},
+            {"role": "user", "content": "return JSON"},
+        ],
+        temperature=0.0,
+        max_tokens=64,
     )
-    response.raise_for_status.assert_called_once()
-    mock_openai.assert_not_called()
 
 
 def test_call_llm_retries_one_transient_native_server_error(monkeypatch):
@@ -178,7 +173,7 @@ def test_call_llm_retries_one_transient_native_server_error(monkeypatch):
         result = call_llm(
             "return JSON",
             model="selected-model",
-            reasoning="off",
+            reasoning="on",
         )
 
     assert result == '{"ok": true}'
@@ -202,7 +197,7 @@ def test_call_llm_does_not_retry_native_client_errors(monkeypatch):
         result = call_llm(
             "return JSON",
             model="selected-model",
-            reasoning="off",
+            reasoning="on",
         )
 
     assert "400 Client Error" in result
