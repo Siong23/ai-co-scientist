@@ -175,11 +175,7 @@ def call_llm(
             output_token_limit = int(config.get("llm_default_max_tokens", 8192))
         output_token_limit = max(1, int(output_token_limit))
 
-        native_reasoning = (
-            reasoning is not None
-            and str(reasoning).strip().lower()
-            not in {"off", "none", "false"}
-        )
+        native_reasoning = reasoning is not None
 
         if native_reasoning:
             payload = {
