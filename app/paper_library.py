@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -73,6 +74,7 @@ class ChromaPaperLibrary:
         self.max_prompt_chars = max(1000, int(library_config.get("max_prompt_chars", 12000)))
         self.max_pdf_bytes = max(1, int(library_config.get("max_pdf_bytes", 25_000_000)))
         self.download_timeout_seconds = max(1, int(library_config.get("download_timeout_seconds", 30)))
+        self.retrieval_workers = max(1, int(library_config.get("retrieval_workers", 3)))
         configured_hosts = library_config.get(
             "allowed_pdf_hosts",
             ["arxiv.org", "www.arxiv.org", "export.arxiv.org", "pdfs.semanticscholar.org"],
@@ -213,10 +215,7 @@ class ChromaPaperLibrary:
             source_chunks = chunks_by_source.get(source_id, [])
             metadata = dict(document.metadata)
             metadata["full_text_indexed"] = source_id in indexed_source_ids
-            metadata["full_text_available"] = bool(
-                metadata.get("content_extracted")
-                or metadata["full_text_indexed"]
-            )
+            metadata["full_text_available"] = bool(metadata.get("content_extracted") or metadata["full_text_indexed"])
             metadata["full_text_chunks_used"] = len(source_chunks)
             if source_id in indexed_source_ids:
                 evidence_status = "full_text"
@@ -279,6 +278,7 @@ class ChromaPaperLibrary:
         vector_store = self._get_vector_store()
         existing = vector_store.get(where={"source_id": normalized_source_id}, limit=1, include=["metadatas"])
         return bool(existing.get("ids"))
+
     def search_many(
         self,
         queries: Sequence[str],
@@ -289,8 +289,20 @@ class ChromaPaperLibrary:
 
         fused_scores: dict[str, float] = {}
         chunks_by_id: dict[str, PaperChunk] = {}
-        for query in self._normalize_queries(queries):
-            for rank, chunk in enumerate(self.search(query, source_ids, top_k), start=1):
+        normalized_queries = self._normalize_queries(queries)
+        if not normalized_queries or not source_ids:
+            return []
+        workers = min(self.retrieval_workers, len(normalized_queries))
+        if workers == 1:
+            rankings = [self.search(query, source_ids, top_k) for query in normalized_queries]
+        else:
+            # Initialize the shared store before concurrent read-only queries.
+            self._get_vector_store()
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                rankings = list(executor.map(lambda query: self.search(query, source_ids, top_k), normalized_queries))
+        # Fuse in query order so thread completion order cannot affect ties.
+        for ranking in rankings:
+            for rank, chunk in enumerate(ranking, start=1):
                 chunk_id = chunk.chunk_id or self._chunk_id(
                     chunk.source_id,
                     chunk.page,

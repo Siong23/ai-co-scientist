@@ -274,10 +274,8 @@ class SupervisorAgent:
                 [h.hypothesis_id for h in rejected_hypos],
             )
 
-        # Attempt to revise REVISE-flagged hypotheses (QG-07).
-        revise_hypos = reflection_routing.get("revise", [])
-        if revise_hypos and hasattr(self.reflection_agent, "revise_hypotheses"):
-            self.reflection_agent.revise_hypotheses(revise_hypos, research_goal)
+        # Keep reviewed versions immutable. Evolution consumes the REVISE
+        # report and creates a child that must pass Reflection independently.
 
         cycle_details.setdefault("steps", {})[step_name] = {
             "hypotheses": [h.to_dict() for h in active_hypos],
@@ -326,7 +324,8 @@ class SupervisorAgent:
         ranked_scores = {
             hypothesis.hypothesis_id: round(float(hypothesis.elo_score), 6) for hypothesis in rankable_hypos
         }
-        if ranked_scores and ranking_results:
+        completed_results = [r for r in ranking_results if r.get("outcome") in {"A", "B", "TIE"}]
+        if ranked_scores and completed_results:
             supervisor_state = context.supervisor_state
             snapshots = supervisor_state.setdefault("elo_snapshots", [])
             snapshots.append(
@@ -335,7 +334,7 @@ class SupervisorAgent:
                     "step": step_name,
                     "ratings": ranked_scores,
                     "top_elo": max(ranked_scores.values()),
-                    "comparison_count": len(ranking_results),
+                    "comparison_count": len(completed_results),
                 }
             )
             # Long-running sessions need bounded scheduling memory.
@@ -470,6 +469,7 @@ class SupervisorAgent:
         publish: Callable[..., None],
         cycle_details: Dict[str, Any],
         proximity_result: Optional[Dict[str, Any]] = None,
+        research_goal: Optional[ResearchGoal] = None,
     ) -> Dict[str, Any]:
         """Execute meta-review synthesis and feedback generation."""
         logger.info("Supervisor Step: Meta-Review")
@@ -486,7 +486,7 @@ class SupervisorAgent:
             adjacency_graph = proximity_graph.get("adjacency_graph", proximity_result.get("adjacency_graph", {}))
 
         overview = self.meta_review_agent.summarize_and_feedback(
-            context, adjacency_graph, proximity_data=proximity_result
+            context, adjacency_graph, proximity_data=proximity_result, research_goal=research_goal
         )
         cycle_details["meta_review"] = overview
         cycle_details.setdefault("steps", {})["meta_review"] = overview
@@ -630,7 +630,9 @@ class SupervisorAgent:
 
         # 7. Meta-review
         proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
-        self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
+        self.step_meta_review(
+            context, publish, cycle_details, proximity_result=proximity_result, research_goal=research_goal
+        )
 
         context.iteration_number += 1
         logger.info("--- Cycle %d Complete ---", context.iteration_number)
@@ -807,7 +809,9 @@ class SupervisorAgent:
                 proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
 
             elif decision.action == "META_REVIEW":
-                self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
+                self.step_meta_review(
+                    context, publish, cycle_details, proximity_result=proximity_result, research_goal=research_goal
+                )
 
             step_count += 1
 
@@ -815,7 +819,9 @@ class SupervisorAgent:
         if not execution_cancelled() and "meta_review" not in cycle_details.get("steps", {}):
             if proximity_result is None and len(context.get_active_hypotheses()) >= 2:
                 proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
-            self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
+            self.step_meta_review(
+                context, publish, cycle_details, proximity_result=proximity_result, research_goal=research_goal
+            )
 
         finalization = evaluate_finalization_readiness(context, research_goal)
         finalization["status"] = "completed" if finalization["ready"] else "budget_exhausted"

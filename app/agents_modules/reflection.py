@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 from ..utils import execution_cancelled, logger, redact_secrets
+from .evolution_helpers import create_evolved_hypothesis, validate_evolution_candidate
 from .reflection_helpers import (
     call_llm_for_hypothesis_revision,
     call_llm_for_reflection,
@@ -52,7 +53,13 @@ class ReflectionAgent:
         pending = [hypothesis for hypothesis in hypotheses if hypothesis.reflection_report is None]
         if not pending or execution_cancelled():
             return
-        configured_workers = int(self.max_workers if self.max_workers is not None else config.get("reflection", {}).get("max_workers", config.get("agent_parallelism", {}).get("reflection_workers", 3)))
+        configured_workers = int(
+            self.max_workers
+            if self.max_workers is not None
+            else config.get("reflection", {}).get(
+                "max_workers", config.get("agent_parallelism", {}).get("reflection_workers", 3)
+            )
+        )
         max_workers = max(1, min(configured_workers, len(pending)))
 
         def review_one(h: Hypothesis) -> None:
@@ -108,10 +115,8 @@ class ReflectionAgent:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             list(executor.map(review_one, pending))
 
-    def revise_hypotheses(
-        self, hypotheses: List[Hypothesis], research_goal: ResearchGoal
-    ) -> List[Hypothesis]:
-        """Revise REVISE-flagged hypotheses using LLM revision helper."""
+    def revise_hypotheses(self, hypotheses: List[Hypothesis], research_goal: ResearchGoal) -> List[Hypothesis]:
+        """Return unreviewed descendants; never overwrite a reviewed version."""
         if not hypotheses or execution_cancelled():
             return []
 
@@ -124,15 +129,16 @@ class ReflectionAgent:
                     model=research_goal.llm_model,
                 )
                 if revised and isinstance(revised, dict):
-                    if revised.get("title"):
-                        hypo.title = revised["title"]
                     new_text = revised.get("hypothesis") or revised.get("text")
-                    if new_text:
-                        hypo.text = new_text
-                    logger.info(
-                        "Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id
-                    )
-                    return hypo
+                    title = revised.get("title") or hypo.title
+                    if not isinstance(new_text, str) or not isinstance(title, str):
+                        return None
+                    candidate = {"title": title, "text": new_text}
+                    if validate_evolution_candidate(candidate, [hypo], "feasibility"):
+                        return None
+                    child = create_evolved_hypothesis(candidate, [hypo], "feasibility")
+                    logger.info("Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id)
+                    return child
             except Exception as exc:
                 logger.warning(
                     "Hypothesis revision failed for %s: %s",
@@ -141,7 +147,13 @@ class ReflectionAgent:
                 )
             return None
 
-        configured_workers = int(self.max_workers if self.max_workers is not None else config.get("reflection", {}).get("max_workers", config.get("agent_parallelism", {}).get("reflection_workers", 3)))
+        configured_workers = int(
+            self.max_workers
+            if self.max_workers is not None
+            else config.get("reflection", {}).get(
+                "max_workers", config.get("agent_parallelism", {}).get("reflection_workers", 3)
+            )
+        )
         max_workers = max(1, min(configured_workers, len(hypotheses)))
         if max_workers == 1:
             results = [revise_one(hypothesis) for hypothesis in hypotheses]

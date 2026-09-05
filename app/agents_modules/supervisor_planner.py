@@ -97,7 +97,7 @@ def assess_supervisor_state(
 
     tournament_hypos = set()
     for match in context.tournament_results:
-        if isinstance(match, dict):
+        if isinstance(match, dict) and match.get("outcome") in {"A", "B", "TIE"}:
             if "hypothesis_a" in match:
                 tournament_hypos.add(match["hypothesis_a"])
             if "hypothesis_b" in match:
@@ -135,7 +135,9 @@ def assess_supervisor_state(
         "revise_count": len(revise_hypos),
         "unreviewed_count": len(unreviewed_hypos),
         "unranked_accepted_count": len(unranked_accepted),
-        "tournament_comparisons": len(context.tournament_results),
+        "tournament_comparisons": sum(
+            match.get("outcome") in {"A", "B", "TIE"} for match in context.tournament_results
+        ),
         "elo_spread": round(elo_spread, 2),
         "evolution_attempts": len(getattr(context, "last_evolution_attempts", [])),
         "actions_taken": actions_taken,
@@ -204,7 +206,11 @@ def evaluate_finalization_readiness(
         claims = list(getattr(report, "claims", []) or [])
         overall_confidence = float(getattr(report, "overall_confidence", 1.0) or 1.0)
         claim_confidences = [float(getattr(claim, "confidence", 1.0)) for claim in claims]
-        if overall_confidence < min_overall_confidence or not claim_confidences or min(claim_confidences) < min_claim_confidence:
+        if (
+            overall_confidence < min_overall_confidence
+            or not claim_confidences
+            or min(claim_confidences) < min_claim_confidence
+        ):
             low_confidence_finalists.append(hypothesis.hypothesis_id)
         if require_evidence and any(not getattr(claim, "supporting_evidence", []) for claim in claims):
             unsupported_claim_finalists.append(hypothesis.hypothesis_id)
@@ -229,14 +235,10 @@ def evaluate_finalization_readiness(
     if missing_evidence:
         reasons.append("Finalists missing verified evidence citations: " + ", ".join(missing_evidence) + ".")
     if low_confidence_finalists:
-        reasons.append(
-            "Finalists below claim-confidence thresholds: " + ", ".join(low_confidence_finalists) + "."
-        )
+        reasons.append("Finalists below claim-confidence thresholds: " + ", ".join(low_confidence_finalists) + ".")
     if unsupported_claim_finalists:
         reasons.append(
-            "Finalists have core claims without supporting evidence: "
-            + ", ".join(unsupported_claim_finalists)
-            + "."
+            "Finalists have core claims without supporting evidence: " + ", ".join(unsupported_claim_finalists) + "."
         )
     if failed_audit_finalists:
         reasons.append("Finalists failed the generation quality audit: " + ", ".join(failed_audit_finalists) + ".")
@@ -252,9 +254,7 @@ def evaluate_finalization_readiness(
     clusters = proximity.get("clusters", {}) if isinstance(proximity, dict) else {}
     cluster_count = len(clusters) if isinstance(clusters, (dict, list)) else 0
     if len(finalists) >= 2 and cluster_count < min_hypothesis_clusters:
-        reasons.append(
-            f"Need at least {min_hypothesis_clusters} hypothesis clusters; found {cluster_count}."
-        )
+        reasons.append(f"Need at least {min_hypothesis_clusters} hypothesis clusters; found {cluster_count}.")
 
     return {
         "ready": not reasons,

@@ -8,7 +8,7 @@ from typing import Iterable, List, Mapping, Optional
 
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
-from ..utils import logger
+from ..utils import logger, redact_secrets
 from .ranking_helpers import run_pairwise_debate, update_elo, update_elo_tie
 
 
@@ -34,14 +34,10 @@ class RankingAgent:
             logger.info("Not enough *active* hypotheses to run a tournament.")
             return
 
-        active_hypotheses.sort(
-            key=lambda hypothesis: (-hypothesis.elo_score, hypothesis.hypothesis_id)
-        )
+        active_hypotheses.sort(key=lambda hypothesis: (-hypothesis.elo_score, hypothesis.hypothesis_id))
 
         new_hypothesis_ids = (
-            {hypothesis.hypothesis_id for hypothesis in new_hypotheses}
-            if new_hypotheses is not None
-            else None
+            {hypothesis.hypothesis_id for hypothesis in new_hypotheses} if new_hypotheses is not None else None
         )
 
         # Compare every pair for the first tournament. In later tournaments,
@@ -52,8 +48,7 @@ class RankingAgent:
             for j in range(i + 1, len(active_hypotheses)):
                 h_a, h_b = active_hypotheses[i], active_hypotheses[j]
                 if new_hypothesis_ids is None or (
-                    h_a.hypothesis_id in new_hypothesis_ids
-                    or h_b.hypothesis_id in new_hypothesis_ids
+                    h_a.hypothesis_id in new_hypothesis_ids or h_b.hypothesis_id in new_hypothesis_ids
                 ):
                     pairs.append((h_a, h_b))
 
@@ -74,12 +69,10 @@ class RankingAgent:
         completed_pairs = {
             frozenset((str(match.get("hypothesis_a")), str(match.get("hypothesis_b"))))
             for match in context.tournament_results
-            if match.get("hypothesis_a") and match.get("hypothesis_b")
+            if match.get("hypothesis_a") and match.get("hypothesis_b") and match.get("outcome") in {"A", "B", "TIE"}
         }
         pairs = [
-            pair
-            for pair in pairs
-            if frozenset((pair[0].hypothesis_id, pair[1].hypothesis_id)) not in completed_pairs
+            pair for pair in pairs if frozenset((pair[0].hypothesis_id, pair[1].hypothesis_id)) not in completed_pairs
         ]
         pairs.sort(
             key=lambda pair: (
@@ -112,29 +105,22 @@ class RankingAgent:
         def run_match(pair):
             hA, hB = pair
             try:
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] START {hA.hypothesis_id} vs {hB.hypothesis_id}"
-                )
-                decision = run_pairwise_debate(
-                    hA,
-                    hB,
-                    research_goal
-                )
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] END {hA.hypothesis_id} vs {hB.hypothesis_id}"
-                )
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] START {hA.hypothesis_id} vs {hB.hypothesis_id}")
+                decision = run_pairwise_debate(hA, hB, research_goal)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] END {hA.hypothesis_id} vs {hB.hypothesis_id}")
                 return hA, hB, decision
 
             except Exception as e:
                 logger.error(
-                    f"Ranking failed for {hA.hypothesis_id} vs {hB.hypothesis_id}: {e}"
+                    "Ranking failed for %s vs %s: %s",
+                    hA.hypothesis_id,
+                    hB.hypothesis_id,
+                    redact_secrets(str(e)),
                 )
                 return None
 
         with ThreadPoolExecutor(max_workers=3) as executor:
-            results = list(
-                executor.map(run_match, pairs)
-            )
+            results = list(executor.map(run_match, pairs))
 
         # ---- Sequential Elo Update + Save Results ----
         for result in results:
@@ -149,8 +135,7 @@ class RankingAgent:
             if decision.outcome in {"A", "B", "TIE"}:
                 if not decision.scores_a or not decision.scores_b:
                     logger.warning(
-                        "Skipping Elo update for %s vs %s because ranking "
-                        "scores are missing.",
+                        "Skipping Elo update for %s vs %s because ranking scores are missing.",
                         hA.hypothesis_id,
                         hB.hypothesis_id,
                     )
@@ -163,38 +148,22 @@ class RankingAgent:
                             "lack valid Reflection-based ranking scores."
                         )
 
-                    continue
-
             # ------------------------------------------------------------
             # Elo update
             # ------------------------------------------------------------
             if decision.outcome == "A":
-                update_elo(
-                    hA,
-                    hB,
-                    k_factor=k_factor
-                )
+                update_elo(hA, hB, k_factor=k_factor)
             elif decision.outcome == "B":
-                update_elo(
-                    hB,
-                    hA,
-                    k_factor=k_factor
-                )
+                update_elo(hB, hA, k_factor=k_factor)
             elif decision.outcome == "TIE":
-                update_elo_tie(
-                    hA,
-                    hB,
-                    k_factor=k_factor
-                )
+                update_elo_tie(hA, hB, k_factor=k_factor)
             elif decision.outcome == "ABSTAIN":
                 logger.info(
-                    f"Judge abstained: no clear winner determined between "
-                    f"{hA.hypothesis_id} and {hB.hypothesis_id}."
+                    f"Judge abstained: no clear winner determined between {hA.hypothesis_id} and {hB.hypothesis_id}."
                 )
                 if not decision.reasoning:
                     decision.reasoning = (
-                        "The judge could not determine a clear winner "
-                        "after evaluating both hypotheses."
+                        "The judge could not determine a clear winner after evaluating both hypotheses."
                     )
 
             # Record result in context (consider if this needs iteration info)

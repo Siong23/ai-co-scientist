@@ -33,8 +33,9 @@ class SimilarityConfig:
     sequence_weight: float = 0.2
     semantic_weight: float = 0.6
 
-    # Sentence-transformers model.
-    embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # None reuses the application's configured embedding provider and model.
+    # Set a name explicitly only when a separate local model is intended.
+    embedding_model_name: str | None = None
 
     # Whether semantic similarity should fall back to lexical similarity
     # if sentence-transformers is unavailable.
@@ -184,19 +185,21 @@ class SimilarityScorer:
         self._embedding_model_loaded = True
 
         try:
-            from sentence_transformers import SentenceTransformer
+            if self.config.embedding_model_name is None:
+                from ..utils import get_sentence_transformer_model
 
-            self._embedding_model = SentenceTransformer(
-                self.config.embedding_model_name
-            )
+                self._embedding_model = get_sentence_transformer_model()
+            else:
+                from sentence_transformers import SentenceTransformer
+
+                self._embedding_model = SentenceTransformer(self.config.embedding_model_name)
 
         except Exception as exc:
             self._embedding_model = None
 
             if not self.config.allow_embedding_fallback:
                 raise RuntimeError(
-                    "Unable to load sentence-transformers embedding model "
-                    f"'{self.config.embedding_model_name}'."
+                    f"Unable to load sentence-transformers embedding model '{self.config.embedding_model_name}'."
                 ) from exc
 
         return self._embedding_model
@@ -243,16 +246,9 @@ class SimilarityScorer:
         model = self._load_embedding_model()
 
         if model is None:
-            raise RuntimeError(
-                "Embedding model is unavailable. "
-                "Install sentence-transformers or enable fallback."
-            )
+            raise RuntimeError("Embedding model is unavailable. Install sentence-transformers or enable fallback.")
 
-        missing_texts = [
-            text
-            for text in texts
-            if text and text not in self._embedding_cache
-        ]
+        missing_texts = [text for text in texts if text and text not in self._embedding_cache]
 
         if missing_texts:
             embeddings = model.encode(
@@ -337,10 +333,7 @@ class SimilarityScorer:
         if total_weight <= 0:
             raise ValueError("Similarity weights must sum to a positive value.")
 
-        normalized_weights = {
-            key: value / total_weight
-            for key, value in weights.items()
-        }
+        normalized_weights = {key: value / total_weight for key, value in weights.items()}
 
         scores = {
             "jaccard": self.jaccard_similarity(text1, text2),
@@ -348,12 +341,7 @@ class SimilarityScorer:
             "semantic": self.semantic_similarity(text1, text2),
         }
 
-        return float(
-            sum(
-                scores[key] * normalized_weights[key]
-                for key in scores
-            )
-        )
+        return float(sum(scores[key] * normalized_weights[key] for key in scores))
 
     # ------------------------------------------------------------------
     # Public scoring interface
@@ -398,10 +386,7 @@ class SimilarityScorer:
             result = self.combined_similarity(text1, text2)
 
         else:
-            raise ValueError(
-                f"Unknown similarity method: {method}. "
-                "Expected jaccard, sequence, semantic, or combined."
-            )
+            raise ValueError(f"Unknown similarity method: {method}. Expected jaccard, sequence, semantic, or combined.")
 
         self._store_cached_score(
             text1,
@@ -430,11 +415,7 @@ class GraphOptimizer:
         filtered = {}
 
         for node_id, edges in adjacency.items():
-            filtered[node_id] = [
-                edge
-                for edge in edges
-                if edge.get("similarity", 0.0) >= threshold
-            ]
+            filtered[node_id] = [edge for edge in edges if edge.get("similarity", 0.0) >= threshold]
 
         return filtered
 
@@ -445,10 +426,7 @@ class GraphOptimizer:
     ) -> Dict[str, List[Dict]]:
         """Keep the strongest k edges for each node."""
         if k <= 0:
-            return {
-                node_id: []
-                for node_id in adjacency
-            }
+            return {node_id: [] for node_id in adjacency}
 
         trimmed = {}
 
@@ -466,10 +444,7 @@ class GraphOptimizer:
         adjacency: Dict[str, List[Dict]],
     ) -> Dict[str, int]:
         """Compute graph degree for each node."""
-        return {
-            node_id: len(edges)
-            for node_id, edges in adjacency.items()
-        }
+        return {node_id: len(edges) for node_id, edges in adjacency.items()}
 
     @staticmethod
     def identify_clusters(
@@ -574,9 +549,7 @@ class BatchSimilarityCalculator:
             total_weight = jw + sw + semw
 
             if total_weight <= 0:
-                raise ValueError(
-                    "Combined similarity weights must sum to a positive value."
-                )
+                raise ValueError("Combined similarity weights must sum to a positive value.")
 
             jw /= total_weight
             sw /= total_weight
@@ -594,11 +567,7 @@ class BatchSimilarityCalculator:
                         texts[j],
                     )
 
-                    combined = (
-                        jw * jaccard
-                        + sw * sequence
-                        + semw * float(semantic_matrix[i, j])
-                    )
+                    combined = jw * jaccard + sw * sequence + semw * float(semantic_matrix[i, j])
 
                     matrix[i, j] = combined
                     matrix[j, i] = combined
@@ -653,6 +622,7 @@ class BatchSimilarityCalculator:
 # ----------------------------------------------------------------------
 # Testing utilities
 # ----------------------------------------------------------------------
+
 
 class ProximityTestFactory:
     """Factory for generating deterministic test hypotheses."""

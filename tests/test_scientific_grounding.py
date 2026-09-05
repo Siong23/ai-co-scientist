@@ -6,8 +6,10 @@ import numpy as np
 from app.agents import (
     EvidenceAspect,
     call_llm_for_full_text_evidence_coverage,
-    call_llm_for_grounded_hypothesis_audit as call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
+)
+from app.agents import (
+    call_llm_for_grounded_hypothesis_audit as call_llm_for_hypothesis_audit,
 )
 from app.agents_modules.generation_helpers import classify_numeric_specificity
 from app.rag_retriever import SharedSentenceTransformerEmbeddings

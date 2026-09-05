@@ -2,7 +2,6 @@ import json
 import os
 
 import pytest
-
 from scripts.evaluate_run import (
     RunValidationError,
     configure_local_judge,

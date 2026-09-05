@@ -91,6 +91,11 @@ ranking:
 reflection:
   max_workers: 3
 
+# Synthesize actual review/debate feedback using the selected research model.
+# Invalid or unavailable model output falls back to deterministic summaries.
+meta_review:
+  llm_enabled: true
+
 # The production UI uses the dynamic Supervisor. The heuristic planner keeps
 # orchestration deterministic and avoids an extra LLM request per workflow
 # step; set planner_mode to auto to enable LLM planning with safe fallback.
@@ -205,6 +210,8 @@ paper_library:
   max_prompt_chars: 14000
   max_pdf_bytes: 25000000
   download_timeout_seconds: 30
+  # Independent evidence queries overlap; indexing/writes remain sequential.
+  retrieval_workers: 3
   allowed_pdf_hosts:
     - "arxiv.org"
     - "www.arxiv.org"

@@ -454,12 +454,13 @@ class ProximityAgent:
                 target = context.hypotheses[target_id]
                 if not source.is_active or not target.is_active:
                     continue
-                survivor, duplicate = max(
+                survivor, duplicate = sorted(
                     (source, target),
                     key=lambda hypothesis: (
                         getattr(hypothesis, "elo_score", 0.0),
                         hypothesis.hypothesis_id,
                     ),
+                    reverse=True,
                 )
                 duplicate.is_active = False
                 duplicate.deactivation_reason = f"near_duplicate_of_{survivor.hypothesis_id}"

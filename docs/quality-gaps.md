@@ -1,183 +1,76 @@
-# Hypothesis Generation Quality Gaps
+# Agent implementation audit
 
-> Audit date: 2026-08-18
-> Reference: [Gottweis et al. "Accelerating scientific discovery with Co-Scientist"
-> Nature 655, 487–496 (2026)](https://doi.org/10.1038/s41586-026-10644-y)
-> Supplementary: [Supplementary Notes (PDF)](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-026-10644-y/MediaObjects/41586_2026_10644_MOESM1_ESM.pdf)
+Updated: 2026-09-06. This replaces the six outdated `*-agent-to-fix.md` lists.
 
-This document tracks quality defects in the hypothesis-generation pipeline
-discovered by comparing the codebase against the published Co-Scientist paper
-and its supplementary pseudocode/prompts.
+Sources: [Nature article](https://www.nature.com/articles/s41586-026-10644-y)
+and [Supplementary Information](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-026-10644-y/MediaObjects/41586_2026_10644_MOESM1_ESM.pdf),
+especially sections 8 (agent pseudocode) and 9.1-9.5 (prompts).
+Paper mechanisms describe the reference system, not mandatory numerical thresholds
+for this local implementation. In particular, Elo is not scientific validation.
 
-Status legend: ⬜ open · 🟡 in progress · ✅ fixed · ❌ won't fix
+## Fixed in this audit
 
----
+- Supervisor no longer rewrites REVISE hypotheses under existing IDs while keeping
+  stale reviews and Elo. Existing Evolution creates children for independent
+  Reflection. The standalone revision helper also returns fresh children with
+  lineage, initial Elo and no inherited review/audit verdict.
+- Ranking records missing-score abstentions and retries previously abstained pairs.
+  Only A/B/TIE outcomes suppress completed pairs. Planner participation counts and
+  convergence snapshots likewise exclude abstentions; failed calls cannot imply
+  successful ranking or stable hypothesis quality.
+- Meta-review now synthesizes actual strengths, weaknesses, review comments and
+  tournament reasoning with the selected research model. Rejected hypotheses remain
+  available as lessons even when no active candidates survive. Context is bounded
+  to the latest 20 reviews and 20 matches. Structured output is validated; malformed
+  output or model errors fall back to heuristic feedback. `synthesis_mode` records
+  which path ran. Set `meta_review.llm_enabled: false` for heuristic-only operation.
+- Ranking exception logs redact secrets. Existing import/unused-import lint errors
+  were corrected without changing those modules' behavior.
 
-## 🔴 High Priority (directly degrade output quality)
+Regression coverage: `tests/test_agent_review_integrity.py`, plus the updated
+parallel revision test in `tests/test_agent_parallelism.py`.
 
-### QG-01  Meta-Review feedback loop is broken
-- **Status:** ✅ fixed
-- **Impact:** The paper's core "self-improving loop" relies on each iteration
-  learning from the previous meta-review. Currently each generation/evolution
-  round starts from scratch, ignoring prior-cycle critique.
-- **Root cause:** `MetaReviewAgent.summarize_and_feedback` appends feedback to
-  `context.meta_review_feedback` (`meta_review.py:190`), but neither
-  `GenerationAgent` nor `EvolutionAgent` ever reads it.
-- **Fix:** Inject `context.meta_review_feedback[-1]` into the generation prompt
-  (around `generation.py:1180`) and into `build_evolution_prompt`.
-- **Test:** Add an offline test asserting that generation prompts contain
-  meta-review feedback when `context.meta_review_feedback` is non-empty.
+## Latency improvements
 
-### QG-02  Reflection has no REJECT verdict
-- **Status:** ✅ fixed
-- **Impact:** Low-quality hypotheses persist in the system forever (remain
-  `is_active=True`), consuming Elo bandwidth and potentially becoming evolution
-  parents.
-- **Root cause:** `_recommendation_from_scores` (`reflection_helpers.py:38-43`)
-  only returns `ACCEPT` (all scores ≥4) or `REVISE` (any score <4).
-- **Fix:** Add 3-tier policy: `ACCEPT` (all ≥5), `REVISE` (any 3-4),
-  `REJECT` (any <3 → set `is_active=False`).
-- **Test:** Unit test that a hypothesis with a score of 2 gets `REJECT` and
-  `is_active=False`.
+- Full-text evidence queries use up to three concurrent read-only searches via
+  `paper_library.retrieval_workers` (set to 1 for serial execution). Query
+  deduplication, source filters, result limits and deterministic reciprocal-rank
+  fusion are preserved. Store initialization and indexing remain sequential.
+- Proximity defaults to the shared configured embedding provider instead of
+  separately loading/downloading a Hugging Face model. An explicit
+  `SimilarityConfig.embedding_model_name` still selects a separate local model.
+- Meta-review uses bounded output and disables native reasoning for this summary
+  call; scientific generation and evidence gates retain their existing settings.
+- Fixed Proximity's high-similarity branch unpacking a single `max()` result into
+  two hypotheses, which crashed before selecting the stronger duplicate.
 
-### QG-03  Ranking model is hardcoded
-- **Status:** ✅ fixed
-- **Impact:** If `qwen/qwen3.6-35b-a3b` is not loaded in LM Studio, the entire
-  ranking stage fails silently or errors out, ignoring the user's selected model.
-- **Root cause:** `RANKING_LLM_MODEL = "qwen/qwen3.6-35b-a3b"` in
-  `ranking_helpers.py:21` bypasses `research_goal.llm_model` and `config.yaml`.
-- **Fix:** Read from `config.yaml` → `ranking_llm_model` with fallback to
-  `research_goal.llm_model`.
-- **Test:** Assert `judge_hypotheses` respects the configured model.
+Controlled benchmark: six mocked 80 ms evidence searches took 0.483 s serially
+and 0.164 s with three workers, with identical fused results. This measures only
+query scheduling, not live model throughput or total hypothesis generation time.
+Regression tests cover concurrent overlap, deterministic output, empty queries,
+error propagation, shared embedding reuse and explicit-model compatibility.
 
-### QG-04  Balanced audit mode is too lenient
-- **Status:** ⬜ open
-- **Impact:** In default `balanced` mode, the auditor's own `REJECT` verdict,
-  novelty <5/10, and weighted score <70/100 are downgraded to warnings instead
-  of hard rejections.
-- **Root cause:** `generation_helpers.py:1592-1643` converts most audit failures
-  to `audit_warnings` rather than hard blocks.
-- **Fix:** Promote auditor `REJECT` to a hard rejection; tighten the balanced
-  thresholds (e.g. novelty <4 hard-reject, weighted <60 hard-reject).
-- **Test:** Assert that a hypothesis with an auditor `REJECT` verdict is
-  excluded from final output even in balanced mode.
+## Current status and remaining work
 
----
+| Agent | Implemented | Remaining work / trade-off |
+| --- | --- | --- |
+| Generation | Literature retrieval, assumption analysis, optional multi-turn debate, provenance checks and candidate audits | Legacy audit path treats the model verdict as advisory; grounded audit path rejects explicit REJECT. Unify these policies deliberately rather than assume both paths behave alike. No candidate regeneration after a completely rejected batch. Debate remains configurable for local latency. |
+| Reflection | Seven quality dimensions, claim assessment, retrieved-source ID checks, ACCEPT/REVISE/REJECT routing | Add independently retrieved counter-evidence and staged screening/deep verification for promising candidates. The paper's observation-by-observation causal analysis is not fully implemented. |
+| Ranking | Elo, review prerequisite, bounded proximity-guided pairs, abstention recovery | Same completed pair is evaluated once; this is a latency optimization, not the paper's repeated tournament refinement. Add an explicit repeat budget and counterbalanced A/B judging before claiming convergence equivalent to the paper. |
+| Evolution | Six strategies, parent lineage, critique feedback, deterministic output validation, cluster exemplars | Grounding uses inherited sources instead of fresh targeted retrieval. Validate newly introduced claims against explicitly selected sources; inherited citations alone do not establish support. Dedup checks compare lexical similarity to parents, not semantic similarity to all active/sibling candidates. |
+| Proximity | Semantic graph, clusters, exemplars and similarity-based duplicate pruning | Similarity is a candidate relationship, not proof that two causal hypotheses are identical. Add scientific confirmation before automatic similarity-based pruning; alternate semantic-topology implementation needs an explicit supported role before removal. |
+| Meta-review | LLM thematic feedback from reviews and debates with bounded deterministic fallback | Final overview still lists ranked hypotheses and next steps; a detailed evidence-linked research report and experimental protocols remain separate work. Bounded context is not a synthesis of the entire unbounded run history. |
+| Supervisor | Dynamic bounded planner, accepted-only ranking, finalization evidence gate and Elo snapshots | Still orchestrates stages rather than a persistent asynchronous worker queue. Scientist steering and structured natural-language plan editing are incomplete. |
 
-## 🟡 Medium Priority (affect robustness and fairness)
+## Validation scope
 
-### QG-05  Evolution near-duplicate detection is lexical-only
-- **Status:** ⬜ open
-- **Impact:** Paraphrased duplicates pass the `SequenceMatcher ≥ 0.92` gate.
-  The check also only compares against immediate parents, not all active
-  hypotheses.
-- **Root cause:** `evolution_helpers.py:33, 133-137` uses `SequenceMatcher`
-  without embedding similarity, scoped only to `parents`.
-- **Fix:** Add cosine embedding similarity ≥ 0.85 check; compare against all
-  active hypotheses in `context.hypotheses`.
-- **Test:** Construct a paraphrase that passes SequenceMatcher but fails
-  embedding similarity; assert rejection.
+Use the canonical offline pytest suite without provider credentials or external
+network. Live LM Studio integration and scientific output quality require separate
+runs and cannot be inferred from unit tests. The Windows environment may need a
+writable `--basetemp` and `-p no:cacheprovider`; when GNU Make is unavailable, run
+`.venv/Scripts/python.exe -m pytest` with the same default marker exclusions.
 
-### QG-06  Ranking tournament has position bias
-- **Status:** ⬜ open
-- **Impact:** Hypothesis A is always presented first in pairwise debates,
-  creating systematic scoring skew.
-- **Root cause:** `judge_hypotheses` (`ranking_helpers.py:518-544`) always puts
-  hypothesis_a before hypothesis_b with no randomization.
-- **Fix:** Randomize A/B assignment per match, or run dual-order evaluation and
-  average results.
-- **Test:** Property test asserting that swapping A↔B does not change the
-  expected winner.
-
-### QG-07  `call_llm_for_hypothesis_revision` is orphaned
-- **Status:** ✅ fixed
-- **Impact:** `REVISE` verdicts have no effect; hypotheses keep their original
-  text unchanged.
-- **Root cause:** `reflection_helpers.py:344-391` implements the revision
-  function, but it is never called in the supervisor or reflection flow.
-- **Fix:** In the supervisor's post-reflection step, call
-  `call_llm_for_hypothesis_revision` on each `REVISE` hypothesis.
-- **Test:** Assert that a hypothesis with `REVISE` verdict has its text
-  modified after the revision call.
-
-### QG-08  No retry on full audit rejection
-- **Status:** ⬜ open
-- **Impact:** If all generated candidates fail the audit, the system returns an
-  empty list without retrying.
-- **Root cause:** `generation.py:1280-1282` immediately returns
-  `([], ["All generated hypotheses were rejected..."])`.
-- **Fix:** Implement 1 retry cycle using aggregated audit feedback to guide
-  regeneration.
-- **Test:** Mock the LLM to fail audit on the first call but succeed on retry;
-  assert non-empty output.
-
----
-
-## 🟢 Low Priority (polish and correctness)
-
-### QG-09  Quality thresholds are hardcoded
-- **Status:** ⬜ open
-- **Impact:** Users cannot tune quality sensitivity without editing source code.
-- **Affected values:**
-
-  | Parameter | Value | Location |
-  |---|---|---|
-  | Audit score weights | 7 dims (10-20%) | `generation_helpers.py:1049-1057` |
-  | Audit grounding cutoff | 4 / 5 | `generation_helpers.py:1318` |
-  | Reflection accept cutoff | all ≥4 | `reflection_helpers.py:40` |
-  | Near-dup threshold | 0.92 | `evolution_helpers.py:33` |
-  | Meta-review diversity | <0.35 / >0.75 | `meta_review.py:82, 92` |
-  | Ranking thread workers | 3 | `ranking.py:92` |
-
-- **Fix:** Move all values to `config.yaml` under appropriate sections.
-
-### QG-10  Meta-Review emits a false deactivation claim
-- **Status:** ⬜ open
-- **Impact:** The critique text claims "the lower-Elo duplicate was
-  automatically deactivated", but no deactivation actually occurs.
-- **Root cause:** `meta_review.py:157-159` generates the claim, but neither
-  `ProximityAgent` nor `MetaReviewAgent` sets `is_active=False`.
-- **Fix:** Either implement the deactivation, or remove the misleading text.
-
----
-
-## 📊 Test Coverage Gaps
-
-These are not bugs but missing test coverage that prevents catching regressions:
-
-| Gap | Risk |
-|---|---|
-| No end-to-end pipeline integration test | Agent interface drift undetected |
-| No automated quality benchmark (`metric-version: pre-0`) | Prompt/model changes can silently degrade quality |
-| No property-based tests (Elo conservation, RRF monotonicity) | Boundary bugs missed |
-| No adversarial input tests (prompt injection via retrieved text) | Security/quality risk |
-| No multi-cycle diversity collapse test | Mode collapse after 5+ iterations |
-| No extreme input tests (unicode, very long context, empty evidence) | Edge case crashes |
-
----
-
-## Implementation Order
-
-Phase 1 — close the quality loop (QG-01, QG-02, QG-03, QG-07):
-```
-meta_review feedback → generation/evolution prompts
-reflection 3-tier verdicts + hypothesis deactivation
-ranking model from config
-connect revision function
-```
-
-Phase 2 — harden robustness (QG-04, QG-05, QG-06, QG-08):
-```
-tighten balanced audit mode
-semantic dedup in evolution
-ranking position randomization
-audit-failure retry
-```
-
-Phase 3 — infrastructure (QG-09, QG-10, test gaps):
-```
-externalize thresholds to config.yaml
-fix false deactivation claim
-build benchmark harness (docs/loop/GOALS.md §7.1)
-add E2E + property-based tests
-```
+Final application validation: 420 passed, 4 skipped, 9 deselected in 15.50 s.
+Independent eval validation: 14 passed with its own uv environment.
+Repository-wide `ruff check .` passes. Existing untouched formatting differences
+remain outside this behavioral audit.

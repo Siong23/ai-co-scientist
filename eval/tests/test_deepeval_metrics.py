@@ -1,5 +1,4 @@
 import pytest
-
 from rubrics.deepeval_metrics import (
     LLMEvaluationError,
     build_test_case,

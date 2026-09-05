@@ -23,7 +23,7 @@ import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..models import ContextMemory, Hypothesis
-from ..utils import call_llm, generate_visjs_data, logger, redact_secrets, similarity_score
+from ..utils import call_llm, generate_visjs_data, logger, similarity_score
 
 # ---------------------------------------------------------------------------
 # Prompt constants

@@ -113,8 +113,10 @@ def test_reflection_revisions_run_concurrently_and_commit_in_input_order():
     with patch("app.agents_modules.reflection.call_llm_for_hypothesis_revision", side_effect=revise):
         revised = ReflectionAgent(max_workers=2).revise_hypotheses(hypotheses, _goal())
 
-    assert revised == hypotheses
-    assert [hypothesis.title for hypothesis in hypotheses] == ["Revised H1", "Revised H2"]
+    assert [child.parent_ids for child in revised] == [["H1"], ["H2"]]
+    assert [child.title for child in revised] == ["Revised H1", "Revised H2"]
+    assert all(child.reflection_report is None and child.elo_score == 1200 for child in revised)
+    assert [hypothesis.title for hypothesis in hypotheses] == ["First", "Second"]
 
 
 def test_evolution_strategies_run_concurrently_and_preserve_strategy_order():

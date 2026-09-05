@@ -13,8 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
-from ..models import EvidenceClaim
 from ..config import config
+from ..models import EvidenceClaim
 from ..rag_retriever import (
     EvidenceAspect,
     ProvisionalHypothesis,
