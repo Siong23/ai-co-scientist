@@ -41,6 +41,9 @@ def _build_reflection_report(result: Dict) -> Optional[ReflectionReport]:
 
 
 class ReflectionAgent:
+    def __init__(self, max_workers: int | None = None):
+        self.max_workers = max_workers
+
     def review_hypotheses(
         self, hypotheses: List[Hypothesis], context: ContextMemory, research_goal: ResearchGoal
     ) -> None:
@@ -49,7 +52,7 @@ class ReflectionAgent:
         pending = [hypothesis for hypothesis in hypotheses if hypothesis.reflection_report is None]
         if not pending or execution_cancelled():
             return
-        configured_workers = int(config.get("reflection", {}).get("max_workers", 3))
+        configured_workers = int(self.max_workers if self.max_workers is not None else config.get("reflection", {}).get("max_workers", config.get("agent_parallelism", {}).get("reflection_workers", 3)))
         max_workers = max(1, min(configured_workers, len(pending)))
 
         def review_one(h: Hypothesis) -> None:
@@ -138,7 +141,7 @@ class ReflectionAgent:
                 )
             return None
 
-        configured_workers = int(config.get("reflection", {}).get("max_workers", 3))
+        configured_workers = int(self.max_workers if self.max_workers is not None else config.get("reflection", {}).get("max_workers", config.get("agent_parallelism", {}).get("reflection_workers", 3)))
         max_workers = max(1, min(configured_workers, len(hypotheses)))
         if max_workers == 1:
             results = [revise_one(hypothesis) for hypothesis in hypotheses]

@@ -717,11 +717,14 @@ def evaluate_claims(
     retriever: ResearchRetriever | None = None,
     model: str | None = None,
     claims: list[str] | None = None,
+    sub_claims: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assess every sub-claim and calculate the report's overall confidence."""
 
     assessments: list[ClaimAssessment] = []
     extracted_claims = _parse_string_list(claims) if claims is not None else []
+    if claims is None and sub_claims is not None:
+        extracted_claims = _parse_string_list(sub_claims) or [_hypothesis_claim_text(hypothesis)]
     if not extracted_claims:
         extracted_claims = function_to_extract_claim(hypothesis, model=model)
     for claim in extracted_claims:

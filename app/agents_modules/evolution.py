@@ -26,6 +26,7 @@ class EvolutionAgent:
         max_candidates_per_cycle: int | None = None,
         quality_repair_attempts: int | None = None,
         transport_retry_attempts: int | None = None,
+        max_workers: int | None = None,
     ):
         evolution_config = config.get("evolution", {})
         configured = tuple(evolution_config.get("strategies", EVOLUTION_STRATEGIES))
@@ -48,7 +49,7 @@ class EvolutionAgent:
             ),
         )
         self.max_tokens = int(config.get("llm_max_tokens", {}).get("evolution", 2048))
-        self.max_workers = max(1, int(evolution_config.get("max_workers", 3)))
+        self.max_workers = max(1, int(max_workers if max_workers is not None else evolution_config.get("max_workers", config.get("agent_parallelism", {}).get("evolution_workers", 3))))
 
     def _strategies_for_cycle(self, context: ContextMemory, parent_count: int) -> list[EvolutionStrategy]:
         """Rotate through the strategy library while respecting parent-count requirements."""

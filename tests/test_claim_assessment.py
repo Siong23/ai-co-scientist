@@ -41,7 +41,9 @@ def test_claim_extraction_uses_llm_to_split_hypothesis_section(monkeypatch):
     )
     monkeypatch.setattr(
         "app.agents_modules.reflection_helpers._call_llm",
-        lambda *args, **kwargs: '{"sub_claims": ["The method improves recall in noisy data.", "The method reduces false positives in noisy data."]}',
+        lambda *args, **kwargs: (
+            '{"sub_claims": ["The method improves recall in noisy data.", "The method reduces false positives in noisy data."]}'
+        ),
     )
 
     assert function_to_extract_claim(hypothesis) == [
@@ -109,6 +111,34 @@ def test_evaluate_claims_returns_sub_claim_assessments_and_report_confidence(mon
         overall_confidence=assessment["overall_confidence"],
     )
     assert report.overall_confidence == assessment["overall_confidence"]
+
+
+def test_evaluate_claims_reuses_sub_claims_from_reflection_without_another_llm_call(monkeypatch):
+    hypothesis = Hypothesis(
+        "G1",
+        "Recall claim",
+        "Hypothesis: The method improves recall in noisy data.",
+    )
+    hypothesis.evidence_source_ids = []
+    hypothesis.evidence_sources = []
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("claim extraction must reuse the reflection response")
+
+    monkeypatch.setattr("app.agents_modules.reflection_helpers.function_to_extract_claim", unexpected_call)
+    monkeypatch.setattr(
+        "app.agents_modules.reflection_helpers._call_llm",
+        lambda *_args, **_kwargs: '{"verdicts": []}',
+    )
+    assessment = evaluate_claims(
+        hypothesis,
+        evidence_quality_score=7,
+        plausibility_score=8,
+        retriever=FakeRetriever(),
+        sub_claims=[],
+    )
+
+    assert [claim["claim"] for claim in assessment["claims"]] == ["The method improves recall in noisy data."]
 
 
 def test_overall_confidence_combines_sub_claim_and_reflection_scores():

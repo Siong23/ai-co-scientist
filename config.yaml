@@ -64,6 +64,13 @@ evolution:
   # scientific evolution strategy.
   transport_retry_attempts: 2
 
+# Independent per-hypothesis work is safe to batch in LM Studio. Keep this
+# bounded: large local models still need KV-cache memory for every live request.
+agent_parallelism:
+  generation_grading_workers: 2
+  reflection_workers: 3
+  evolution_workers: 3
+
 # Elo K-factor
 elo_k_factor: 32
 
