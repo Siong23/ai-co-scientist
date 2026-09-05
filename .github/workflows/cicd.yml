@@ -78,13 +78,24 @@ jobs:
       - name: Install/update dependencies
         run: |
           cd /home/server2/ai-co-scientist
-          ./venv/bin/pip install -r requirements.txt || pip install -r requirements.txt
+          ./venv/bin/python -m pip install --upgrade pip
+          ./venv/bin/python -m pip install -r requirements.txt
 
       - name: Restart AI Co-Scientist
         run: |
           sudo systemctl restart ai-co-scientist.service
 
-      - name: Verify service
+      - name: Verify application health
         run: |
-          sleep 3
-          systemctl status ai-co-scientist.service --no-pager
+          for attempt in {1..12}; do
+            if curl --fail --silent http://127.0.0.1:7860/ > /dev/null; then
+              echo "AI Co-Scientist is ready."
+              exit 0
+            fi
+            echo "Waiting for AI Co-Scientist (${attempt}/12)..."
+            sleep 5
+          done
+
+          systemctl status ai-co-scientist.service --no-pager || true
+          journalctl -u ai-co-scientist.service -n 100 --no-pager || true
+          exit 1
