@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..research_trace import merge_trace_event, normalize_trace_event
-from ..utils import logger, redact_secrets
+from ..utils import execution_cancelled, logger, redact_secrets
 from .evolution import EvolutionAgent
 from .generation import GenerationAgent
 from .meta_review import MetaReviewAgent
@@ -320,6 +320,7 @@ class SupervisorAgent:
             context,
             research_goal,
             new_hypotheses=new_hypotheses or [],
+            proximity_data=getattr(context, "proximity_analysis", None),
         )
         ranking_results = context.tournament_results[start:]
         ranked_scores = {
@@ -555,6 +556,10 @@ class SupervisorAgent:
         # 1. Generation
         new_hypotheses = self.step_generation(research_goal, context, publish, cycle_details)
 
+        if execution_cancelled():
+            cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
+            return cycle_details
+
         # 2. Reflection
         reflection_routing = self.step_reflection(
             research_goal,
@@ -565,6 +570,10 @@ class SupervisorAgent:
             step_name="reflection",
         )
         rankable_hypos = reflection_routing["accepted"]
+
+        if execution_cancelled():
+            cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
+            return cycle_details
 
         proximity_result = self.proximity_agent.get_proximity_analysis(
             context,
@@ -688,6 +697,15 @@ class SupervisorAgent:
 
         step_count = 0
         while step_count < max_steps:
+            if execution_cancelled():
+                cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
+                publish(
+                    "execution_budget",
+                    "warning",
+                    "Stopping at the cycle time limit",
+                    "No additional agent work will be scheduled.",
+                )
+                break
             steps_remaining = max_steps - step_count
 
             if not task_queue:
@@ -794,7 +812,7 @@ class SupervisorAgent:
             step_count += 1
 
         # If meta-review was never run, perform a final synthesis
-        if "meta_review" not in cycle_details.get("steps", {}):
+        if not execution_cancelled() and "meta_review" not in cycle_details.get("steps", {}):
             if proximity_result is None and len(context.get_active_hypotheses()) >= 2:
                 proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
             self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)

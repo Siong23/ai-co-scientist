@@ -28,6 +28,7 @@ from app.run_store import (
 )
 from app.utils import (
     classify_llm_error,
+    execution_budget,
     fetch_lmstudio_models,
     get_lmstudio_base_url,
     get_lmstudio_model,
@@ -44,6 +45,7 @@ CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
 CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "1800"))
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
+_cycle_run_lock = threading.Lock()
 
 # Configure logging for Gradio
 logging.basicConfig(level=logging.INFO)
@@ -525,6 +527,16 @@ def run_cycle_with_progress(
         )
         return
 
+    if not _cycle_run_lock.acquire(blocking=False):
+        busy_status = "⚠️ A previous cycle is still stopping. Wait for it to release the model before starting again."
+        yield (
+            busy_status,
+            "<p>A previous cycle is still stopping.</p>",
+            "",
+            format_research_trace_html([]),
+        )
+        return
+
     run_goal = current_research_goal
     run_context = deepcopy(global_context)
     run_supervisor = SupervisorAgent()
@@ -540,60 +552,75 @@ def run_cycle_with_progress(
                 return
             merge_trace_event(live_trace, event)
 
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    cancel_event = threading.Event()
+    deadline_timer = threading.Timer(timeout_seconds, cancel_event.set)
+    deadline_timer.daemon = True
+
     def worker():
-        result["value"] = execute_cycle(
-            run_goal,
-            run_context,
-            run_supervisor,
-            progress_callback=progress_events.put,
-        )
+        try:
+            with execution_budget(deadline, cancel_event):
+                result["value"] = execute_cycle(
+                    run_goal,
+                    run_context,
+                    run_supervisor,
+                    progress_callback=progress_events.put,
+                )
+        finally:
+            deadline_timer.cancel()
+            _cycle_run_lock.release()
 
     thread = threading.Thread(target=worker, daemon=True)
+    deadline_timer.start()
     thread.start()
-    started = time.monotonic()
     iteration = global_context.iteration_number + 1
+
+    def timeout_update(elapsed: float):
+        timeout_duration = format_timeout_duration(timeout_seconds)
+        timeout_status = (
+            f"⚠️ Cycle {iteration} timed out after {timeout_duration}. "
+            "The app cancelled remaining agent work before accepting another run."
+        )
+        timeout_html = timeout_results_html(timeout_seconds)
+        merge_trace_event(
+            live_trace,
+            {
+                "step": "timeout",
+                "status": "error",
+                "title": "Cycle time limit reached",
+                "summary": timeout_status,
+                "details": [],
+                "elapsed_seconds": elapsed,
+            },
+        )
+        saved_run = save_run(
+            research_goal=run_goal,
+            cycle_details={
+                "iteration": iteration,
+                "steps": {},
+                "errors": [timeout_status],
+                "research_trace": live_trace,
+            },
+            status=timeout_status,
+            references_html="",
+            results_html=timeout_html,
+            log_file="",
+        )
+        report_path = write_report(saved_run)
+        return (
+            f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
+            timeout_html,
+            "",
+            format_research_trace_html(live_trace, elapsed_seconds=elapsed),
+        )
 
     while thread.is_alive():
         drain_progress_events()
         elapsed = time.monotonic() - started
         if elapsed >= timeout_seconds:
-            timeout_duration = format_timeout_duration(timeout_seconds)
-            timeout_status = (
-                f"⚠️ Cycle {iteration} timed out after {timeout_duration}. "
-                "The app stopped waiting for the model provider instead of leaving the run spinning."
-            )
-            timeout_html = timeout_results_html(timeout_seconds)
-            merge_trace_event(
-                live_trace,
-                {
-                    "step": "timeout",
-                    "status": "error",
-                    "title": "Cycle time limit reached",
-                    "summary": timeout_status,
-                    "details": [],
-                    "elapsed_seconds": elapsed,
-                },
-            )
-            saved_run = save_run(
-                research_goal=run_goal,
-                cycle_details={
-                    "iteration": iteration,
-                    "steps": {},
-                    "errors": [timeout_status],
-                    "research_trace": live_trace,
-                },
-                status=timeout_status,
-                references_html="",
-                results_html=timeout_html,
-                log_file="",
-            )
-            report_path = write_report(saved_run)
-            yield (
-                f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
-                timeout_html,
-                "",
-                format_research_trace_html(live_trace, elapsed_seconds=elapsed),
-            )
+            cancel_event.set()
+            yield timeout_update(elapsed)
             return
 
         active_event = next(
@@ -620,6 +647,11 @@ def run_cycle_with_progress(
         thread.join(timeout=min(poll_seconds, max(timeout_seconds - elapsed, 0.1)))
 
     drain_progress_events()
+    elapsed = time.monotonic() - started
+    if cancel_event.is_set() and elapsed >= timeout_seconds:
+        yield timeout_update(elapsed)
+        return
+
     cycle_result = result.get("value")
     if not cycle_result:
         merge_trace_event(

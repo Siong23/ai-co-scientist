@@ -1,5 +1,6 @@
 """Offline tests for paper-aligned hypothesis evolution strategies."""
 
+import threading
 from copy import deepcopy
 from unittest.mock import Mock, patch
 
@@ -159,6 +160,31 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
     }
     assert "never edit" in call_llm.call_args_list[0].args[0]
     assert "Combination" not in first.title
+
+
+def test_evolution_runs_independent_strategies_concurrently():
+    context, _, _ = _context()
+    agent = EvolutionAgent(
+        strategies=("combination", "feasibility", "out_of_box"),
+        max_candidates_per_cycle=3,
+    )
+    all_started = threading.Barrier(3, timeout=2)
+
+    def evolve(strategy, *args, **kwargs):
+        all_started.wait()
+        return {"title": f"{strategy} child", "text": f"Test the {strategy} mechanism."}
+
+    with patch(
+        "app.agents_modules.evolution.call_llm_for_evolution",
+        side_effect=evolve,
+    ):
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert [child.evolution_strategy for child in evolved] == [
+        "combination",
+        "feasibility",
+        "out_of_box",
+    ]
 
 
 def test_strategy_library_rotates_across_iterations():

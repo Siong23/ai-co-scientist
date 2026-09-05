@@ -1,5 +1,7 @@
 """Offline tests for the LM Studio integration boundary."""
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -111,6 +113,32 @@ def test_call_llm_honors_an_explicit_output_limit():
         call_llm("prompt", model="selected-model", max_tokens=321)
 
     assert mock_openai.return_value.chat.completions.create.call_args.kwargs["max_tokens"] == 321
+
+
+def test_call_llm_respects_cycle_deadline():
+    cancel_event = threading.Event()
+    with (
+        utils.execution_budget(time.monotonic() + 2, cancel_event),
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        mock_openai.return_value.chat.completions.create.return_value = _completion()
+        assert call_llm("prompt", model="selected-model") == "LOCAL RESPONSE"
+
+    request_timeout = mock_openai.call_args.kwargs["timeout"]
+    assert 0 < request_timeout <= 2
+
+
+def test_call_llm_does_not_start_after_cycle_cancellation():
+    cancel_event = threading.Event()
+    cancel_event.set()
+    with (
+        utils.execution_budget(time.monotonic() + 60, cancel_event),
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        result = call_llm("prompt", model="selected-model")
+
+    assert "cancelled" in result.lower()
+    mock_openai.assert_not_called()
 
 
 def test_call_llm_uses_native_api_to_disable_reasoning(monkeypatch):

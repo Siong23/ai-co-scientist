@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
+from ..config import config
 from ..models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
-from ..utils import logger, redact_secrets
+from ..utils import execution_cancelled, logger, redact_secrets
 from .reflection_helpers import (
     call_llm_for_hypothesis_revision,
     call_llm_for_reflection,
@@ -43,14 +45,14 @@ class ReflectionAgent:
         self, hypotheses: List[Hypothesis], context: ContextMemory, research_goal: ResearchGoal
     ) -> None:
         """Reviews hypotheses using LLM, based on research_goal settings."""
-        # Use reflection temperature from research_goal
         reflect_temp = research_goal.reflection_temperature
+        pending = [hypothesis for hypothesis in hypotheses if hypothesis.reflection_report is None]
+        if not pending or execution_cancelled():
+            return
+        configured_workers = int(config.get("reflection", {}).get("max_workers", 3))
+        max_workers = max(1, min(configured_workers, len(pending)))
 
-        for h in hypotheses:
-            # Avoid re-reviewing if already reviewed (optional optimization)
-            # if h.novelty_review is not None and h.feasibility_review is not None:
-            #    continue
-            # Pass the specific temperature
+        def review_one(h: Hypothesis) -> None:
             result = call_llm_for_reflection(
                 hypothesis=h,
                 research_goal=research_goal,
@@ -75,6 +77,7 @@ class ReflectionAgent:
                         evidence_quality_score=result["evidence_quality_score"],
                         plausibility_score=result["plausibility_score"],
                         model=research_goal.llm_model,
+                        claims=result.get("sub_claims"),
                     )
                 )
                 result["recommendation"] = recommendation_after_claim_assessment(result)
@@ -93,12 +96,23 @@ class ReflectionAgent:
                 h.feasibility_review,
             )
 
+        if max_workers == 1:
+            for hypothesis in pending:
+                review_one(hypothesis)
+            return
+
+        logger.info("Reviewing %d hypotheses with %d workers.", len(pending), max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            list(executor.map(review_one, pending))
+
     def revise_hypotheses(
         self, hypotheses: List[Hypothesis], research_goal: ResearchGoal
     ) -> List[Hypothesis]:
         """Revise REVISE-flagged hypotheses using LLM revision helper."""
-        revised_list = []
-        for hypo in hypotheses:
+        if not hypotheses or execution_cancelled():
+            return []
+
+        def revise_one(hypo: Hypothesis) -> Hypothesis | None:
             try:
                 revised = call_llm_for_hypothesis_revision(
                     hypo,
@@ -115,12 +129,20 @@ class ReflectionAgent:
                     logger.info(
                         "Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id
                     )
-                    revised_list.append(hypo)
+                    return hypo
             except Exception as exc:
                 logger.warning(
                     "Hypothesis revision failed for %s: %s",
                     hypo.hypothesis_id,
                     redact_secrets(str(exc)),
                 )
-        return revised_list
+            return None
 
+        configured_workers = int(config.get("reflection", {}).get("max_workers", 3))
+        max_workers = max(1, min(configured_workers, len(hypotheses)))
+        if max_workers == 1:
+            results = [revise_one(hypothesis) for hypothesis in hypotheses]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(revise_one, hypotheses))
+        return [hypothesis for hypothesis in results if hypothesis is not None]

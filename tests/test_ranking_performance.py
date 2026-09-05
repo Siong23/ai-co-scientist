@@ -410,6 +410,45 @@ def test_tournament_comparison_count_with_new_hypothesis():
     assert compared_pairs == expected_pairs
 
 
+def test_tournament_caps_matches_without_requiring_proximity_data():
+    hypotheses = [_hypothesis(f"H{index}") for index in range(5)]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    with (
+        patch(
+            "app.agents_modules.ranking.run_pairwise_debate",
+            side_effect=lambda h_a, h_b, goal: _decision(h_a, h_b),
+        ) as debate,
+        patch.dict(config["ranking"], {"max_matches_per_cycle": 2}),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    assert debate.call_count == 2
+    assert len(context.tournament_results) == 2
+
+
+def test_tournament_does_not_repeat_completed_pairs():
+    hypotheses = [_hypothesis("A"), _hypothesis("B"), _hypothesis("C")]
+    context = ContextMemory()
+    context.tournament_results.append(
+        {"hypothesis_a": "A", "hypothesis_b": "B", "outcome": "A"}
+    )
+    goal = ResearchGoal(description="Test research goal")
+
+    with patch(
+        "app.agents_modules.ranking.run_pairwise_debate",
+        side_effect=lambda h_a, h_b, goal: _decision(h_a, h_b),
+    ) as debate:
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    compared_pairs = {
+        frozenset((call.args[0].hypothesis_id, call.args[1].hypothesis_id))
+        for call in debate.call_args_list
+    }
+    assert frozenset(("A", "B")) not in compared_pairs
+
+
 # ---------------------------------------------------------------------------
 # 4. RANKING CONSISTENCY
 # ---------------------------------------------------------------------------

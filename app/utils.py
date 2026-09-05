@@ -1,7 +1,9 @@
 import logging
 import os
 import random
+import threading
 import time
+from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -33,6 +35,49 @@ logger = logging.getLogger("aicoscientist")  # Use a specific name for the app l
 # --- LM Studio Integration ---
 DEFAULT_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_LMSTUDIO_API_KEY = "lm-studio"
+_execution_budget_lock = threading.RLock()
+_execution_deadline: float | None = None
+_execution_cancel_event: threading.Event | None = None
+
+
+@contextmanager
+def execution_budget(deadline: float, cancel_event: threading.Event):
+    """Apply one cycle deadline to every LLM request made by this worker."""
+
+    global _execution_cancel_event, _execution_deadline
+    with _execution_budget_lock:
+        previous_deadline = _execution_deadline
+        previous_cancel_event = _execution_cancel_event
+        _execution_deadline = float(deadline)
+        _execution_cancel_event = cancel_event
+    try:
+        yield
+    finally:
+        with _execution_budget_lock:
+            _execution_deadline = previous_deadline
+            _execution_cancel_event = previous_cancel_event
+
+
+def execution_cancelled() -> bool:
+    """Return whether the current cycle has exhausted or cancelled its budget."""
+
+    with _execution_budget_lock:
+        cancel_event = _execution_cancel_event
+        deadline = _execution_deadline
+    return bool(cancel_event is not None and cancel_event.is_set()) or bool(
+        deadline is not None and time.monotonic() >= deadline
+    )
+
+
+def _request_timeout() -> float:
+    """Bound a provider call by both its configured timeout and cycle deadline."""
+
+    configured = max(0.1, float(config.get("llm_request_timeout_seconds", 180)))
+    with _execution_budget_lock:
+        deadline = _execution_deadline
+    if deadline is None:
+        return configured
+    return max(0.1, min(configured, deadline - time.monotonic()))
 
 
 def get_lmstudio_base_url() -> str:
@@ -169,6 +214,10 @@ def call_llm(
         logger.error("LM Studio model is not configured.")
         return "Error: LLM model not configured."
 
+    if execution_cancelled():
+        return "Error: Cycle execution cancelled after reaching its time limit."
+
+    started_at = time.perf_counter()
     try:
         output_token_limit = max_tokens
         if output_token_limit is None:
@@ -197,7 +246,7 @@ def call_llm(
                         get_lmstudio_native_chat_url(),
                         headers=_lmstudio_headers(),
                         json=payload,
-                        timeout=config.get("llm_request_timeout_seconds", 180),
+                        timeout=_request_timeout(),
                     )
                     response.raise_for_status()
                     response_payload = response.json()
@@ -242,7 +291,7 @@ def call_llm(
             base_url=get_lmstudio_base_url(),
             api_key=get_lmstudio_api_key(),
             max_retries=0,
-            timeout=config.get("llm_request_timeout_seconds", 180),
+            timeout=_request_timeout(),
         )
         messages = []
         if system_prompt:
@@ -269,9 +318,20 @@ def call_llm(
             return "Error: LM Studio returned an empty response."
         return content
     except Exception as exc:
+        if execution_cancelled():
+            return "Error: Cycle execution cancelled after reaching its time limit."
         error = _format_lmstudio_error(exc, selected_model)
         logger.error("%s", error)
         return error
+    finally:
+        logger.info(
+            "LLM call completed model=%s prompt_chars=%d max_output_tokens=%s elapsed_ms=%d cancelled=%s",
+            selected_model,
+            len(prompt),
+            max_tokens,
+            int((time.perf_counter() - started_at) * 1000),
+            execution_cancelled(),
+        )
 
 
 # --- ID Generation ---

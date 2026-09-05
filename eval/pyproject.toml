@@ -1,0 +1,11 @@
+[project]
+name = "eval"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "deepeval>=4.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

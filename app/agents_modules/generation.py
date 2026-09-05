@@ -18,7 +18,7 @@ from ..rag_retriever import (
     format_documents_for_prompt,
     serialize_documents,
 )
-from ..utils import generate_unique_id, logger, redact_secrets
+from ..utils import execution_cancelled, generate_unique_id, logger, redact_secrets
 from .generation_helpers import (
     AssumptionAssessment,
     EvidenceCoverage,
@@ -624,7 +624,7 @@ Your refined contribution:
         current_documents = list(retrieved_documents)
         current_synthesis = synthesis
 
-        if not self.agentic_research_enabled:
+        if not self.agentic_research_enabled or execution_cancelled():
             return current_documents, current_synthesis, []
 
         # Analyze initial assumptions to guide autonomous exploration
@@ -636,6 +636,9 @@ Your refined contribution:
 
         # Run multi-step agentic research loop up to agentic_max_steps
         for step in range(self.agentic_max_steps):
+            if execution_cancelled():
+                break
+
             # Step A: Ask LLM controller to select next best research action
             decision, decision_error = call_llm_for_research_action(
                 research_goal.description,
@@ -733,6 +736,9 @@ Your refined contribution:
                 )
                 break
 
+            if execution_cancelled():
+                break
+
             prepared_action_documents = self._prepare_candidate_documents(
                 action_documents,
                 research_goal,
@@ -800,6 +806,9 @@ Your refined contribution:
         gen_temp = research_goal.generation_temperature
         self.rag_retriever.reset_search_stats()
 
+        if execution_cancelled():
+            return [], ["Cycle cancelled before hypothesis generation started."]
+
         # ==================================================================
         # Step 1: Two-stage search query planning
         # First calls Research Planner (goal analysis & provisional hypotheses),
@@ -820,6 +829,9 @@ Your refined contribution:
                 plan,
             ),
         )
+
+        if execution_cancelled():
+            return [], ["Cycle cancelled during search planning."]
 
         # ==================================================================
         # Step 2: Initial retrieval with user's unmodified research goal
@@ -892,6 +904,9 @@ Your refined contribution:
         # If coverage is insufficient, issues corrective queries or fallbacks.
         # ==================================================================
         while True:
+            if execution_cancelled():
+                return [], ["Cycle cancelled during evidence evaluation."]
+
             # Filter documents according to full-text indexing requirements
             documents_for_grading = self._prepare_candidate_documents(
                 candidate_documents,
@@ -1151,6 +1166,9 @@ Your refined contribution:
             context.last_retrieved_sources = []
             return [], [error]
 
+        if execution_cancelled():
+            return [], ["Cycle cancelled before literature synthesis."]
+
         # Enrich retained documents with full text when available
         if not self._requires_indexed_sources():
             retrieved_documents = self._enrich_with_full_text(
@@ -1180,6 +1198,9 @@ Your refined contribution:
             logger.error(error)
             return [], [error]
 
+        if execution_cancelled():
+            return [], ["Cycle cancelled after literature synthesis."]
+
         # ==================================================================
         # Step 5: Bounded Agentic Research Extension Loop
         # Proactively verifies assumptions, searches counterevidence, etc.
@@ -1195,6 +1216,9 @@ Your refined contribution:
             retrieved_documents,
             synthesis,
         )
+
+        if execution_cancelled():
+            return [], ["Cycle cancelled during evidence-directed research."]
 
         # Refresh final evidence state after agentic research
         context.last_retrieved_sources = serialize_documents(retrieved_documents)

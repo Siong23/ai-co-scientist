@@ -55,6 +55,8 @@ evolution:
     - inspiration
     - out_of_box
   max_candidates_per_cycle: 3
+  # Independent evolution strategies are submitted together to reduce wall time.
+  max_workers: 3
   # Retry once only when a syntactically valid child fails the Evolution
   # quality gate (near-copy, multiple hypotheses, or stitched combination).
   quality_repair_attempts: 1
@@ -73,7 +75,14 @@ ranking_llm_model: null
 
 ranking:
   proximity_guided_matching: true
-  max_matches_per_cycle: 0
+  # Bound tournament latency: prioritize nearby Elo/proximity competitors
+  # instead of comparing every possible pair in one cycle.
+  max_matches_per_cycle: 4
+
+# Hypothesis reviews are independent and can be scheduled together instead of
+# blocking one another serially. Tune this to the local server's capacity.
+reflection:
+  max_workers: 3
 
 # The production UI uses the dynamic Supervisor. The heuristic planner keeps
 # orchestration deterministic and avoids an extra LLM request per workflow
@@ -95,6 +104,16 @@ supervisor:
     min_audit_score: 70.0
     require_successful_evolution: true
     min_hypothesis_clusters: 2
+
+# Keep evidence-directed autonomous research, but bound its nested loop. The
+# outer Supervisor already performs iterative reflection and evolution, so
+# four inner research loops duplicate expensive work before any result appears.
+agentic_research:
+  enabled: true
+  max_steps: 1
+  max_queries_per_step: 2
+  max_assumptions: 4
+  max_evidence_sources: 12
 
 # Top K hypotheses for evolution
 top_k_hypotheses: 2

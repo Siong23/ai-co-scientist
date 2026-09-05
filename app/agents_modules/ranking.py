@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Iterable, List, Mapping, Optional
@@ -35,7 +34,9 @@ class RankingAgent:
             logger.info("Not enough *active* hypotheses to run a tournament.")
             return
 
-        random.shuffle(active_hypotheses)  # Shuffle only active ones
+        active_hypotheses.sort(
+            key=lambda hypothesis: (-hypothesis.elo_score, hypothesis.hypothesis_id)
+        )
 
         new_hypothesis_ids = (
             {hypothesis.hypothesis_id for hypothesis in new_hypotheses}
@@ -60,24 +61,43 @@ class RankingAgent:
             logger.info("No new hypotheses require ranking comparisons.")
             return
 
+        pair_scores = {}
         if proximity_data and config.get("ranking", {}).get("proximity_guided_matching", True):
             proximity_graph = proximity_data.get("graph", proximity_data)
             adjacency = proximity_graph.get("adjacency_graph", {})
-            pair_scores = {}
             for h_a, h_b in pairs:
                 for edge in adjacency.get(h_a.hypothesis_id, []):
                     if edge.get("other_id") == h_b.hypothesis_id:
                         pair_scores[frozenset((h_a.hypothesis_id, h_b.hypothesis_id))] = edge.get("similarity", 0.0)
                         break
-            pairs.sort(
-                key=lambda pair: pair_scores.get(
-                    frozenset((pair[0].hypothesis_id, pair[1].hypothesis_id)), 0.0
+
+        completed_pairs = {
+            frozenset((str(match.get("hypothesis_a")), str(match.get("hypothesis_b"))))
+            for match in context.tournament_results
+            if match.get("hypothesis_a") and match.get("hypothesis_b")
+        }
+        pairs = [
+            pair
+            for pair in pairs
+            if frozenset((pair[0].hypothesis_id, pair[1].hypothesis_id)) not in completed_pairs
+        ]
+        pairs.sort(
+            key=lambda pair: (
+                -float(
+                    pair_scores.get(
+                        frozenset((pair[0].hypothesis_id, pair[1].hypothesis_id)),
+                        0.0,
+                    )
                 ),
-                reverse=True,
+                abs(pair[0].elo_score - pair[1].elo_score),
+                -max(pair[0].elo_score, pair[1].elo_score),
+                pair[0].hypothesis_id,
+                pair[1].hypothesis_id,
             )
-            max_matches = int(config.get("ranking", {}).get("max_matches_per_cycle", 0))
-            if max_matches > 0:
-                pairs = pairs[:max_matches]
+        )
+        max_matches = int(config.get("ranking", {}).get("max_matches_per_cycle", 0))
+        if max_matches > 0:
+            pairs = pairs[:max_matches]
 
         for h in active_hypotheses:
             logger.info(

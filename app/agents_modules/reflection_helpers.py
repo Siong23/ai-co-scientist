@@ -148,6 +148,7 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
         # Other fields
         "strengths": _parse_string_list(parsed_data.get("strengths", [])),
         "weaknesses": _parse_string_list(parsed_data.get("weaknesses", [])),
+        "sub_claims": _parse_string_list(parsed_data.get("sub_claims", [])),
         "comment": str(parsed_data.get("comment", "No comment provided.")),
         "references": [],
     }
@@ -214,6 +215,7 @@ def call_llm_for_reflection(
         "Additionally, provide:\n"
         "- strengths: Array of concise, specific strengths of this hypothesis.\n"
         "- weaknesses: Array of concise, specific weaknesses of this hypothesis.\n"
+        "- sub_claims: Array containing the smallest set of independently verifiable claims already present in the hypothesis.\n"
         "- comment: Concise summary critique explaining the ratings and suggestions.\n"
         "- references: Array of exact Source IDs from the provided sources that support this hypothesis.\n\n"
         "STRICT CITATION RULE: In the 'references' array, return ONLY exact Source IDs from the 'Verified Retrieved Sources' list above. "
@@ -230,6 +232,7 @@ def call_llm_for_reflection(
         '  "expected_research_value_score": 1-10,\n'
         '  "strengths": ["concise strength"],\n'
         '  "weaknesses": ["concise weakness"],\n'
+        '  "sub_claims": ["independently verifiable claim"],\n'
         '  "comment": "Concise summary critique explaining the ratings and suggestions.",\n'
         '  "references": ["exact Source ID from the provided list above"]\n'
         "}"
@@ -282,6 +285,7 @@ def call_llm_for_reflection(
         '  "expected_research_value_score": 1-10,\n'
         '  "strengths": ["concise strength"],\n'
         '  "weaknesses": ["concise weakness"],\n'
+        '  "sub_claims": ["independently verifiable claim"],\n'
         '  "comment": "Concise summary critique explaining the ratings and suggestions.",\n'
         '  "references": ["exact Source ID from the provided list above"]\n'
         "}"
@@ -712,11 +716,15 @@ def evaluate_claims(
     plausibility_score: float,
     retriever: ResearchRetriever | None = None,
     model: str | None = None,
+    claims: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assess every sub-claim and calculate the report's overall confidence."""
 
     assessments: list[ClaimAssessment] = []
-    for claim in function_to_extract_claim(hypothesis, model=model):
+    extracted_claims = _parse_string_list(claims) if claims is not None else []
+    if not extracted_claims:
+        extracted_claims = function_to_extract_claim(hypothesis, model=model)
+    for claim in extracted_claims:
         supporting_evidence = function_to_get_supporting_evidence(hypothesis, claim)
         contradictory_evidence = function_to_get_contradictory_evidence(
             hypothesis,

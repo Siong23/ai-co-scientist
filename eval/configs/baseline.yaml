@@ -1,0 +1,5 @@
+name: baseline
+goal_file: ../goals/goal_001_perovskite_humidity.txt
+goal_match: normalized_exact
+hypothesis_selection: highest_elo
+llm_metrics_enabled: false
