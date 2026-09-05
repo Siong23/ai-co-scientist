@@ -97,9 +97,37 @@ The system uses a multi-agent approach:
 
 ## 📚 Literature Integration
 
-- Automatically searches arXiv for papers related to your research goal.
-- Displays relevant papers with full metadata, abstracts, and links.
-- Helps contextualize generated hypotheses within existing research.
+- Plans the research and searches configured academic providers using the
+  original goal plus focused rewritten queries.
+- Uses title, abstract, and metadata as a high-recall candidate-paper gate, so
+  clearly irrelevant search results are removed before PDF acquisition.
+- Downloads only the bounded relevant shortlist into `app/paper/`, reuses
+  cached PDFs, and stores versioned full-text evidence chunks in `chroma_db/`.
+- Retrieves focused method, result, comparison, and limitation passages before
+  literature synthesis. Each passage carries a chunk ID, source ID, page,
+  evidence type, parser, and index schema version.
+- Keeps unavailable papers as explicitly limited `abstract_only` evidence;
+  one failed PDF does not abort a research cycle.
+- Provides passage-level coverage and strict chunk-grounded audit helpers for
+  scientific validation. The production workflow retains its configured
+  balanced/strict audit policy and concurrent candidate reviews; strict
+  chunk-grounded validation is available through
+  `call_llm_for_grounded_hypothesis_audit`.
+
+The three gates have intentionally different jobs:
+
+1. **Abstract candidate filter:** decides which papers are worth downloading.
+2. **Full-text evidence coverage:** decides what the retrieved literature can
+   establish.
+3. **Hypothesis grounding audit:** decides what the system is allowed to
+   publish as a validated hypothesis.
+
+Important `config.yaml` groups are `rag` (paper discovery and corrective
+search), `paper_library` (download budget, PDF cache, Chroma schema and prompt
+limits), `evidence_retrieval` (focused-query limits and query-side embedding
+instructions), and `validation` (numeric/entailment checks and per-candidate
+audit context). Changing an index, parser, or chunking version selects a new
+Chroma collection; cached PDFs remain reusable for re-indexing.
 
 ## ⚙️ Technical Details
 

@@ -139,6 +139,27 @@ class SearchQueryPlan:
 class SharedSentenceTransformerEmbeddings(Embeddings):
     """LangChain adapter around the project's shared embedding model."""
 
+    def __init__(
+        self,
+        *,
+        query_instruction_enabled: bool | None = None,
+        query_instruction: str | None = None,
+    ) -> None:
+        retrieval_config = config.get("evidence_retrieval", {})
+        self.query_instruction_enabled = (
+            bool(retrieval_config.get("query_instruction_enabled", False))
+            if query_instruction_enabled is None
+            else query_instruction_enabled
+        )
+        self.query_instruction = str(
+            query_instruction
+            or retrieval_config.get(
+                "query_instruction",
+                "Given a scientific research question, retrieve passages that provide direct "
+                "experimental, methodological, quantitative, comparison, limitation, or prior-art evidence.",
+            )
+        ).strip()
+
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -154,8 +175,11 @@ class SharedSentenceTransformerEmbeddings(Embeddings):
 
     def embed_query(self, text: str) -> list[float]:
         model = get_sentence_transformer_model()
+        query_text = text
+        if self.query_instruction_enabled and self.query_instruction:
+            query_text = f"Instruct: {self.query_instruction}\nQuery: {text}"
         vector = model.encode(
-            text,
+            query_text,
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False,
@@ -1506,7 +1530,40 @@ def format_documents_for_prompt(
             "source_id",
             "unknown",
         )
-        sections.append(f'<source id="{source_id}">\n{document.page_content}\n</source>')
+        evidence_refs = document.metadata.get("evidence_refs")
+        if isinstance(evidence_refs, list):
+            title = document.metadata.get("title", "Untitled")
+            published = document.metadata.get("published", "Unknown")
+            evidence_status = document.metadata.get("evidence_status", "abstract_only")
+            evidence_sections = [
+                f"Title: {title}\nPublished: {published}\nEvidence status: {evidence_status}"
+            ]
+            for evidence_ref in evidence_refs:
+                if not isinstance(evidence_ref, dict):
+                    continue
+                evidence_type = str(evidence_ref.get("evidence_type", "abstract_only"))
+                text = evidence_ref.get("text")
+                if evidence_type == "abstract_only":
+                    text = document.metadata.get("abstract", "")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                attributes = {
+                    "chunk_id": evidence_ref.get("chunk_id", ""),
+                    "source_id": evidence_ref.get("source_id", source_id),
+                    "section": evidence_ref.get("section", "Unknown"),
+                    "page": evidence_ref.get("page", ""),
+                    "evidence_type": evidence_type,
+                }
+                serialized_attributes = " ".join(
+                    f'{key}="{value}"' for key, value in attributes.items() if value not in (None, "")
+                )
+                evidence_sections.append(
+                    f"<evidence {serialized_attributes}>\n{text.strip()}\n</evidence>"
+                )
+            content = "\n\n".join(evidence_sections)
+        else:
+            content = document.page_content
+        sections.append(f'<source id="{source_id}">\n{content}\n</source>')
 
     return "\n\n".join(sections)
 
@@ -1671,6 +1728,9 @@ def serialize_documents(
             "rrf_score": document.metadata.get("rrf_score"),
             "full_text_indexed": document.metadata.get("full_text_indexed", False),
             "full_text_chunks_used": document.metadata.get("full_text_chunks_used", 0),
+            "evidence_status": document.metadata.get("evidence_status", "abstract_only"),
+            "evidence_mode": document.metadata.get("evidence_mode", "abstract_only"),
+            "evidence_refs": document.metadata.get("evidence_refs", []),
         }
         for document in documents
     ]

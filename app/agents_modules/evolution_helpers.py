@@ -440,4 +440,5 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
         if marker not in seen_sources:
             seen_sources.add(marker)
             new_hypothesis.evidence_sources.append(source)
+    new_hypothesis.evidence_refs = list(dict.fromkeys(hypoA.evidence_refs + hypoB.evidence_refs))
     return new_hypothesis

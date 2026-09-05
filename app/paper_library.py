@@ -1,4 +1,4 @@
-"""Download relevant papers and persist searchable full-text chunks in Chroma."""
+"""Download shortlisted papers and persist traceable full-text evidence in Chroma."""
 
 from __future__ import annotations
 
@@ -26,6 +26,12 @@ class PaperChunk:
     page: int
     text: str
     distance: float | None = None
+    chunk_id: str = ""
+    section: str = "Unknown"
+    subsection: str = ""
+    evidence_type: str = "full_text"
+    parser: str = "pypdf"
+    schema_version: str = ""
 
 
 class ChromaPaperLibrary:
@@ -48,8 +54,16 @@ class ChromaPaperLibrary:
         self.persist_directory = Path(persist_directory or library_config.get("persist_directory", "chroma_db"))
         self.pdf_directory = Path(pdf_directory or library_config.get("pdf_directory", ".cache/papers"))
         self.collection_prefix = str(library_config.get("collection_name", "research_papers"))
+        self.index_schema_version = str(library_config.get("index_schema_version", "2"))
+        self.parser_version = str(library_config.get("parser_version", "pypdf-1"))
+        self.chunking_version = str(library_config.get("chunking_version", "page-boundary-2"))
         self.embedding_model = str(config.get("sentence_transformer_model", "default"))
-        self.max_papers_per_run = max(1, int(library_config.get("max_papers_per_run", 3)))
+        self.candidate_download_limit = max(
+            1,
+            int(library_config.get("candidate_download_limit", library_config.get("max_papers_per_run", 3))),
+        )
+        # Backwards-compatible alias for callers that configured the old name.
+        self.max_papers_per_run = self.candidate_download_limit
         self.max_pages_per_paper = max(1, int(library_config.get("max_pages_per_paper", 20)))
         self.max_chunks_per_paper = max(1, int(library_config.get("max_chunks_per_paper", 24)))
         self.chunk_size = max(500, int(library_config.get("chunk_size_chars", 2400)))
@@ -72,7 +86,15 @@ class ChromaPaperLibrary:
     def collection_name(self) -> str:
         """Use a distinct Chroma collection for each embedding model."""
 
-        model_hash = hashlib.sha256(self.embedding_model.encode("utf-8")).hexdigest()[:12]
+        schema_key = "\0".join(
+            (
+                self.embedding_model,
+                self.index_schema_version,
+                self.parser_version,
+                self.chunking_version,
+            )
+        )
+        model_hash = hashlib.sha256(schema_key.encode("utf-8")).hexdigest()[:12]
         safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", self.collection_prefix).strip("_-")
         return f"{safe_prefix or 'research_papers'}_{model_hash}"
 
@@ -88,22 +110,47 @@ class ChromaPaperLibrary:
             collection_name=self.collection_name,
             embedding_function=self.embeddings,
             persist_directory=str(self.persist_directory),
-            collection_metadata={"hnsw:space": "cosine"},
+            collection_metadata={
+                "hnsw:space": "cosine",
+                "index_schema_version": self.index_schema_version,
+                "parser_version": self.parser_version,
+                "chunking_version": self.chunking_version,
+            },
         )
         return self._vector_store
 
-    def enrich_documents(self, documents: Sequence[Document], query: str) -> list[Document]:
-        """Index selected PDFs and append only the best full-text chunks."""
+    @staticmethod
+    def _normalize_queries(queries: str | Sequence[str]) -> tuple[str, ...]:
+        if isinstance(queries, str):
+            values = (queries,)
+        else:
+            values = tuple(str(query) for query in queries)
+        return tuple(dict.fromkeys(query.strip() for query in values if query.strip()))
+
+    def enrich_documents(
+        self,
+        documents: Sequence[Document],
+        queries: str | Sequence[str],
+    ) -> list[Document]:
+        """Acquire shortlisted PDFs, retrieve passages, and attach provenance.
+
+        Callers must pass only papers that survived the abstract-level candidate
+        filter.  This method never expands the shortlist on its own.
+        """
 
         original_documents = list(documents)
-        if not self.enabled or not original_documents or not query.strip():
+        normalized_queries = self._normalize_queries(queries)
+        if not self.enabled or not original_documents or not normalized_queries:
             return original_documents
 
-        candidates = [document for document in original_documents if document.metadata.get("pdf_url")]
+        candidates = [document for document in original_documents if document.metadata.get("pdf_url")][
+            : self.candidate_download_limit
+        ]
         indexed_source_ids: set[str] = set()
         newly_indexed = 0
+        failed_source_ids: set[str] = set()
         for document in candidates:
-            source_id = str(document.metadata.get("source_id", "")).strip()
+            source_id = str(document.metadata.get("source_id", ""))
             try:
                 if source_id and self.has_indexed_source(source_id):
                     indexed_source_ids.add(source_id)
@@ -113,21 +160,26 @@ class ChromaPaperLibrary:
                 if self.ensure_indexed(document):
                     indexed_source_ids.add(source_id)
                     newly_indexed += 1
+                else:
+                    failed_source_ids.add(source_id)
             except Exception as exc:
+                failed_source_ids.add(source_id)
                 logger.warning(
                     "Full-text indexing skipped for %s: %s",
-                    document.metadata.get("source_id", "unknown"),
+                    source_id or "unknown",
                     exc,
                 )
 
-        if not indexed_source_ids:
-            return original_documents
-
-        try:
-            chunks = self.search(query, sorted(indexed_source_ids), self.top_k_chunks)
-        except Exception as exc:
-            logger.warning("Chroma full-text retrieval failed; using abstracts only: %s", exc)
-            return original_documents
+        chunks: list[PaperChunk] = []
+        if indexed_source_ids:
+            try:
+                chunks = self.search_many(
+                    normalized_queries,
+                    sorted(indexed_source_ids),
+                    self.top_k_chunks,
+                )
+            except Exception as exc:
+                logger.warning("Chroma full-text retrieval failed; using abstracts only: %s", exc)
 
         chunks_by_source: dict[str, list[PaperChunk]] = {}
         used_chars = 0
@@ -139,7 +191,19 @@ class ChromaPaperLibrary:
             if not text:
                 continue
             chunks_by_source.setdefault(chunk.source_id, []).append(
-                PaperChunk(chunk.source_id, chunk.title, chunk.page, text, chunk.distance)
+                PaperChunk(
+                    chunk.source_id,
+                    chunk.title,
+                    chunk.page,
+                    text,
+                    chunk.distance,
+                    chunk.chunk_id,
+                    chunk.section,
+                    chunk.subsection,
+                    chunk.evidence_type,
+                    chunk.parser,
+                    chunk.schema_version,
+                )
             )
             used_chars += len(text)
 
@@ -154,9 +218,45 @@ class ChromaPaperLibrary:
                 or metadata["full_text_indexed"]
             )
             metadata["full_text_chunks_used"] = len(source_chunks)
+            if source_id in indexed_source_ids:
+                evidence_status = "full_text"
+            elif source_id in failed_source_ids:
+                evidence_status = "full_text_failed"
+            else:
+                evidence_status = "abstract_only"
+            metadata["evidence_status"] = evidence_status
+            metadata["evidence_mode"] = "full_text" if source_chunks else "abstract_only"
+            abstract_ref = {
+                "source_id": source_id,
+                "chunk_id": f"abstract:{source_id}",
+                "section": "Abstract",
+                "page": None,
+                "evidence_type": "abstract_only",
+            }
+            full_text_refs = [
+                {
+                    "source_id": chunk.source_id,
+                    "chunk_id": chunk.chunk_id,
+                    "section": chunk.section,
+                    "subsection": chunk.subsection,
+                    "page": chunk.page,
+                    "evidence_type": chunk.evidence_type,
+                    "parser": chunk.parser,
+                    "schema_version": chunk.schema_version,
+                    "retrieval_score": chunk.distance,
+                    "text": chunk.text,
+                }
+                for chunk in source_chunks
+            ]
+            metadata["evidence_refs"] = [abstract_ref, *full_text_refs]
             if source_chunks:
                 excerpts = "\n\n".join(
-                    f"[Full-text evidence, page {chunk.page}] {chunk.text}" for chunk in source_chunks
+                    (
+                        f'<evidence chunk_id="{chunk.chunk_id}" source_id="{chunk.source_id}" '
+                        f'section="{chunk.section}" page="{chunk.page}" '
+                        f'evidence_type="{chunk.evidence_type}">\n{chunk.text}\n</evidence>'
+                    )
+                    for chunk in source_chunks
                 )
                 page_content = f"{document.page_content}\n\n{excerpts}"
             else:
@@ -179,6 +279,45 @@ class ChromaPaperLibrary:
         vector_store = self._get_vector_store()
         existing = vector_store.get(where={"source_id": normalized_source_id}, limit=1, include=["metadatas"])
         return bool(existing.get("ids"))
+    def search_many(
+        self,
+        queries: Sequence[str],
+        source_ids: Sequence[str],
+        top_k: int | None = None,
+    ) -> list[PaperChunk]:
+        """Fuse dense passage rankings from focused evidence queries."""
+
+        fused_scores: dict[str, float] = {}
+        chunks_by_id: dict[str, PaperChunk] = {}
+        for query in self._normalize_queries(queries):
+            for rank, chunk in enumerate(self.search(query, source_ids, top_k), start=1):
+                chunk_id = chunk.chunk_id or self._chunk_id(
+                    chunk.source_id,
+                    chunk.page,
+                    rank,
+                    chunk.text,
+                )
+                chunks_by_id.setdefault(
+                    chunk_id,
+                    chunk
+                    if chunk.chunk_id
+                    else PaperChunk(
+                        chunk.source_id,
+                        chunk.title,
+                        chunk.page,
+                        chunk.text,
+                        chunk.distance,
+                        chunk_id,
+                        chunk.section,
+                        chunk.subsection,
+                        chunk.evidence_type,
+                        chunk.parser,
+                        chunk.schema_version or self.index_schema_version,
+                    ),
+                )
+                fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
+        ranked_ids = sorted(fused_scores, key=fused_scores.get, reverse=True)
+        return [chunks_by_id[chunk_id] for chunk_id in ranked_ids[: (top_k or self.top_k_chunks)]]
 
     def ensure_indexed(self, document: Document) -> bool:
         """Download, extract, embed, and upsert one paper unless already cached."""
@@ -202,10 +341,11 @@ class ChromaPaperLibrary:
             logger.warning("No extractable full text found in %s.", source_id)
             return False
 
-        ids = [
-            self._chunk_id(source_id, int(chunk.metadata["page"]), index, chunk.page_content)
-            for index, chunk in enumerate(chunks)
-        ]
+        ids = []
+        for index, chunk in enumerate(chunks):
+            chunk_id = self._chunk_id(source_id, int(chunk.metadata["page"]), index, chunk.page_content)
+            chunk.metadata["chunk_id"] = chunk_id
+            ids.append(chunk_id)
         vector_store.add_documents(documents=chunks, ids=ids)
         logger.info("Indexed %d full-text chunks for %s in Chroma.", len(chunks), source_id)
         return True
@@ -238,6 +378,12 @@ class ChromaPaperLibrary:
                     page=int(metadata.get("page", 0)),
                     text=document.page_content,
                     distance=float(distance) if distance is not None else None,
+                    chunk_id=str(metadata.get("chunk_id", "")),
+                    section=str(metadata.get("section", "Unknown")),
+                    subsection=str(metadata.get("subsection", "")),
+                    evidence_type=str(metadata.get("evidence_type", "full_text")),
+                    parser=str(metadata.get("parser", "pypdf")),
+                    schema_version=str(metadata.get("schema_version", self.index_schema_version)),
                 )
             )
         return chunks
@@ -292,7 +438,10 @@ class ChromaPaperLibrary:
         reader = PdfReader(str(pdf_path))
         pages: list[tuple[int, str]] = []
         for page_number, page in enumerate(reader.pages[: self.max_pages_per_paper], start=1):
-            text = re.sub(r"\s+", " ", page.extract_text() or "").strip()
+            raw_text = (page.extract_text() or "").replace("\r\n", "\n").replace("\r", "\n")
+            lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw_text.split("\n")]
+            text = "\n".join(lines)
+            text = re.sub(r"\n{3,}", "\n\n", text).strip()
             if text:
                 pages.append((page_number, text))
         return pages
@@ -314,6 +463,13 @@ class ChromaPaperLibrary:
                     "page": page,
                     "pdf_url": pdf_url,
                     "embedding_model": self.embedding_model,
+                    "section": "Unknown",
+                    "subsection": "",
+                    "evidence_type": "full_text",
+                    "parser": "pypdf",
+                    "parser_version": self.parser_version,
+                    "chunking_version": self.chunking_version,
+                    "schema_version": self.index_schema_version,
                 },
             )
             for page, text in pages

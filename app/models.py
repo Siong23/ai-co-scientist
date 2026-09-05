@@ -61,6 +61,7 @@ class Hypothesis:
         # distinguish failure from a genuine low-scoring report.
         self.reflection_report: Optional[ReflectionReport] = kwargs.get("reflection_report")
         self.evidence_source_ids: List[str] = []
+        self.evidence_refs: List[str] = []
         self.evidence_sources: List[Dict] = []
         self.audit_score: Optional[float] = None
         self.audit_verdict: Optional[str] = None
@@ -82,6 +83,7 @@ class Hypothesis:
             "parent_ids": self.parent_ids,  # Include parent IDs
             "evolution_strategy": self.evolution_strategy,
             "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs
+            "evidence_refs": self.evidence_refs,
             "evidence_sources": self.evidence_sources,  # Include the actual source documents
             "audit_score": self.audit_score,
             "audit_verdict": self.audit_verdict,
@@ -202,6 +204,7 @@ class HypothesisResponse(BaseModel):
     references: List[Dict]
     is_active: bool
     evidence_source_ids: List[str] = []
+    evidence_refs: List[str] = []
     # parent_ids: List[str] # Add if needed in API response
 
 
@@ -236,6 +239,26 @@ class ClaimAssessment(BaseModel):
     confidence: float = Field(default=1.0, ge=1.0, le=10.0)
     supporting_evidence: List[Dict] = []
     contradictory_evidence: List[Dict] = []
+
+
+class EvidenceClaim(BaseModel):
+    """One atomic factual statement and its exact evidence provenance."""
+
+    claim_id: str
+    claim: str
+    support_status: Literal[
+        "entailed",
+        "partially_supported",
+        "unsupported",
+        "contradicted",
+    ]
+    source_id: Optional[str] = None
+    chunk_ids: List[str] = Field(default_factory=list)
+    evidence_spans: List[str] = Field(default_factory=list)
+    section: Optional[str] = None
+    page: Optional[int] = None
+    evidence_type: Optional[Literal["full_text", "abstract_only"]] = None
+    reason: str = ""
 
 
 class ReflectionReport(BaseModel):

@@ -32,6 +32,7 @@ from .generation_helpers import (
     call_llm_for_generation,
     call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
+    build_evidence_queries,
     call_llm_for_relevance_filter,
     call_llm_for_research_action,
     call_llm_for_search_queries,
@@ -358,7 +359,7 @@ class GenerationAgent:
         try:
             return self.paper_library.enrich_documents(
                 documents,
-                research_goal.description,
+                build_evidence_queries(research_goal.description),
             )
         except Exception as exc:
             logger.warning(

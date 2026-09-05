@@ -473,7 +473,20 @@ def format_evidence_sources_html(
         )
 
     rendered_sources = ", ".join(links) if links else "None recorded"
-    return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>"
+    evidence_refs = hypothesis.get("evidence_refs", [])
+    if not isinstance(evidence_refs, list):
+        evidence_refs = []
+    rendered_refs = ", ".join(
+        f"<code>{html_lib.escape(str(chunk_id))}</code>"
+        for chunk_id in dict.fromkeys(evidence_refs)
+        if isinstance(chunk_id, str) and chunk_id
+    )
+    provenance = (
+        f"<p><strong>Evidence chunks:</strong> {rendered_refs}</p>"
+        if rendered_refs
+        else ""
+    )
+    return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>{provenance}"
 
 
 def format_ranking_confidence(value: Any) -> str:
@@ -1175,15 +1188,42 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
         if raw_pdf_url.startswith(("https://", "http://")):
             pdf_url = html_lib.escape(raw_pdf_url, quote=True)
             pdf_link = f' | <a href="{pdf_url}" target="_blank">📁 Download PDF</a>'
+        evidence_status = str(source.get("evidence_status") or "abstract_only")
         if source_type == "web" and not source.get("full_text_indexed"):
             library_status = "Retrieved web content used directly"
         elif source.get("full_text_indexed"):
             chunks_used = int(source.get("full_text_chunks_used") or 0)
             library_status = f"Indexed in local ChromaDB; {chunks_used} relevant full-text chunk(s) used"
+        elif evidence_status == "full_text_failed":
+            library_status = "Full-text acquisition failed; abstract-only evidence used"
         else:
             library_status = "Abstract-only evidence"
         content_label = "Web content" if source_type == "web" else "Abstract"
         author_line = f"<p><strong>Authors:</strong> {authors}</p>" if authors else ""
+        evidence_refs = source.get("evidence_refs", [])
+        full_text_refs = [
+            ref
+            for ref in evidence_refs
+            if isinstance(ref, dict) and ref.get("evidence_type") == "full_text"
+        ] if isinstance(evidence_refs, list) else []
+        sections = ", ".join(
+            dict.fromkeys(str(ref.get("section") or "Unknown") for ref in full_text_refs)
+        )
+        pages = ", ".join(
+            dict.fromkeys(str(ref.get("page")) for ref in full_text_refs if ref.get("page") is not None)
+        )
+        chunk_ids = ", ".join(
+            f"<code>{html_lib.escape(str(ref.get('chunk_id')))}</code>"
+            for ref in full_text_refs
+            if ref.get("chunk_id")
+        )
+        provenance_html = ""
+        if full_text_refs:
+            provenance_html = (
+                f"<p><strong>Sections:</strong> {html_lib.escape(sections)} | "
+                f"<strong>Pages:</strong> {html_lib.escape(pages)}</p>"
+                f"<p><strong>Evidence chunks:</strong> {chunk_ids}</p>"
+            )
         html += f"""
         <div style="border: 1px solid #e0e0e0; padding: 15px; margin: 10px 0; border-radius: 8px; background-color: #fafafa;">
             <h4>{title}</h4>
@@ -1194,6 +1234,7 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
                <strong>Published:</strong> {published}</p>
             <p><strong>{content_label}:</strong> {summary}...</p>
             <p><strong>Evidence storage:</strong> {library_status}</p>
+            {provenance_html}
             <p>
                 <a href="{source_url}" target="_blank">📄 View source</a>{pdf_link}
             </p>

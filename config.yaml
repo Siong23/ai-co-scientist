@@ -174,9 +174,8 @@ rag:
   query_fidelity_min_similarity: 0.35
   provisional_hypothesis_min_similarity: 0.30
 
-# Relevant open-access papers are downloaded only after evidence coverage is
-# confirmed. Their bounded full-text chunks are persisted locally in Chroma and
-# retrieved into the generation prompt; failures fall back to abstract-only RAG.
+# Only papers retained by abstract-level candidate filtering are downloaded.
+# Prompt size remains independently bounded by evidence passage retrieval.
 paper_library:
   enabled: true
   # Academic sources may be used for generation only after their full text is
@@ -187,13 +186,16 @@ paper_library:
   persist_directory: "chroma_db"
   pdf_directory: "app/paper"
   collection_name: "research_papers"
-  max_papers_per_run: 3
-  max_pages_per_paper: 20
-  max_chunks_per_paper: 24
+  index_schema_version: "2"
+  parser_version: "pypdf-1"
+  chunking_version: "page-boundary-2"
+  candidate_download_limit: 8
+  max_pages_per_paper: 60
+  max_chunks_per_paper: 96
   chunk_size_chars: 2400
   chunk_overlap_chars: 300
-  top_k_chunks: 6
-  max_prompt_chars: 12000
+  top_k_chunks: 12
+  max_prompt_chars: 14000
   max_pdf_bytes: 25000000
   download_timeout_seconds: 30
   allowed_pdf_hosts:
@@ -211,6 +213,21 @@ paper_library:
     - "inss.egr.msu.edu"
     - "paper.ijcsns.org"
     - "www.tdx.cat"
+
+evidence_retrieval:
+  max_queries: 8
+  # Query instructions apply only on the query side; indexed passages remain
+  # unchanged. Disable for embedding models that do not use instructions.
+  query_instruction_enabled: true
+  query_instruction: >-
+    Given a scientific research question, retrieve passages that provide direct
+    experimental, methodological, quantitative, comparison, limitation, or
+    prior-art evidence.
+
+validation:
+  numeric_grounding_enabled: true
+  entailment_validation_enabled: true
+  audit_max_evidence_chars: 9000
 
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.
