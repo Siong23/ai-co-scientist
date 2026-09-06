@@ -2560,7 +2560,10 @@ limitation merely because the abstract states a positive headline result.
 The analytical rationale may connect established findings into promising
 research directions, but it must clearly distinguish established evidence from
 new inference. Optional exploration directions may guide analysis but are not
-requirements and need not be present in the literature.
+requirements and need not be present in the literature. Every required field
+must be present. The analytical_rationale must be a non-empty, concise paragraph
+that explains the evidence-to-gap logic; never return it as null or an empty
+string.
 
 Return only valid JSON:
 {{
@@ -2747,7 +2750,31 @@ Malformed response:
         if not established_findings:
             raise ValueError("No established finding cited a retrieved source.")
         if not analytical_rationale:
-            raise ValueError("Expected a non-empty analytical rationale.")
+            # Some local reasoning models occasionally return a complete,
+            # otherwise valid synthesis with only this prose field empty. The
+            # cited findings and gaps already contain everything needed for a
+            # conservative bridge, so recover locally instead of discarding the
+            # entire retrieval pass or making another long model call.
+            finding_summary = "; ".join(
+                finding.claim for finding in established_findings[:3]
+            )
+            rationale_parts = [
+                f"The cited literature establishes the following relevant evidence: {finding_summary}."
+            ]
+            if knowledge_gaps:
+                gap_summary = "; ".join(knowledge_gaps[:3])
+                rationale_parts.append(
+                    f"The review also leaves these questions unresolved: {gap_summary}."
+                )
+            rationale_parts.append(
+                "These unresolved questions motivate testable research directions "
+                "without treating the proposed directions as established findings."
+            )
+            analytical_rationale = " ".join(rationale_parts)
+            logger.warning(
+                "Literature synthesis omitted analytical_rationale; built a "
+                "conservative rationale from validated findings and gaps."
+            )
 
         synthesis = LiteratureSynthesis(
             established_findings=established_findings,

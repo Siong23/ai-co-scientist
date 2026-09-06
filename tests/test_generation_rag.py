@@ -1419,6 +1419,39 @@ def test_literature_synthesis_repairs_reasoning_with_inline_json_example():
     assert mock_call.call_args_list[1].kwargs["max_tokens"] == config["llm_max_tokens"]["format_repair"]
 
 
+def test_literature_synthesis_recovers_an_empty_analytical_rationale_locally():
+    aspects = (EvidenceAspect("core_topic", "The user-stated core topic."),)
+    payload = json.dumps(
+        {
+            "established_findings": [
+                {
+                    "claim": "Closed-loop allocation improves responsiveness.",
+                    "source_ids": ["arXiv:2205.15480v2"],
+                }
+            ],
+            "contradictions": [],
+            "knowledge_gaps": ["Performance during abrupt traffic spikes is unresolved."],
+            "analytical_rationale": "",
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Allocate 5G slice bandwidth during traffic spikes.",
+            aspects,
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+        )
+
+    assert synthesis_error is None
+    assert synthesis is not None
+    assert "Closed-loop allocation improves responsiveness." in synthesis.analytical_rationale
+    assert "abrupt traffic spikes" in synthesis.analytical_rationale
+    assert "established findings" in synthesis.analytical_rationale
+    assert mock_call.call_count == 1
+
+
 def test_reciprocal_rank_fusion_deduplicates_versions_and_rewards_recurrence():
     recurring_v1 = _paper(
         "2001.03488v1",
