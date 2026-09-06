@@ -6,6 +6,7 @@ from langchain_core.embeddings import Embeddings
 
 from app.models import ResearchGoal
 from app.paper_library import ChromaPaperLibrary, PaperChunk
+from app.rag_retriever import EvidenceAspect
 
 
 class FakeEmbeddings(Embeddings):
@@ -206,6 +207,30 @@ def test_generation_full_text_failure_falls_back_to_abstracts(monkeypatch):
     documents = [_document()]
 
     assert agent._enrich_with_full_text(documents, ResearchGoal("Reduce latency")) == documents
+
+
+def test_generation_full_text_enrichment_uses_explicit_requirements():
+    from app.agents_modules.generation import GenerationAgent
+
+    class RecordingLibrary:
+        def __init__(self):
+            self.queries = ()
+
+        def enrich_documents(self, documents, queries):
+            self.queries = queries
+            return list(documents)
+
+    library = RecordingLibrary()
+    agent = GenerationAgent(paper_library=library)
+    documents = [_document()]
+
+    assert agent._enrich_with_full_text(
+        documents,
+        ResearchGoal("Reduce latency"),
+        (EvidenceAspect("spikes", "traffic spike behavior"),),
+    ) == documents
+    assert library.queries[0] == "Reduce latency"
+    assert any("traffic spike behavior" in query for query in library.queries)
 
 
 def test_collection_name_changes_when_index_schema_changes(tmp_path):

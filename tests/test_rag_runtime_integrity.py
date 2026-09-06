@@ -29,7 +29,12 @@ def goal_plan():
     )
 
 
-def test_initial_search_overlaps_planning():
+def test_initial_search_overlaps_planning_when_models_can_run_concurrently(monkeypatch):
+    monkeypatch.setitem(
+        __import__("app.agents_modules.generation", fromlist=["config"]).config,
+        "serialize_lmstudio_model_calls",
+        False,
+    )
     agent = GenerationAgent()
     rendezvous = Barrier(2, timeout=3)
     plan = goal_plan()
@@ -54,6 +59,35 @@ def test_initial_search_overlaps_planning():
         ),
     ):
         assert agent._plan_and_retrieve_initial(goal) == (plan, None, [document])
+
+
+def test_initial_search_serializes_lmstudio_chat_and_embedding_models(monkeypatch):
+    module = __import__("app.agents_modules.generation", fromlist=["config"])
+    monkeypatch.setitem(module.config, "use_lmstudio_embeddings", True)
+    monkeypatch.setitem(module.config, "serialize_lmstudio_model_calls", True)
+    agent = GenerationAgent()
+    plan = goal_plan()
+    goal = ResearchGoal("5G slice bandwidth under traffic spikes")
+    document = Document(page_content="5G evidence", metadata={"source_id": "source1"})
+    events = []
+
+    def planning(*_args, **_kwargs):
+        events.append("planning")
+        return plan, None
+
+    def search(received_goal):
+        assert received_goal is goal
+        assert events == ["planning"]
+        events.append("retrieval")
+        return [document]
+
+    with (
+        patch.object(agent, "_retrieve_original_scientific_sources", side_effect=search),
+        patch("app.agents_modules.generation.call_llm_for_search_queries", side_effect=planning),
+    ):
+        assert agent._plan_and_retrieve_initial(goal) == (plan, None, [document])
+
+    assert events == ["planning", "retrieval"]
 
 
 def test_coverage_failure_cannot_manufacture_support():

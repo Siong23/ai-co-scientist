@@ -701,7 +701,7 @@ USER RESEARCH GOAL
         temperature=0.0,
         model=model,
         system_prompt=research_planner_prompt,
-        max_tokens=_output_token_limit("research_planning", 1200),
+        max_tokens=_output_token_limit("research_planning", 2400),
         reasoning="off",
     )
     if planner_response.startswith("Error:"):
@@ -720,12 +720,41 @@ USER RESEARCH GOAL
     )
 
     if legacy_query_response is None:
-        try:
-            research_plan = parse_research_plan(planner_response)
-            provisional_hypotheses = parse_provisional_hypotheses(research_plan)
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.error("Could not parse Research Planner response: %s", planner_response, exc_info=True)
-            return None, f"Query rewriting failed: Research planning failed: {exc}"
+        research_plan = None
+        planner_error: Exception | None = None
+        for attempt in range(2):
+            if attempt:
+                planner_response = _call_llm(
+                    planner_prompt
+                    + "\n\nYour previous response was invalid because: "
+                    + str(planner_error)
+                    + ". Recreate the complete plan as compact valid JSON. "
+                    "Use the exact required schema, exactly three provisional "
+                    "hypotheses, and the list-size limits in the system prompt.",
+                    temperature=0.0,
+                    model=model,
+                    system_prompt=research_planner_prompt,
+                    max_tokens=_output_token_limit("format_repair", 2048),
+                    reasoning="off",
+                )
+                if planner_response.startswith("Error:"):
+                    return None, f"Query rewriting failed: Research planning repair failed: {planner_response}"
+            try:
+                research_plan = parse_research_plan(planner_response)
+                provisional_hypotheses = parse_provisional_hypotheses(research_plan)
+                break
+            except (json.JSONDecodeError, ValueError) as exc:
+                planner_error = exc
+                logger.warning(
+                    "Research plan attempt %d was invalid: %s",
+                    attempt + 1,
+                    exc,
+                )
+                if attempt == 1:
+                    logger.error("Could not parse Research Planner response: %s", planner_response, exc_info=True)
+                    return None, f"Query rewriting failed: Research planning failed: {exc}"
+
+        assert research_plan is not None
 
         query_example = ",\n    ".join(
             f'{{"query": "query {index}", "purpose": "...", '
@@ -2568,26 +2597,41 @@ Retrieved sources:
         prompt,
         temperature=0.0,
         model=model,
+        max_tokens=_output_token_limit("literature_synthesis", 4096),
+        reasoning="off",
     )
     if response.startswith("Error:"):
         return None, f"Literature synthesis failed: {response}"
 
     def parse_payload(candidate_response: str) -> dict:
+        required_fields = {
+            "established_findings",
+            "contradictions",
+            "knowledge_gaps",
+            "analytical_rationale",
+        }
         cleaned_response = candidate_response.strip()
-        fenced_match = re.search(
-            r"```(?:json)?\s*(.*?)\s*```",
-            cleaned_response,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        if fenced_match:
-            cleaned_response = fenced_match.group(1).strip()
-        object_start = cleaned_response.find("{")
-        if object_start < 0:
-            raise ValueError("No JSON object was found.")
-        payload, _ = json.JSONDecoder().raw_decode(cleaned_response[object_start:])
-        if not isinstance(payload, dict):
-            raise ValueError("Expected a JSON object.")
-        return payload
+        fenced_blocks = [
+            match.group(1).strip()
+            for match in re.finditer(
+                r"```(?:json)?\s*(.*?)\s*```",
+                cleaned_response,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+        ]
+
+        # Reasoning-capable models can mention small inline JSON examples before
+        # emitting the requested object. Accept only a complete synthesis schema.
+        for candidate in [*fenced_blocks, cleaned_response]:
+            for object_match in re.finditer(r"\{", candidate):
+                try:
+                    payload, _ = json.JSONDecoder().raw_decode(candidate[object_match.start() :])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict) and required_fields.issubset(payload):
+                    return payload
+
+        raise ValueError("No complete literature-synthesis JSON object was found.")
 
     try:
         payload = parse_payload(response)
@@ -2618,6 +2662,8 @@ Malformed response:
             repair_prompt,
             temperature=0.0,
             model=model,
+            max_tokens=_output_token_limit("format_repair", 4096),
+            reasoning="off",
         )
         if repaired_response.startswith("Error:"):
             return None, f"Literature synthesis format repair failed: {repaired_response}"

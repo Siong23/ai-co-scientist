@@ -44,7 +44,7 @@ current_research_goal: Optional[ResearchGoal] = None
 available_models: List[str] = []
 CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
-CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "1800"))
+CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "900"))
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 _cycle_run_lock = threading.Lock()
 

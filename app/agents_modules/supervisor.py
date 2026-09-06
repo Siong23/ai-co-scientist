@@ -114,6 +114,10 @@ class SupervisorAgent:
         self.mode = str(mode or supervisor_config.get("mode", "sequential")).lower()
         self.planner_mode = str(supervisor_config.get("planner_mode", "heuristic")).lower()
         self.max_steps = max(1, int(supervisor_config.get("max_steps", 10)))
+        self.max_generation_steps_per_cycle = max(
+            1,
+            int(supervisor_config.get("max_generation_steps_per_cycle", 1)),
+        )
         self.generation_agent = GenerationAgent()
         self.reflection_agent = ReflectionAgent()
         self.ranking_agent = RankingAgent()
@@ -698,6 +702,7 @@ class SupervisorAgent:
         context.supervisor_state["pending_tasks"] = []
 
         step_count = 0
+        generation_step_count = 0
         stopped_reason = None
         while step_count < max_steps:
             if execution_cancelled():
@@ -747,6 +752,17 @@ class SupervisorAgent:
                             "Finalization gate found evidence gaps; evolving finalists with grounding strategies."
                         )
 
+            if (
+                decision.action == "GENERATE"
+                and generation_step_count >= self.max_generation_steps_per_cycle
+            ):
+                decision.action = "FINALIZE"
+                decision.reasoning = (
+                    "The Cycle has already completed its configured Generation batch; "
+                    "preserving current results instead of restarting the full retrieval pipeline."
+                )
+                stopped_reason = "generation_budget_exhausted"
+
             decision_dict = decision.to_dict()
             if requested_action != decision.action:
                 decision_dict["requested_action"] = requested_action
@@ -771,6 +787,7 @@ class SupervisorAgent:
                 break
 
             elif decision.action == "GENERATE":
+                generation_step_count += 1
                 last_new_hypotheses = self.step_generation(research_goal, context, publish, cycle_details)
                 if not last_new_hypotheses and not context.get_active_hypotheses() and cycle_details.get("errors"):
                     # Generation already exhausted its bounded retrieval/repair
@@ -852,7 +869,12 @@ class SupervisorAgent:
                 if finalization["ready"]
                 else (
                     "Generation could not produce verified candidates; inspect the reported evidence or model error."
-                    if stopped_reason else "Compute budget ended before every finalization requirement passed."
+                    if stopped_reason == "generation_failed"
+                    else (
+                        "The per-Cycle Generation budget ended; start another Cycle to request a new batch."
+                        if stopped_reason == "generation_budget_exhausted"
+                        else "Compute budget ended before every finalization requirement passed."
+                    )
                 )
             ),
             details=list(finalization["reasons"]),

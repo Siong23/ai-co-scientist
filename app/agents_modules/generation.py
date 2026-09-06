@@ -70,6 +70,10 @@ Determine:
    dataset, metric, protocol, or architecture absent from the user's goal.
    Put optional mechanisms in search angles instead of assuming them here.
 
+Keep the plan compact: use at most 5 key entities, 5 constraints, 6
+sub-questions, 5 evidence requirements, and 3 ambiguities. Keep every list
+item to at most 20 words.
+
 Do not provide the final answer.
 Do not generate search queries.
 Do not expose private chain-of-thought.
@@ -356,13 +360,21 @@ class GenerationAgent:
 
         return self.rag_retriever.retrieve_original_goal(research_goal.description)
 
-    def _enrich_with_full_text(self, documents, research_goal: ResearchGoal):
+    def _enrich_with_full_text(
+        self,
+        documents,
+        research_goal: ResearchGoal,
+        explicit_requirements=(),
+    ):
         """Use relevant PDF bodies when available without blocking generation."""
 
         try:
             return self.paper_library.enrich_documents(
                 documents,
-                build_evidence_queries(research_goal.description),
+                build_evidence_queries(
+                    research_goal.description,
+                    tuple(explicit_requirements),
+                ),
             )
         except Exception as exc:
             logger.warning(
@@ -384,6 +396,7 @@ class GenerationAgent:
         self,
         documents,
         research_goal: ResearchGoal,
+        explicit_requirements=(),
     ):
         """Retain only successfully indexed full text when strict mode is enabled."""
 
@@ -393,6 +406,7 @@ class GenerationAgent:
         enriched_documents = self._enrich_with_full_text(
             documents,
             research_goal,
+            explicit_requirements,
         )
         retained_documents = []
         for document in enriched_documents:
@@ -739,6 +753,7 @@ Your refined contribution:
             prepared_action_documents = self._prepare_candidate_documents(
                 action_documents,
                 research_goal,
+                query_plan.explicit_requirements,
             )
 
             if not prepared_action_documents:
@@ -839,10 +854,10 @@ Your refined contribution:
         return relevant_source_ids, relevance_error, coverage, coverage_error
 
     def _plan_and_retrieve_initial(self, research_goal: ResearchGoal):
-        """Overlap query planning with the independent original-goal search."""
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            retrieval = executor.submit(self._retrieve_original_scientific_sources, research_goal)
-            query_plan, rewrite_error = call_llm_for_search_queries(
+        """Plan queries and run the independent original-goal search."""
+
+        def plan_queries():
+            return call_llm_for_search_queries(
                 research_goal.description,
                 model=getattr(research_goal, "query_rewrite_model", research_goal.llm_model),
                 query_count=self.rag_retriever.query_count,
@@ -852,11 +867,29 @@ Your refined contribution:
                     research_goal.description, plan,
                 ),
             )
+
+        def retrieve_original_goal():
             try:
-                candidate_documents = retrieval.result()
+                return self._retrieve_original_scientific_sources(research_goal)
             except Exception as exc:
                 logger.warning("Original-goal retrieval failed: %s", redact_secrets(str(exc)))
-                candidate_documents = []
+                return []
+
+        # A local LM Studio server may unload the chat model while loading the
+        # embedding model (or vice versa). Avoid that cross-model race unless
+        # the operator explicitly opts into concurrent model calls.
+        serialize_lmstudio_calls = bool(config.get("use_lmstudio_embeddings", False)) and bool(
+            config.get("serialize_lmstudio_model_calls", True)
+        )
+        if serialize_lmstudio_calls:
+            query_plan, rewrite_error = plan_queries()
+            candidate_documents = retrieve_original_goal()
+            return query_plan, rewrite_error, candidate_documents
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            retrieval = executor.submit(retrieve_original_goal)
+            query_plan, rewrite_error = plan_queries()
+            candidate_documents = retrieval.result()
         return query_plan, rewrite_error, candidate_documents
 
     def generate_new_hypotheses(
@@ -944,6 +977,7 @@ Your refined contribution:
             documents_for_grading = self._prepare_candidate_documents(
                 candidate_documents,
                 research_goal,
+                query_plan.explicit_requirements,
             )
 
             # Format documents into a budget-capped context string for LLM grading
@@ -1165,6 +1199,7 @@ Your refined contribution:
             retrieved_documents = self._enrich_with_full_text(
                 retrieved_documents,
                 research_goal,
+                query_plan.explicit_requirements,
             )
 
         retrieved_context = format_documents_for_prompt(retrieved_documents)

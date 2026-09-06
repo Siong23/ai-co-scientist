@@ -370,6 +370,31 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert "must never become evidence gates" in " ".join(rewriter_system_prompt.split())
 
 
+def test_query_rewriting_retries_truncated_research_plan_once():
+    truncated_plan = '{"research_goal": "brief describe the malaysia history", "research_type": "discovery"'
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            truncated_plan,
+            _research_plan_payload(),
+            _query_plan_payload(query_count=5, hypothesis_guided=True),
+        ],
+    ) as mock_call:
+        plan, error = call_llm_for_search_queries(
+            "brief describe the malaysia history",
+            model="chosen-model",
+        )
+
+    assert error is None
+    assert plan is not None
+    assert mock_call.call_count == 3
+    repair_call = mock_call.call_args_list[1]
+    assert "previous response was invalid" in " ".join(repair_call.args[0].split())
+    assert repair_call.kwargs["max_tokens"] == config["llm_max_tokens"]["format_repair"]
+    assert repair_call.kwargs["reasoning"] == "off"
+
+
 def test_query_fidelity_failure_rewrites_once_before_search():
     validator = Mock(
         side_effect=[
@@ -1341,6 +1366,47 @@ def test_literature_synthesis_keeps_only_findings_with_retrieved_sources():
     assert synthesis is not None
     assert [finding.claim for finding in synthesis.established_findings] == ["Supported premise."]
     assert synthesis.established_findings[0].source_ids == ("arXiv:2205.15480v2",)
+
+
+def test_literature_synthesis_repairs_reasoning_with_inline_json_example():
+    aspects = (EvidenceAspect("core_topic", "The user-stated core topic."),)
+    reasoning_without_answer = (
+        'I should return evidence refs like {"source_id": "exact", '
+        '"chunk_id": "exact"}, then assemble the final response.'
+    )
+    repaired_payload = json.dumps(
+        {
+            "established_findings": [
+                {
+                    "claim": "Supported premise.",
+                    "source_ids": ["arXiv:2205.15480v2"],
+                }
+            ],
+            "contradictions": [],
+            "knowledge_gaps": ["A direct comparison remains unresolved."],
+            "analytical_rationale": "The premise motivates a testable comparison.",
+        }
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[reasoning_without_answer, repaired_payload],
+    ) as mock_call:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Compare two methods.",
+            aspects,
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+        )
+
+    assert synthesis_error is None
+    assert synthesis is not None
+    assert [finding.claim for finding in synthesis.established_findings] == ["Supported premise."]
+    assert mock_call.call_count == 2
+    assert all(call.kwargs["reasoning"] == "off" for call in mock_call.call_args_list)
+    assert mock_call.call_args_list[0].kwargs["max_tokens"] == config["llm_max_tokens"]["literature_synthesis"]
+    assert mock_call.call_args_list[1].kwargs["max_tokens"] == config["llm_max_tokens"]["format_repair"]
 
 
 def test_reciprocal_rank_fusion_deduplicates_versions_and_rewards_recurrence():

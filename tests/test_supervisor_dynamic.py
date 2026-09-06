@@ -9,6 +9,7 @@ from app.agents import (
     Hypothesis,
     ResearchGoal,
     SupervisorAgent,
+    SupervisorDecision,
     SupervisorPlanner,
     assess_supervisor_state,
     decide_action_heuristically,
@@ -246,6 +247,41 @@ def test_supervisor_run_dynamic_cycle():
     assert details["supervisor_state"]["status"] == "incomplete"
     assert context.supervisor_state["pending_tasks"] == []
     assert any(event.get("step") == "supervisor_planning" for event in details["research_trace"])
+
+
+def test_dynamic_cycle_does_not_repeat_full_generation_pipeline():
+    supervisor = SupervisorAgent()
+    supervisor.planner.plan_next_action = Mock(
+        return_value=SupervisorDecision(
+            action="GENERATE",
+            reasoning="Accepted count is below target.",
+        )
+    )
+    generated = _sample_hypothesis("H1")
+
+    def generate_once(_goal, context, _publish, _details):
+        context.add_hypothesis(generated)
+        return [generated]
+
+    supervisor.step_generation = Mock(side_effect=generate_once)
+    supervisor.step_meta_review = Mock()
+    supervisor.step_proximity = Mock(return_value={})
+    context = ContextMemory()
+
+    details = supervisor.run_dynamic_cycle(
+        ResearchGoal(description="Test bounded generation", num_hypotheses=4),
+        context,
+        max_steps=10,
+        planner_mode="heuristic",
+    )
+
+    assert supervisor.step_generation.call_count == 1
+    assert [item["action"] for item in details["supervisor_decisions"]] == [
+        "GENERATE",
+        "FINALIZE",
+    ]
+    assert details["supervisor_decisions"][-1]["requested_action"] == "GENERATE"
+    assert details["finalization"]["status"] == "generation_budget_exhausted"
 
 
 def test_assess_supervisor_state_with_proximity_data():

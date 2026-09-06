@@ -36,7 +36,7 @@ lmstudio_native_retry_backoff_seconds: 1.0
 # window when a prompt requests a small structured response.
 llm_default_max_tokens: 2048
 llm_max_tokens:
-  research_planning: 1200
+  research_planning: 2400
   query_rewriting: 1600
   relevance_grading: 512
   coverage_grading: 1024
@@ -106,6 +106,9 @@ supervisor:
   mode: "dynamic"
   planner_mode: "heuristic"
   max_steps: 10
+  # A Cycle produces one requested batch. Re-running the full literature and
+  # generation pipeline inside that Cycle can multiply runtime without bound.
+  max_generation_steps_per_cycle: 1
   convergence:
     min_snapshots: 2
     top_elo_delta: 2.0
@@ -153,6 +156,9 @@ step_temperatures:
 # Shared embedding model used by proximity analysis and RAG retrieval.
 # sentence_transformer_model: "all-MiniLM-L6-v2"
 use_lmstudio_embeddings: true
+# Loading chat and embedding models concurrently can make memory-constrained
+# LM Studio servers unload one model while the other request is still active.
+serialize_lmstudio_model_calls: true
 sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
 
 rag:
