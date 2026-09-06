@@ -426,7 +426,16 @@ class GenerationAgent:
                 or provider == "tavily"
                 or source_id.startswith(("web:", "tavily:"))
             )
-            if (is_web and metadata.get("content_extracted") is True) or metadata.get("full_text_indexed") is True:
+            has_full_text_passage = bool(metadata.get("full_text_chunks_used")) or any(
+                isinstance(ref, dict)
+                and ref.get("evidence_type") == "full_text"
+                and isinstance(ref.get("text"), str)
+                and ref["text"].strip()
+                for ref in metadata.get("evidence_refs", ())
+            )
+            if (is_web and metadata.get("content_extracted") is True) or (
+                metadata.get("full_text_indexed") is True and has_full_text_passage
+            ):
                 retained_documents.append(document)
         logger.info(
             "Evidence gate retained %d/%d source(s): web sources require "
@@ -494,6 +503,29 @@ class GenerationAgent:
                 ]
             )
         )[: self.rag_retriever.query_count]
+
+    @staticmethod
+    def _tag_corrective_queries(
+        query_texts: tuple[str, ...],
+        missing_aspects,
+    ) -> tuple[SearchQuery, ...]:
+        """Keep missing-requirement identity attached through retrieval/ranking."""
+
+        aspects_by_description = {aspect.description: aspect for aspect in missing_aspects}
+        sole_aspect = missing_aspects[0] if len(missing_aspects) == 1 else None
+        tagged_queries = []
+        for query_text in query_texts:
+            aspect = aspects_by_description.get(query_text) or sole_aspect
+            tagged_queries.append(
+                SearchQuery(
+                    query=query_text,
+                    sub_question=aspect.description if aspect is not None else query_text,
+                    purpose="Fill a missing explicit evidence requirement",
+                    source_type="all",
+                    evidence_requirement_id=aspect.aspect_id if aspect is not None else None,
+                )
+            )
+        return tuple(tagged_queries)
 
     def _run_scientific_debate(
         self,
@@ -1108,9 +1140,13 @@ Your refined contribution:
                         coverage,
                         missing_aspects,
                     )
+                    tagged_fallback_queries = self._tag_corrective_queries(
+                        fallback_queries,
+                        missing_aspects,
+                    )
 
                     fallback_plan = SearchQueryPlan(
-                        queries=(fallback_queries or query_plan.queries[: self.rag_retriever.query_count]),
+                        queries=(tagged_fallback_queries or query_plan.queries[: self.rag_retriever.query_count]),
                         required_terms=(),
                         explicit_requirements=(query_plan.explicit_requirements),
                         exploration_directions=(query_plan.exploration_directions),
@@ -1168,9 +1204,13 @@ Your refined contribution:
                 coverage,
                 missing_aspects,
             )
+            tagged_corrective_queries = self._tag_corrective_queries(
+                corrective_queries,
+                missing_aspects,
+            )
 
             gap_plan = SearchQueryPlan(
-                queries=corrective_queries,
+                queries=tagged_corrective_queries,
                 required_terms=(),
                 explicit_requirements=(query_plan.explicit_requirements),
                 exploration_directions=(query_plan.exploration_directions),

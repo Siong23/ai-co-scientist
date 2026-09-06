@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any, Sequence
 from urllib.parse import urlparse
 
@@ -33,6 +35,52 @@ class PaperChunk:
     evidence_type: str = "full_text"
     parser: str = "pypdf"
     schema_version: str = ""
+
+
+@dataclass(frozen=True)
+class ExtractedPaper:
+    """Parsed pages plus an honest record of parser-side truncation."""
+
+    pages: tuple[tuple[int, str], ...]
+    total_pages: int
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class ChunkedPaper:
+    """Bounded chunks plus an honest record of chunker-side truncation."""
+
+    chunks: tuple[Document, ...]
+    truncated: bool
+
+
+@dataclass(frozen=True)
+class IndexIntegrityReport:
+    """Source-level comparison between the manifest and Chroma records."""
+
+    source_id: str
+    status: str
+    expected_count: int
+    actual_count: int
+    missing_ids: tuple[str, ...] = ()
+    stale_ids: tuple[str, ...] = ()
+    content_hash_mismatches: tuple[str, ...] = ()
+    metadata_mismatches: tuple[str, ...] = ()
+    truncated: bool = False
+
+    @property
+    def records_valid(self) -> bool:
+        return not (
+            self.missing_ids
+            or self.stale_ids
+            or self.content_hash_mismatches
+            or self.metadata_mismatches
+            or self.expected_count != self.actual_count
+        )
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "COMMITTED" and not self.truncated and self.records_valid
 
 
 class ChromaPaperLibrary:
@@ -83,6 +131,7 @@ class ChromaPaperLibrary:
         self.embeddings = embeddings or SharedSentenceTransformerEmbeddings()
         self._client = client
         self._vector_store = None
+        self._manifest_lock = RLock()
 
     @property
     def collection_name(self) -> str:
@@ -99,6 +148,12 @@ class ChromaPaperLibrary:
         model_hash = hashlib.sha256(schema_key.encode("utf-8")).hexdigest()[:12]
         safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", self.collection_prefix).strip("_-")
         return f"{safe_prefix or 'research_papers'}_{model_hash}"
+
+    @property
+    def manifest_path(self) -> Path:
+        """Keep the source-integrity ledger beside its Chroma collection."""
+
+        return self.persist_directory / f"{self.collection_name}.manifest.json"
 
     def _get_vector_store(self):
         if self._vector_store is not None:
@@ -120,6 +175,183 @@ class ChromaPaperLibrary:
             },
         )
         return self._vector_store
+
+    @staticmethod
+    def _empty_manifest() -> dict[str, Any]:
+        return {"manifest_version": 1, "sources": {}}
+
+    def _read_manifest(self) -> dict[str, Any]:
+        if not self.manifest_path.exists():
+            return self._empty_manifest()
+        try:
+            payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or not isinstance(payload.get("sources"), dict):
+                raise ValueError("manifest must contain a sources object")
+            return payload
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("Ignoring invalid paper index manifest %s: %s", self.manifest_path, exc)
+            return self._empty_manifest()
+
+    def _write_manifest(self, manifest: dict[str, Any]) -> None:
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.manifest_path.with_suffix(self.manifest_path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(self.manifest_path)
+
+    def _manifest_source(self, source_id: str) -> dict[str, Any] | None:
+        with self._manifest_lock:
+            record = self._read_manifest()["sources"].get(source_id)
+        return dict(record) if isinstance(record, dict) else None
+
+    def _set_manifest_source(self, source_id: str, record: dict[str, Any]) -> None:
+        with self._manifest_lock:
+            manifest = self._read_manifest()
+            manifest["sources"][source_id] = record
+            self._write_manifest(manifest)
+
+    def _set_manifest_status(self, source_id: str, status: str, failure_reason: str = "") -> None:
+        with self._manifest_lock:
+            manifest = self._read_manifest()
+            record = manifest["sources"].get(source_id)
+            if not isinstance(record, dict):
+                return
+            record["status"] = status
+            record["failure_reason"] = failure_reason
+            manifest["sources"][source_id] = record
+            self._write_manifest(manifest)
+
+    def get_index_status(self, source_id: str) -> str:
+        """Return the durable source state without treating PARTIAL as complete."""
+
+        record = self._manifest_source(source_id.strip())
+        return str(record.get("status", "MISSING")) if record else "MISSING"
+
+    def _current_index_signature(self) -> dict[str, Any]:
+        return {
+            "collection_name": self.collection_name,
+            "embedding_model": self.embedding_model,
+            "schema_version": self.index_schema_version,
+            "parser_version": self.parser_version,
+            "chunking_version": self.chunking_version,
+            "max_pages_per_paper": self.max_pages_per_paper,
+            "max_chunks_per_paper": self.max_chunks_per_paper,
+        }
+
+    @staticmethod
+    def _content_hash(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _critical_chunk_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: metadata.get(key)
+            for key in (
+                "source_id",
+                "chunk_id",
+                "chunk_index",
+                "chunk_count",
+                "content_sha256",
+                "page",
+                "schema_version",
+                "parser_version",
+                "chunking_version",
+                "index_completeness",
+            )
+        }
+
+    def _stored_source_records(self, source_id: str) -> dict[str, tuple[str, dict[str, Any]]]:
+        result = self._get_vector_store().get(
+            where={"source_id": source_id},
+            include=["documents", "metadatas"],
+        )
+        ids = list(result.get("ids") or [])
+        documents = list(result.get("documents") or [])
+        metadatas = list(result.get("metadatas") or [])
+        records: dict[str, tuple[str, dict[str, Any]]] = {}
+        for index, chunk_id in enumerate(ids):
+            text = documents[index] if index < len(documents) and documents[index] is not None else ""
+            metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
+            records[str(chunk_id)] = (str(text), dict(metadata))
+        return records
+
+    def verify_indexed_source(self, source_id: str) -> IndexIntegrityReport:
+        """Compare all stored records with the durable expected source manifest."""
+
+        normalized_source_id = source_id.strip()
+        if not normalized_source_id:
+            return IndexIntegrityReport("", "MISSING", 0, 0)
+
+        record = self._manifest_source(normalized_source_id)
+        actual_records = self._stored_source_records(normalized_source_id)
+        if record is None:
+            return IndexIntegrityReport(
+                normalized_source_id,
+                "MISSING",
+                0,
+                len(actual_records),
+                stale_ids=tuple(sorted(actual_records)),
+            )
+
+        expected_records = record.get("chunks")
+        if not isinstance(expected_records, dict):
+            expected_records = {}
+        expected_ids = set(expected_records)
+        actual_ids = set(actual_records)
+        missing_ids = tuple(sorted(expected_ids - actual_ids))
+        stale_ids = tuple(sorted(actual_ids - expected_ids))
+        content_mismatches: list[str] = []
+        metadata_mismatches: list[str] = []
+
+        for chunk_id in sorted(expected_ids & actual_ids):
+            expected = expected_records.get(chunk_id)
+            if not isinstance(expected, dict):
+                metadata_mismatches.append(chunk_id)
+                continue
+            actual_text, actual_metadata = actual_records[chunk_id]
+            expected_hash = str(expected.get("content_sha256", ""))
+            if not expected_hash or self._content_hash(actual_text) != expected_hash:
+                content_mismatches.append(chunk_id)
+            expected_metadata = expected.get("metadata")
+            if (
+                not isinstance(expected_metadata, dict)
+                or self._critical_chunk_metadata(actual_metadata) != expected_metadata
+            ):
+                metadata_mismatches.append(chunk_id)
+
+        signature = record.get("index_signature")
+        if signature != self._current_index_signature():
+            metadata_mismatches.append("__index_signature__")
+        if record.get("expected_chunk_count") != len(expected_ids):
+            metadata_mismatches.append("__expected_chunk_count__")
+        expected_ids_hash = self._content_hash("\n".join(sorted(expected_ids)))
+        if record.get("expected_chunk_ids_sha256") != expected_ids_hash:
+            metadata_mismatches.append("__expected_chunk_ids_sha256__")
+        pdf_path = self._pdf_path(normalized_source_id)
+        if pdf_path.exists() and record.get("document_sha256") != self._file_hash(pdf_path):
+            content_mismatches.append("__document_sha256__")
+
+        return IndexIntegrityReport(
+            source_id=normalized_source_id,
+            status=str(record.get("status", "MISSING")),
+            expected_count=len(expected_ids),
+            actual_count=len(actual_ids),
+            missing_ids=missing_ids,
+            stale_ids=stale_ids,
+            content_hash_mismatches=tuple(content_mismatches),
+            metadata_mismatches=tuple(metadata_mismatches),
+            truncated=bool(record.get("truncated", False)),
+        )
 
     @staticmethod
     def _normalize_queries(queries: str | Sequence[str]) -> tuple[str, ...]:
@@ -149,6 +381,7 @@ class ChromaPaperLibrary:
             : self.candidate_download_limit
         ]
         indexed_source_ids: set[str] = set()
+        partial_source_ids: set[str] = set()
         newly_indexed = 0
         failed_source_ids: set[str] = set()
         for document in candidates:
@@ -162,6 +395,8 @@ class ChromaPaperLibrary:
                 if self.ensure_indexed(document):
                     indexed_source_ids.add(source_id)
                     newly_indexed += 1
+                elif self.get_index_status(source_id) == "PARTIAL":
+                    partial_source_ids.add(source_id)
                 else:
                     failed_source_ids.add(source_id)
             except Exception as exc:
@@ -217,8 +452,12 @@ class ChromaPaperLibrary:
             metadata["full_text_indexed"] = source_id in indexed_source_ids
             metadata["full_text_available"] = bool(metadata.get("content_extracted") or metadata["full_text_indexed"])
             metadata["full_text_chunks_used"] = len(source_chunks)
+            metadata["index_status"] = self.get_index_status(source_id)
+            metadata["index_truncated"] = source_id in partial_source_ids
             if source_id in indexed_source_ids:
                 evidence_status = "full_text"
+            elif source_id in partial_source_ids:
+                evidence_status = "full_text_partial"
             elif source_id in failed_source_ids:
                 evidence_status = "full_text_failed"
             else:
@@ -270,14 +509,12 @@ class ChromaPaperLibrary:
         return enriched
 
     def has_indexed_source(self, source_id: str) -> bool:
-        """Return whether Chroma already contains full-text chunks for a source."""
+        """Return True only for an exact, complete, committed source index."""
 
         normalized_source_id = source_id.strip()
         if not normalized_source_id:
             return False
-        vector_store = self._get_vector_store()
-        existing = vector_store.get(where={"source_id": normalized_source_id}, limit=1, include=["metadatas"])
-        return bool(existing.get("ids"))
+        return self.verify_indexed_source(normalized_source_id).ok
 
     def search_many(
         self,
@@ -332,7 +569,7 @@ class ChromaPaperLibrary:
         return [chunks_by_id[chunk_id] for chunk_id in ranked_ids[: (top_k or self.top_k_chunks)]]
 
     def ensure_indexed(self, document: Document) -> bool:
-        """Download, extract, embed, and upsert one paper unless already cached."""
+        """Build, verify, and logically commit one complete paper index."""
 
         source_id = str(document.metadata.get("source_id", "")).strip()
         pdf_url = str(document.metadata.get("pdf_url", "")).strip()
@@ -342,24 +579,123 @@ class ChromaPaperLibrary:
         if self.has_indexed_source(source_id):
             return True
 
+        existing_report = self.verify_indexed_source(source_id)
+        if existing_report.status == "PARTIAL" and existing_report.records_valid:
+            logger.warning(
+                "Source %s remains PARTIAL because configured ingestion limits truncated it.",
+                source_id,
+            )
+            return False
+
         vector_store = self._get_vector_store()
 
         pdf_path = self._pdf_path(source_id)
         if not pdf_path.exists():
             self._download_pdf(pdf_url, pdf_path)
-        pages = self._extract_pages(pdf_path)
-        chunks = self._chunk_pages(source_id, document, pages)
+        extracted = self._extract_pages(pdf_path)
+        if isinstance(extracted, ExtractedPaper):
+            pages = extracted.pages
+            pages_truncated = extracted.truncated
+            total_pages = extracted.total_pages
+        else:
+            # Preserve compatibility with parser test doubles and custom parsers.
+            pages = tuple(extracted)
+            pages_truncated = False
+            total_pages = len(pages)
+
+        chunked = self._chunk_pages(source_id, document, pages)
+        if isinstance(chunked, ChunkedPaper):
+            chunks = list(chunked.chunks)
+            chunks_truncated = chunked.truncated
+        else:
+            # Preserve compatibility with custom chunkers returning a plain list.
+            chunks = list(chunked)
+            chunks_truncated = False
         if not chunks:
             logger.warning("No extractable full text found in %s.", source_id)
             return False
 
-        ids = []
+        truncated = pages_truncated or chunks_truncated
+        index_completeness = "partial" if truncated else "complete"
+        ids: list[str] = []
         for index, chunk in enumerate(chunks):
             chunk_id = self._chunk_id(source_id, int(chunk.metadata["page"]), index, chunk.page_content)
-            chunk.metadata["chunk_id"] = chunk_id
+            chunk.metadata.update(
+                {
+                    "chunk_id": chunk_id,
+                    "chunk_index": index,
+                    "chunk_count": len(chunks),
+                    "content_sha256": self._content_hash(chunk.page_content),
+                    "index_completeness": index_completeness,
+                }
+            )
             ids.append(chunk_id)
-        vector_store.add_documents(documents=chunks, ids=ids)
-        logger.info("Indexed %d full-text chunks for %s in Chroma.", len(chunks), source_id)
+
+        expected_chunks = {
+            chunk_id: {
+                "content_sha256": str(chunk.metadata["content_sha256"]),
+                "metadata": self._critical_chunk_metadata(chunk.metadata),
+            }
+            for chunk_id, chunk in zip(ids, chunks)
+        }
+        truncation_reasons = []
+        if pages_truncated:
+            truncation_reasons.append(f"page limit {self.max_pages_per_paper} of {total_pages} pages")
+        if chunks_truncated:
+            truncation_reasons.append(f"chunk limit {self.max_chunks_per_paper}")
+        manifest_record = {
+            "status": "INDEXING",
+            "failure_reason": "",
+            "document_sha256": self._file_hash(pdf_path),
+            "expected_chunk_count": len(ids),
+            "expected_chunk_ids_sha256": self._content_hash("\n".join(sorted(ids))),
+            "truncated": truncated,
+            "truncation_reasons": truncation_reasons,
+            "index_signature": self._current_index_signature(),
+            "chunks": expected_chunks,
+        }
+        self._set_manifest_source(source_id, manifest_record)
+
+        try:
+            vector_store.add_documents(documents=chunks, ids=ids)
+            report = self.verify_indexed_source(source_id)
+            if report.missing_ids or report.content_hash_mismatches or report.metadata_mismatches:
+                raise ValueError(
+                    "Chroma read-after-write verification failed "
+                    f"(missing={len(report.missing_ids)}, "
+                    f"content_mismatches={len(report.content_hash_mismatches)}, "
+                    f"metadata_mismatches={len(report.metadata_mismatches)})."
+                )
+            if report.stale_ids:
+                vector_store.delete(ids=list(report.stale_ids))
+                report = self.verify_indexed_source(source_id)
+            if not report.records_valid:
+                raise ValueError(
+                    "Chroma source verification failed after stale-record repair "
+                    f"(expected={report.expected_count}, actual={report.actual_count})."
+                )
+
+            if truncated:
+                reason = "; ".join(truncation_reasons)
+                self._set_manifest_status(source_id, "PARTIAL", reason)
+                logger.warning(
+                    "Indexed %d verified chunks for %s, but the source is PARTIAL: %s.",
+                    len(chunks),
+                    source_id,
+                    reason,
+                )
+                return False
+
+            self._set_manifest_status(source_id, "COMMITTED")
+            committed_report = self.verify_indexed_source(source_id)
+            if not committed_report.ok:
+                self._set_manifest_status(source_id, "FAILED", "post-commit verification failed")
+                return False
+        except Exception as exc:
+            self._set_manifest_status(source_id, "FAILED", str(exc))
+            raise
+
+        logger.info("Indexed and verified %d full-text chunks for %s in Chroma.", len(chunks), source_id)
         return True
 
     def search(self, query: str, source_ids: Sequence[str], top_k: int | None = None) -> list[PaperChunk]:
@@ -444,11 +780,12 @@ class ChromaPaperLibrary:
         if parsed.scheme not in {"http", "https"} or host not in self.allowed_pdf_hosts:
             raise ValueError(f"PDF host is not allowed: {host or 'missing host'}")
 
-    def _extract_pages(self, pdf_path: Path) -> list[tuple[int, str]]:
+    def _extract_pages(self, pdf_path: Path) -> ExtractedPaper:
         from pypdf import PdfReader
 
         reader = PdfReader(str(pdf_path))
         pages: list[tuple[int, str]] = []
+        total_pages = len(reader.pages)
         for page_number, page in enumerate(reader.pages[: self.max_pages_per_paper], start=1):
             raw_text = (page.extract_text() or "").replace("\r\n", "\n").replace("\r", "\n")
             lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw_text.split("\n")]
@@ -456,14 +793,18 @@ class ChromaPaperLibrary:
             text = re.sub(r"\n{3,}", "\n\n", text).strip()
             if text:
                 pages.append((page_number, text))
-        return pages
+        return ExtractedPaper(
+            pages=tuple(pages),
+            total_pages=total_pages,
+            truncated=total_pages > self.max_pages_per_paper,
+        )
 
     def _chunk_pages(
         self,
         source_id: str,
         document: Document,
         pages: Sequence[tuple[int, str]],
-    ) -> list[Document]:
+    ) -> ChunkedPaper:
         title = str(document.metadata.get("title", "Untitled"))
         pdf_url = str(document.metadata.get("pdf_url", ""))
         page_documents = [
@@ -486,13 +827,14 @@ class ChromaPaperLibrary:
             )
             for page, text in pages
         ]
-        chunks: list[Document] = []
+        all_chunks: list[Document] = []
         for page_document in page_documents:
             for text in self._split_text(page_document.page_content):
-                chunks.append(Document(page_content=text, metadata=dict(page_document.metadata)))
-                if len(chunks) >= self.max_chunks_per_paper:
-                    return chunks
-        return chunks
+                all_chunks.append(Document(page_content=text, metadata=dict(page_document.metadata)))
+        return ChunkedPaper(
+            chunks=tuple(all_chunks[: self.max_chunks_per_paper]),
+            truncated=len(all_chunks) > self.max_chunks_per_paper,
+        )
 
     def _split_text(self, text: str) -> list[str]:
         """Split on paragraph, line, sentence, then word boundaries when possible."""

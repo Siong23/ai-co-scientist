@@ -667,11 +667,12 @@ class ResearchRetriever:
 
         tasks = []
         if include_arxiv and academic_queries:
-            tasks.append(("arXiv", len(academic_queries), lambda: self._arxiv_results(academic_queries)))
+            tasks.append(("arXiv", len(academic_queries), self.arxiv, lambda: self._arxiv_results(academic_queries)))
         tasks.extend(
             (
                 source_name,
                 len(academic_queries),
+                source,
                 lambda source_name=source_name, provider=provider, source=source: self._source_results(
                     source_name,
                     provider,
@@ -688,6 +689,7 @@ class ResearchRetriever:
                 (
                     source_name,
                     len(web_queries),
+                    source,
                     lambda source_name=source_name, provider=provider, source=source: self._source_results(
                         source_name,
                         provider,
@@ -707,30 +709,43 @@ class ResearchRetriever:
         started_at = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = [
-                (source_name, query_total, executor.submit(search)) for source_name, query_total, search in tasks
+                (source_name, query_total, source, executor.submit(search))
+                for source_name, query_total, source, search in tasks
             ]
             ranked_results: list[list[EvidenceSource]] = []
-            for source_name, query_total, future in futures:
+            for source_name, query_total, source, future in futures:
                 try:
                     source_results = future.result()
                     ranked_results.extend(source_results)
+                    completed = len(source_results)
+                    result_count = sum(len(results) for results in source_results)
+                    error_status = getattr(source, "last_error_status", None)
+                    if completed < query_total and error_status in (429, 503):
+                        status = "rate_limited"
+                    elif completed < query_total:
+                        status = "partial"
+                    elif result_count == 0:
+                        status = "zero_yield"
+                    else:
+                        status = "ok"
                     logger.info(
-                        "%s search completed queries=%d/%d results=%d elapsed_ms=%d",
+                        "%s search completed queries=%d/%d results=%d status=%s elapsed_ms=%d",
                         source_name,
-                        len(source_results),
+                        completed,
                         query_total,
-                        sum(len(results) for results in source_results),
+                        result_count,
+                        status,
                         int((time.monotonic() - started_at) * 1000),
                     )
                     self.last_search_stats.append(
                         {
                             "round": search_round,
                             "source": source_name,
-                            "queries_completed": len(source_results),
+                            "queries_completed": completed,
                             "queries_requested": query_total,
-                            "results": sum(len(results) for results in source_results),
+                            "results": result_count,
                             "elapsed_ms": int((time.monotonic() - started_at) * 1000),
-                            "status": "ok",
+                            "status": status,
                         }
                     )
                 except Exception as exc:
@@ -858,7 +873,11 @@ class ResearchRetriever:
             len(documents),
             score_field="document_rerank_score",
         )
-        selected = list(ranked_documents[: min(self.top_k, len(ranked_documents))])
+        selected = self._select_requirement_aware_documents(
+            vector_store,
+            ranked_documents,
+            query_plan,
+        )
         selected = self._promote_downloadable_documents(selected, ranked_documents)
         selected = self._extract_selected_web_documents(selected, original_query)
         logger.info(
@@ -868,6 +887,88 @@ class ResearchRetriever:
             len(documents),
             [document.metadata.get("source_id") for document in selected],
         )
+        return selected
+
+    @staticmethod
+    def _document_requirement_ids(document: Document) -> set[str]:
+        """Return every requirement lane that produced a candidate."""
+
+        requirement_ids: set[str] = set()
+        direct_id = str(document.metadata.get("evidence_requirement_id") or "").strip()
+        if direct_id:
+            requirement_ids.add(direct_id)
+        for context in document.metadata.get("query_contexts", ()):
+            if not isinstance(context, dict):
+                continue
+            context_id = str(context.get("evidence_requirement_id") or "").strip()
+            if context_id:
+                requirement_ids.add(context_id)
+        return requirement_ids
+
+    def _select_requirement_aware_documents(
+        self,
+        vector_store: InMemoryVectorStore,
+        globally_ranked: Sequence[Document],
+        query_plan: SearchQueryPlan,
+    ) -> list[Document]:
+        """Reserve the best candidate from each planned requirement lane."""
+
+        active_requirement_ids = {
+            query.evidence_requirement_id for query in query_plan.queries if query.evidence_requirement_id
+        }
+        if not active_requirement_ids:
+            return list(globally_ranked[: min(self.top_k, len(globally_ranked))])
+
+        selected: list[Document] = []
+        selected_ids: set[str] = set()
+        for aspect in query_plan.explicit_requirements:
+            if aspect.aspect_id not in active_requirement_ids or len(selected) >= self.top_k:
+                continue
+            lane_ids = {
+                str(document.metadata.get("source_id", ""))
+                for document in globally_ranked
+                if aspect.aspect_id in self._document_requirement_ids(document)
+            }
+            if not lane_ids:
+                continue
+            lane_ranking = self._similarity_rank_documents(
+                vector_store,
+                aspect.description,
+                len(globally_ranked),
+                score_field="requirement_rerank_score",
+            )
+            lane_candidates = [
+                document for document in lane_ranking if str(document.metadata.get("source_id", "")) in lane_ids
+            ]
+            usable_candidates = [
+                document
+                for document in lane_candidates
+                if document.metadata.get("source_type") == "web" or self._has_allowed_pdf(document)
+            ]
+            candidate_pool = usable_candidates or lane_candidates
+            winner = next(
+                (
+                    document
+                    for document in candidate_pool
+                    if str(document.metadata.get("source_id", "")) not in selected_ids
+                ),
+                None,
+            )
+            if winner is None:
+                continue
+            source_id = str(winner.metadata.get("source_id", ""))
+            metadata = dict(winner.metadata)
+            metadata["reserved_requirement_ids"] = [aspect.aspect_id]
+            selected.append(Document(page_content=winner.page_content, metadata=metadata))
+            selected_ids.add(source_id)
+
+        for document in globally_ranked:
+            if len(selected) >= self.top_k:
+                break
+            source_id = str(document.metadata.get("source_id", ""))
+            if source_id and source_id not in selected_ids:
+                selected.append(document)
+                selected_ids.add(source_id)
         return selected
 
     @staticmethod
@@ -1265,6 +1366,7 @@ class ResearchRetriever:
                     for index in range(len(selected) - 1, -1, -1)
                     if selected[index].metadata.get("source_type") != "web"
                     and not self._has_allowed_pdf(selected[index])
+                    and not selected[index].metadata.get("reserved_requirement_ids")
                 ),
                 None,
             )
@@ -1337,32 +1439,7 @@ class ResearchRetriever:
         if not ranked_results:
             return []
 
-        fused_evidence = reciprocal_rank_fusion(ranked_results, k=self.rrf_k)
-        documents = [
-            self._evidence_to_document(evidence) for evidence in fused_evidence if evidence.text and evidence.source_id
-        ]
-        if not documents:
-            logger.info(
-                "Fallback search returned no documents for query %r.",
-                original_query,
-            )
-            return []
-
-        vector_store = InMemoryVectorStore(embedding=self.embeddings)
-        vector_store.add_documents(
-            documents=documents,
-            ids=[str(document.metadata["source_id"]) for document in documents],
-        )
-        selected = vector_store.similarity_search(
-            original_query,
-            k=min(self.top_k, len(documents)),
-        )
-        logger.info(
-            "Fallback search selected %d source(s) from %d candidate(s).",
-            len(selected),
-            len(documents),
-        )
-        return selected
+        return self._rank_documents(original_query, query_plan, ranked_results)
 
     def _evidence_to_document(
         self,
@@ -1655,6 +1732,7 @@ def serialize_documents(
             "preferred_domains": document.metadata.get("preferred_domains", []),
             "freshness": document.metadata.get("freshness"),
             "evidence_requirement_id": document.metadata.get("evidence_requirement_id"),
+            "reserved_requirement_ids": document.metadata.get("reserved_requirement_ids", []),
             "query_contexts": document.metadata.get("query_contexts", []),
             "parent_source_id": document.metadata.get("parent_source_id"),
             "chunk_id": document.metadata.get("chunk_id"),
@@ -1674,6 +1752,8 @@ def serialize_documents(
             "rrf_score": document.metadata.get("rrf_score"),
             "full_text_indexed": document.metadata.get("full_text_indexed", False),
             "full_text_chunks_used": document.metadata.get("full_text_chunks_used", 0),
+            "index_status": document.metadata.get("index_status"),
+            "index_truncated": document.metadata.get("index_truncated", False),
             "evidence_status": document.metadata.get("evidence_status", "abstract_only"),
             "evidence_mode": document.metadata.get("evidence_mode", "abstract_only"),
             "evidence_refs": document.metadata.get("evidence_refs", []),

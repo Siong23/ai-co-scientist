@@ -485,6 +485,9 @@ def test_corrective_query_round_prioritizes_missing_requirements_and_caps_count(
         "telecom multi-agent architecture",
         "autonomous monitoring metrics",
     )
+    tagged = agent._tag_corrective_queries(queries, missing_aspects)
+    assert [query.evidence_requirement_id for query in tagged] == ["architecture", "metrics"]
+    assert [query.sub_question for query in tagged] == list(queries)
 
 
 def test_query_rewriter_accepts_structured_query_objects():
@@ -2141,6 +2144,76 @@ def test_pdf_promotion_does_not_evict_direct_web_evidence():
     assert documents[0].metadata["source_type"] == "web"
 
 
+def test_requirement_lanes_preserve_narrow_evidence_before_global_top_k():
+    retriever = ArxivRAGRetriever(query_count=2, top_k=2, minimum_relevant_sources=1)
+    retriever.minimum_downloadable_sources = 0
+    plan = SearchQueryPlan(
+        queries=(
+            SearchQuery(
+                "traffic spike prediction",
+                evidence_requirement_id="spikes",
+            ),
+            SearchQuery(
+                "real-time multi-agent latency",
+                evidence_requirement_id="latency",
+            ),
+        ),
+        required_terms=(),
+        explicit_requirements=(
+            EvidenceAspect("spikes", "traffic spike prediction evidence"),
+            EvidenceAspect("latency", "real-time multi-agent latency evidence"),
+        ),
+    )
+    generic_one = _paper("2401.00001", "Generic 5G AI", "Broad 5G bandwidth and AI background.")
+    generic_two = _paper("2401.00002", "Generic network AI", "Broad network optimization background.")
+    spike_specific = _paper("2401.00003", "Traffic bursts", "Measured traffic-spike prediction evidence.")
+    spike_specific["evidence_requirement_id"] = "spikes"
+    latency_specific = _paper("2401.00004", "Real-time agents", "Measured multi-agent control latency evidence.")
+    latency_specific["evidence_requirement_id"] = "latency"
+
+    class RequirementRankingStore:
+        def __init__(self, *args, **kwargs):
+            self.documents = []
+
+        def add_documents(self, documents, ids):
+            self.documents = list(documents)
+
+        def similarity_search_with_score(self, query, k):
+            order = {
+                "broad research goal": ["arXiv:2401.00001", "arXiv:2401.00002", "arXiv:2401.00003", "arXiv:2401.00004"],
+                "traffic spike prediction evidence": [
+                    "arXiv:2401.00003",
+                    "arXiv:2401.00001",
+                    "arXiv:2401.00002",
+                    "arXiv:2401.00004",
+                ],
+                "real-time multi-agent latency evidence": [
+                    "arXiv:2401.00004",
+                    "arXiv:2401.00001",
+                    "arXiv:2401.00002",
+                    "arXiv:2401.00003",
+                ],
+            }[query]
+            by_id = {document.metadata["source_id"]: document for document in self.documents}
+            return [(by_id[source_id], 1.0 - index / 10) for index, source_id in enumerate(order[:k])]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", RequirementRankingStore):
+        documents = retriever._rank_documents(
+            "broad research goal",
+            plan,
+            [[generic_one, generic_two, spike_specific, latency_specific]],
+        )
+
+    assert [document.metadata["source_id"] for document in documents] == [
+        "arXiv:2401.00003",
+        "arXiv:2401.00004",
+    ]
+    assert [document.metadata["reserved_requirement_ids"] for document in documents] == [
+        ["spikes"],
+        ["latency"],
+    ]
+
+
 def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_sources():
     indexed = Document(
         page_content="Indexed evidence",
@@ -2148,6 +2221,18 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
             "source_id": "arXiv:1111.1111",
             "source_type": "academic",
             "full_text_indexed": True,
+            "full_text_chunks_used": 1,
+            "evidence_refs": [{"evidence_type": "full_text", "text": "Indexed evidence"}],
+        },
+    )
+    indexed_without_passage = Document(
+        page_content="Abstract only despite a cached source",
+        metadata={
+            "source_id": "arXiv:3333.3333",
+            "source_type": "academic",
+            "full_text_indexed": True,
+            "full_text_chunks_used": 0,
+            "evidence_refs": [{"evidence_type": "abstract_only", "text": "Abstract only"}],
         },
     )
     web_content = Document(
@@ -2188,7 +2273,7 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
     agent = GenerationAgent(paper_library=StrictPaperLibrary())
 
     assert agent._prepare_candidate_documents(
-        [indexed, web_content, search_only_web, academic_abstract_only],
+        [indexed, indexed_without_passage, web_content, search_only_web, academic_abstract_only],
         ResearchGoal("Use downloadable evidence"),
     ) == [indexed, web_content]
 
@@ -2210,6 +2295,12 @@ def test_retrieval_stops_arxiv_batch_after_rate_limit():
         retriever.retrieve("original goal", query_plan)
 
     assert retriever.arxiv.search_papers.call_count == 1
+    arxiv_stats = next(stat for stat in retriever.last_search_stats if stat["source"] == "arXiv")
+    assert arxiv_stats["queries_completed"] == 1
+    assert arxiv_stats["queries_requested"] == 3
+    assert arxiv_stats["status"] == "rate_limited"
+    semantic_stats = next(stat for stat in retriever.last_search_stats if stat["source"] == "Semantic Scholar")
+    assert semantic_stats["status"] == "zero_yield"
 
 
 def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():
@@ -2230,6 +2321,10 @@ def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():
 
     # The remaining rewritten queries are skipped after the first rate-limit signal.
     assert retriever.semantic_scholar.search_papers.call_count == 1
+    semantic_stats = next(stat for stat in retriever.last_search_stats if stat["source"] == "Semantic Scholar")
+    assert semantic_stats["queries_completed"] == 1
+    assert semantic_stats["queries_requested"] == 3
+    assert semantic_stats["status"] == "rate_limited"
 
 
 def test_semantic_scholar_fallback_fuses_and_reranks_results():
@@ -2888,6 +2983,8 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "scientific goal",
         "targeted requested outcome evidence",
     )
+    assert {query.evidence_requirement_id for query in gap_plan.queries} == {"requested_outcome"}
+    assert all(query.sub_question == "scientific goal" for query in gap_plan.queries)
     assert gap_plan.required_terms == ()
     assert len(context.last_retrieved_sources) == 2
     second_coverage_context = mock_coverage.call_args_list[1].args[2]

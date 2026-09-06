@@ -85,6 +85,155 @@ def test_indexes_pdf_chunks_in_persistent_chroma_and_reuses_cache(tmp_path, monk
     assert reopened.ensure_indexed(_document()) is True
 
 
+def test_one_orphaned_chunk_never_counts_as_a_complete_source(tmp_path):
+    library = _library(tmp_path)
+    source_id = "arXiv:partial"
+    library._get_vector_store().add_documents(
+        documents=[Document(page_content="Only one interrupted chunk", metadata={"source_id": source_id})],
+        ids=["orphaned-chunk"],
+    )
+
+    report = library.verify_indexed_source(source_id)
+
+    assert report.status == "MISSING"
+    assert report.stale_ids == ("orphaned-chunk",)
+    assert library.has_indexed_source(source_id) is False
+
+
+def test_missing_corrupt_and_stale_chunks_are_detected_and_repaired(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    source_id = "arXiv:repair"
+    document = _document(source_id)
+    monkeypatch.setattr(
+        library,
+        "_download_pdf",
+        lambda _url, destination: (
+            destination.parent.mkdir(parents=True, exist_ok=True),
+            destination.write_bytes(b"%PDF-repair"),
+        ),
+    )
+    monkeypatch.setattr(
+        library,
+        "_extract_pages",
+        lambda _path: [(1, "Latency evidence. " * 80), (2, "Traffic spike evidence. " * 80)],
+    )
+    assert library.ensure_indexed(document) is True
+
+    vector_store = library._get_vector_store()
+    expected_ids = set(library._manifest_source(source_id)["chunks"])
+    damaged_id, missing_id = sorted(expected_ids)[:2]
+    stored = vector_store.get(ids=[damaged_id], include=["metadatas"])
+    damaged_metadata = dict(stored["metadatas"][0])
+    vector_store.add_documents(
+        documents=[Document(page_content="corrupted content", metadata=damaged_metadata)],
+        ids=[damaged_id],
+    )
+    vector_store.delete(ids=[missing_id])
+    vector_store.add_documents(
+        documents=[Document(page_content="stale content", metadata={"source_id": source_id})],
+        ids=["stale-chunk"],
+    )
+
+    damaged = library.verify_indexed_source(source_id)
+    assert missing_id in damaged.missing_ids
+    assert damaged_id in damaged.content_hash_mismatches
+    assert damaged.stale_ids == ("stale-chunk",)
+    assert library.has_indexed_source(source_id) is False
+
+    assert library.ensure_indexed(document) is True
+    repaired = library.verify_indexed_source(source_id)
+    assert repaired.ok is True
+    assert set(library._stored_source_records(source_id)) == expected_ids
+
+
+def test_interrupted_index_write_is_failed_then_repairable(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    source_id = "arXiv:interrupted"
+    document = _document(source_id)
+    monkeypatch.setattr(
+        library,
+        "_download_pdf",
+        lambda _url, destination: (
+            destination.parent.mkdir(parents=True, exist_ok=True),
+            destination.write_bytes(b"%PDF-interrupted"),
+        ),
+    )
+    monkeypatch.setattr(library, "_extract_pages", lambda _path: [(1, "Latency evidence. " * 80)])
+    vector_store = library._get_vector_store()
+    add_documents = vector_store.add_documents
+
+    def interrupted_write(*, documents, ids):
+        add_documents(documents=documents[:1], ids=ids[:1])
+        raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(vector_store, "add_documents", interrupted_write)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        library.ensure_indexed(document)
+
+    assert library.get_index_status(source_id) == "FAILED"
+    assert library.has_indexed_source(source_id) is False
+
+    monkeypatch.setattr(vector_store, "add_documents", add_documents)
+    assert library.ensure_indexed(document) is True
+    assert library.verify_indexed_source(source_id).ok is True
+
+
+def test_silent_partial_write_fails_read_after_write_verification(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    source_id = "arXiv:silent-partial"
+    document = _document(source_id)
+    monkeypatch.setattr(
+        library,
+        "_download_pdf",
+        lambda _url, destination: (
+            destination.parent.mkdir(parents=True, exist_ok=True),
+            destination.write_bytes(b"%PDF-silent-partial"),
+        ),
+    )
+    monkeypatch.setattr(library, "_extract_pages", lambda _path: [(1, "Latency evidence. " * 80)])
+    vector_store = library._get_vector_store()
+    add_documents = vector_store.add_documents
+
+    def partial_write(*, documents, ids):
+        add_documents(documents=documents[:1], ids=ids[:1])
+
+    monkeypatch.setattr(vector_store, "add_documents", partial_write)
+    with pytest.raises(ValueError, match="read-after-write verification failed"):
+        library.ensure_indexed(document)
+
+    report = library.verify_indexed_source(source_id)
+    assert report.status == "FAILED"
+    assert report.missing_ids
+    assert library.has_indexed_source(source_id) is False
+
+
+def test_ingestion_truncation_is_partial_and_not_generation_eligible(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    library.max_chunks_per_paper = 1
+    source_id = "arXiv:truncated"
+    document = _document(source_id)
+    monkeypatch.setattr(
+        library,
+        "_download_pdf",
+        lambda _url, destination: (
+            destination.parent.mkdir(parents=True, exist_ok=True),
+            destination.write_bytes(b"%PDF-truncated"),
+        ),
+    )
+    monkeypatch.setattr(library, "_extract_pages", lambda _path: [(1, "Latency evidence. " * 80)])
+
+    assert library.ensure_indexed(document) is False
+    assert library.get_index_status(source_id) == "PARTIAL"
+    assert library.verify_indexed_source(source_id).records_valid is True
+    assert library.has_indexed_source(source_id) is False
+
+    enriched = library.enrich_documents([document], "latency")
+    assert enriched[0].metadata["full_text_indexed"] is False
+    assert enriched[0].metadata["index_status"] == "PARTIAL"
+    assert enriched[0].metadata["index_truncated"] is True
+    assert enriched[0].metadata["evidence_status"] == "full_text_partial"
+
+
 def test_search_is_restricted_to_selected_source_ids(tmp_path, monkeypatch):
     library = _library(tmp_path)
     monkeypatch.setattr(
