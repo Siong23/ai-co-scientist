@@ -796,6 +796,11 @@ without turning optional ideas into hard requirements.
   conclusions. Use hypothesis_id to link hypothesis-guided queries. Include at
   least one support query, one counterevidence query, and one prior_art query;
   label each with search_intent. Preserve the original goal as the authority.
+- Make every prior_art query specific enough to test novelty: combine the
+  focal intervention or control paradigm, the resource or task being managed,
+  and the application domain. Include common technical synonyms already
+  implied by the goal. Do not use a generic closed-loop or background query as
+  the only prior-art search.
 
 Return only valid JSON with this extended shape:
 {{

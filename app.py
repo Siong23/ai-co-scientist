@@ -343,8 +343,16 @@ def execute_cycle(
                 )
         elif finalization and not finalization.get("ready", False):
             unmet = "; ".join(finalization.get("reasons", [])) or "final quality requirements were not met"
+            finalization_status = str(finalization.get("status", ""))
+            if finalization_status == "generation_budget_exhausted":
+                headline = (
+                    f"⚠️ Cycle {iteration} completed its bounded Generation/Evolution work "
+                    "but did not pass the final quality gate"
+                )
+            else:
+                headline = f"⚠️ Cycle {iteration} reached its compute budget before finalization"
             status_msg = (
-                f"⚠️ Cycle {iteration} reached its compute budget before finalization ({unmet}).\n\n"
+                f"{headline} ({unmet}).\n\n"
                 f"{to_bold('Execution Time:')} {formatted_time}\n"
                 f"{to_bold('Log:')} {log_file}"
             )

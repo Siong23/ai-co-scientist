@@ -368,6 +368,7 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert "Search Planner" in rewriter_system_prompt
     assert "goal_quote copied verbatim" in rewriter_system_prompt
     assert "must never become evidence gates" in " ".join(rewriter_system_prompt.split())
+    assert "Make every prior_art query specific enough to test novelty" in rewriter_system_prompt
 
 
 def test_query_rewriting_retries_truncated_research_plan_once():
@@ -393,6 +394,15 @@ def test_query_rewriting_retries_truncated_research_plan_once():
     assert "previous response was invalid" in " ".join(repair_call.args[0].split())
     assert repair_call.kwargs["max_tokens"] == config["llm_max_tokens"]["format_repair"]
     assert repair_call.kwargs["reasoning"] == "off"
+
+
+def test_hypothesis_auditor_prompt_uses_conservative_novelty_anchors():
+    from app.agents_modules.generation import HYPOTHESIS_AUDITOR_SYSTEM_PROMPT
+
+    normalized = " ".join(HYPOTHESIS_AUDITOR_SYSTEM_PROMPT.split())
+    assert "related-work passages" in normalized
+    assert "score 5-6 for an incremental recombination" in normalized
+    assert "reserve 8-10 for a genuinely new mechanism" in normalized
 
 
 def test_query_fidelity_failure_rewrites_once_before_search():

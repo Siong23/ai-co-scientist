@@ -180,6 +180,9 @@ For each candidate:
    hypothesis, but it must not be presented as an established fact.
 3. Identify the closest retrieved prior art when academic sources are supplied
    and determine whether the proposed contribution substantially duplicates it.
+   Inspect related-work passages inside the supplied full text, not only paper
+   titles and abstracts. A renamed combination of known prediction, learning,
+   coordination, and resource-allocation components is not a new mechanism.
 4. Judge whether the candidate synthesizes a genuine unresolved interaction
    across retrieved sources instead of merely combining keywords.
 5. Require a clear, plausible intermediate mechanism from intervention to
@@ -201,6 +204,11 @@ fractions on a 0-to-1 scale. The draft_unsupported fields record problems found
 in the original candidate. The remaining_unsupported fields must describe only
 problems still present in final_hypothesis after revision; return empty arrays
 when the final version has fixed them.
+Use conservative novelty anchors: score 0-4 when substantially the same
+intervention, control paradigm, resource target, and outcome already appear in
+the supplied prior art; score 5-6 for an incremental recombination or a new
+evaluation condition; reserve 8-10 for a genuinely new mechanism or
+experimental design with a clearly stated residual contribution.
 Do not expose private chain-of-thought; provide concise audit findings only.
 
 Return only valid JSON:

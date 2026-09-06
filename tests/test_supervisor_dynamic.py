@@ -252,18 +252,19 @@ def test_supervisor_run_dynamic_cycle():
 def test_dynamic_cycle_does_not_repeat_full_generation_pipeline():
     supervisor = SupervisorAgent()
     supervisor.planner.plan_next_action = Mock(
-        return_value=SupervisorDecision(
+        side_effect=lambda *_args, **_kwargs: SupervisorDecision(
             action="GENERATE",
             reasoning="Accepted count is below target.",
         )
     )
-    generated = _sample_hypothesis("H1")
+    generated = _sample_hypothesis("H1", "ACCEPT")
 
     def generate_once(_goal, context, _publish, _details):
         context.add_hypothesis(generated)
         return [generated]
 
     supervisor.step_generation = Mock(side_effect=generate_once)
+    supervisor.step_evolution = Mock(return_value=[])
     supervisor.step_meta_review = Mock()
     supervisor.step_proximity = Mock(return_value={})
     context = ContextMemory()
@@ -278,10 +279,48 @@ def test_dynamic_cycle_does_not_repeat_full_generation_pipeline():
     assert supervisor.step_generation.call_count == 1
     assert [item["action"] for item in details["supervisor_decisions"]] == [
         "GENERATE",
+        "EVOLVE",
         "FINALIZE",
     ]
+    assert supervisor.step_evolution.call_count == 1
     assert details["supervisor_decisions"][-1]["requested_action"] == "GENERATE"
     assert details["finalization"]["status"] == "generation_budget_exhausted"
+
+
+def test_generation_cap_routes_unreviewed_candidates_to_reflection():
+    supervisor = SupervisorAgent()
+    supervisor.planner.plan_next_action = Mock(
+        side_effect=lambda *_args, **_kwargs: SupervisorDecision(
+            action="GENERATE", reasoning="Generate more candidates."
+        )
+    )
+    generated = _sample_hypothesis("H1")
+
+    def generate_once(_goal, context, _publish, _details):
+        context.add_hypothesis(generated)
+        return [generated]
+
+    def reflect_once(_goal, context, _publish, _details, **_kwargs):
+        context.hypotheses["H1"].reflection_report = _sample_hypothesis("review", "ACCEPT").reflection_report
+
+    supervisor.step_generation = Mock(side_effect=generate_once)
+    supervisor.step_reflection = Mock(side_effect=reflect_once)
+    supervisor.step_evolution = Mock(return_value=[])
+    supervisor.step_meta_review = Mock()
+    supervisor.step_proximity = Mock(return_value={})
+
+    details = supervisor.run_dynamic_cycle(
+        ResearchGoal(description="Review before evolution", num_hypotheses=4),
+        ContextMemory(),
+        max_steps=10,
+        planner_mode="heuristic",
+    )
+
+    actions = [item["action"] for item in details["supervisor_decisions"]]
+    assert actions == ["GENERATE", "REFLECT", "EVOLVE", "FINALIZE"]
+    assert supervisor.step_generation.call_count == 1
+    assert supervisor.step_reflection.call_count == 1
+    assert supervisor.step_evolution.call_count == 1
 
 
 def test_assess_supervisor_state_with_proximity_data():

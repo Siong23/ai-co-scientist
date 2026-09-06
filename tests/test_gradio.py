@@ -598,6 +598,33 @@ def test_execute_cycle_uses_configured_supervisor_entrypoint(gradio_app_module, 
     assert "completed successfully" in result["status"]
 
 
+def test_execute_cycle_reports_bounded_quality_gate_without_claiming_timeout(
+    gradio_app_module, monkeypatch, tmp_path
+):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.chdir(tmp_path)
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {
+            "ready": False,
+            "status": "generation_budget_exhausted",
+            "reasons": ["Need another accepted hypothesis."],
+        },
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Bounded quality gate test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    assert "completed its bounded Generation/Evolution work" in result["status"]
+    assert "reached its compute budget" not in result["status"]
+
+
 def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
     from app.run_store import RUNS_DIR_ENV

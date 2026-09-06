@@ -756,12 +756,35 @@ class SupervisorAgent:
                 decision.action == "GENERATE"
                 and generation_step_count >= self.max_generation_steps_per_cycle
             ):
-                decision.action = "FINALIZE"
-                decision.reasoning = (
-                    "The Cycle has already completed its configured Generation batch; "
-                    "preserving current results instead of restarting the full retrieval pipeline."
-                )
-                stopped_reason = "generation_budget_exhausted"
+                active_hypotheses = context.get_active_hypotheses()
+                routing = _reflection_routing(active_hypotheses)
+                actions_taken = {
+                    str(item.get("action", "")).upper()
+                    for item in supervisor_decisions
+                    if isinstance(item, dict)
+                }
+                if routing["unreviewed"]:
+                    decision.action = "REFLECT"
+                    decision.reasoning = (
+                        "The bounded Generation batch is complete; reviewing its remaining candidates "
+                        "instead of repeating retrieval and generation."
+                    )
+                    decision.target_hypothesis_ids = [
+                        hypothesis.hypothesis_id for hypothesis in routing["unreviewed"]
+                    ]
+                elif active_hypotheses and "EVOLVE" not in actions_taken:
+                    decision.action = "EVOLVE"
+                    decision.reasoning = (
+                        "The bounded Generation batch is complete but the acceptance gate is not met; "
+                        "using one Evolution pass to repair and diversify the strongest existing candidates."
+                    )
+                else:
+                    decision.action = "FINALIZE"
+                    decision.reasoning = (
+                        "The Cycle has exhausted its bounded Generation and Evolution opportunities; "
+                        "preserving the reviewed results for the next Cycle."
+                    )
+                    stopped_reason = "generation_budget_exhausted"
 
             decision_dict = decision.to_dict()
             if requested_action != decision.action:
