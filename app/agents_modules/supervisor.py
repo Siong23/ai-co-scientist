@@ -194,6 +194,15 @@ class SupervisorAgent:
         if not isinstance(raw_generation_warnings, (list, tuple)):
             raw_generation_warnings = []
         generation_warnings = [str(warning) for warning in raw_generation_warnings if str(warning).strip()]
+        evidence_pipeline = generation_diagnostics.get("evidence_pipeline", [])
+        if not isinstance(evidence_pipeline, list):
+            evidence_pipeline = []
+        evidence_funnel = generation_diagnostics.get("evidence_funnel", {})
+        if not isinstance(evidence_funnel, dict):
+            evidence_funnel = {}
+        corrective_history = generation_diagnostics.get("corrective_history", [])
+        if not isinstance(corrective_history, list):
+            corrective_history = []
         evidence_consumed = generation_diagnostics.get("evidence_consumed")
         if not isinstance(evidence_consumed, bool):
             evidence_consumed = bool(new_hypotheses and generation_sources)
@@ -242,6 +251,9 @@ class SupervisorAgent:
             "search_stats": list(getattr(self.generation_agent.rag_retriever, "last_search_stats", [])),
             "query_plan": query_plan_details,
             "query_fidelity": list(query_fidelity),
+            "evidence_funnel": dict(evidence_funnel),
+            "evidence_pipeline": list(evidence_pipeline),
+            "corrective_history": list(corrective_history),
             "stages": {
                 name: dict(generation_diagnostics.get(name, {}))
                 for name in (
@@ -259,6 +271,20 @@ class SupervisorAgent:
             verdict = str(audit.get("verdict") or audit.get("status") or "unknown").upper()
             audit_counts[verdict] = audit_counts.get(verdict, 0) + 1
         generation_details = _generation_stage_details(generation_diagnostics)
+        if evidence_funnel:
+            generation_details.append(
+                "Evidence funnel: "
+                f"{evidence_funnel.get('raw_search_hits', 0)} raw hits → "
+                f"{evidence_funnel.get('unique_candidates', 0)} unique candidates → "
+                f"{evidence_funnel.get('selected_sources', 0)} selected → "
+                f"{evidence_funnel.get('committed_sources', 0)} committed → "
+                f"{evidence_funnel.get('retrieved_passages', 0)} passages → "
+                f"{evidence_funnel.get('coverage_approved_sources', 0)} coverage-approved."
+            )
+        searched_source_count = len(generation_sources)
+        raw_unique_candidates = evidence_funnel.get("unique_candidates", 0)
+        if isinstance(raw_unique_candidates, (int, float)):
+            searched_source_count = max(searched_source_count, int(raw_unique_candidates))
         generation_details.extend(_source_details(generation_sources))
         for hypothesis in query_plan_details["provisional_hypotheses"]:
             generation_details.append(
@@ -284,6 +310,7 @@ class SupervisorAgent:
             details=generation_details,
             elapsed_seconds=time.perf_counter() - phase_started,
             sources=generation_sources,
+            source_count=searched_source_count,
         )
 
         if generation_errors:
@@ -584,6 +611,7 @@ class SupervisorAgent:
             details: Optional[List[str]] = None,
             elapsed_seconds: Optional[float] = None,
             sources: Optional[List[Mapping[str, Any]]] = None,
+            source_count: Optional[int] = None,
         ) -> None:
             event: Dict[str, Any] = {
                 "step": step,
@@ -592,7 +620,7 @@ class SupervisorAgent:
                 "summary": summary,
                 "details": details or [],
                 "sources": sources or [],
-                "source_count": len(sources or []),
+                "source_count": max(len(sources or []), int(source_count or 0)),
             }
             if elapsed_seconds is not None:
                 event["elapsed_seconds"] = elapsed_seconds
@@ -721,6 +749,7 @@ class SupervisorAgent:
             details: Optional[List[str]] = None,
             elapsed_seconds: Optional[float] = None,
             sources: Optional[List[Mapping[str, Any]]] = None,
+            source_count: Optional[int] = None,
         ) -> None:
             event: Dict[str, Any] = {
                 "step": step,
@@ -729,7 +758,7 @@ class SupervisorAgent:
                 "summary": summary,
                 "details": details or [],
                 "sources": sources or [],
-                "source_count": len(sources or []),
+                "source_count": max(len(sources or []), int(source_count or 0)),
             }
             if elapsed_seconds is not None:
                 event["elapsed_seconds"] = elapsed_seconds

@@ -780,6 +780,12 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     html += f"<li><strong>{stage_label}:</strong> {status}{suffix}</li>"
                 html += "</ul>"
             search_stats = step_data.get("search_stats", [])
+            evidence_funnel = step_data.get("evidence_funnel", {})
+            if not isinstance(evidence_funnel, dict):
+                evidence_funnel = {}
+            evidence_pipeline = step_data.get("evidence_pipeline", [])
+            if not isinstance(evidence_pipeline, list):
+                evidence_pipeline = []
             query_plan = step_data.get("query_plan", {})
             if not isinstance(query_plan, dict):
                 query_plan = {}
@@ -796,6 +802,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     provisional_hypotheses,
                     planned_queries,
                     query_fidelity,
+                    evidence_pipeline,
                 )
             )
             if has_search_details:
@@ -843,6 +850,33 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         f"{int(stat.get('elapsed_ms', 0))} ms ({status})</li>"
                     )
                 if isinstance(search_stats, list) and search_stats:
+                    html += "</ul>"
+                if evidence_funnel:
+                    html += (
+                        "<p><strong>Evidence funnel:</strong> "
+                        f"{int(evidence_funnel.get('raw_search_hits', 0))} raw search hits → "
+                        f"{int(evidence_funnel.get('unique_candidates', 0))} unique candidates → "
+                        f"{int(evidence_funnel.get('selected_sources', 0))} selected sources → "
+                        f"{int(evidence_funnel.get('acquisition_attempts', 0))} acquisition attempts → "
+                        f"{int(evidence_funnel.get('committed_sources', 0))} COMMITTED sources → "
+                        f"{int(evidence_funnel.get('retrieved_passages', 0))} passages → "
+                        f"{int(evidence_funnel.get('coverage_approved_sources', 0))} coverage-approved → "
+                        f"{int(evidence_funnel.get('generation_consumed_sources', 0))} generation-consumed.</p>"
+                    )
+                if evidence_pipeline:
+                    html += "<p><strong>Evidence loss diagnostics:</strong></p><ul>"
+                    for item in evidence_pipeline:
+                        if not isinstance(item, dict):
+                            continue
+                        source_id = html_lib.escape(str(item.get("candidate_source_id") or "unknown"))
+                        requirement_id = html_lib.escape(str(item.get("requirement_id") or "unscoped"))
+                        acquisition = html_lib.escape(str(item.get("acquisition_result") or "not_attempted"))
+                        gate_reason = html_lib.escape(str(item.get("strict_gate_rejection_reason") or "not_evaluated"))
+                        html += (
+                            f"<li>{requirement_id}: {source_id} — acquisition={acquisition}, "
+                            f"index={html_lib.escape(str(item.get('index_status') or 'MISSING'))}, "
+                            f"passages={len(item.get('selected_chunk_ids') or [])}, gate={gate_reason}</li>"
+                        )
                     html += "</ul>"
                 html += "</details>"
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"

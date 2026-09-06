@@ -38,6 +38,8 @@ class TavilySearchTool:
         self.extract_chunks_per_source = max(1, min(5, extract_chunks_per_source))
         self.api_key = os.environ.get("TAVILY_API_KEY", "").strip()
         self.last_error_status: int | None = None
+        self.last_error_kind: str | None = None
+        self.last_error_detail: str = ""
 
     @property
     def is_configured(self) -> bool:
@@ -59,6 +61,8 @@ class TavilySearchTool:
             return []
 
         self.last_error_status = None
+        self.last_error_kind = None
+        self.last_error_detail = ""
         limit = max_results if max_results is not None else self.max_results
         domains = list(
             dict.fromkeys(str(domain).strip().casefold() for domain in include_domains if str(domain).strip())
@@ -104,6 +108,14 @@ class TavilySearchTool:
             self.last_error_status = self.last_error_status or getattr(
                 getattr(exc, "response", None), "status_code", None
             )
+            self.last_error_kind = (
+                "timeout"
+                if isinstance(exc, requests.Timeout)
+                else "rate_limited"
+                if self.last_error_status in (429, 503)
+                else "provider_error"
+            )
+            self.last_error_detail = redact_secrets(str(exc))
             logger.error("Tavily search failed for query %r: %s", query, redact_secrets(str(exc)))
             return []
 
@@ -122,6 +134,8 @@ class TavilySearchTool:
 
         chunk_limit = self.extract_chunks_per_source if chunks_per_source is None else max(1, min(5, chunks_per_source))
         self.last_error_status = None
+        self.last_error_kind = None
+        self.last_error_detail = ""
         try:
             response = requests.post(
                 _EXTRACT_URL,
@@ -152,6 +166,14 @@ class TavilySearchTool:
             self.last_error_status = self.last_error_status or getattr(
                 getattr(exc, "response", None), "status_code", None
             )
+            self.last_error_kind = (
+                "timeout"
+                if isinstance(exc, requests.Timeout)
+                else "rate_limited"
+                if self.last_error_status in (429, 503)
+                else "provider_error"
+            )
+            self.last_error_detail = redact_secrets(str(exc))
             logger.error(
                 "Tavily extract failed for %d URL(s): %s",
                 len(selected_urls),

@@ -35,6 +35,7 @@ class PaperChunk:
     evidence_type: str = "full_text"
     parser: str = "pypdf"
     schema_version: str = ""
+    requirement_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,10 @@ class ChromaPaperLibrary:
         )
         # Backwards-compatible alias for callers that configured the old name.
         self.max_papers_per_run = self.candidate_download_limit
+        self.per_requirement_acquisition_limit = max(
+            1,
+            int(library_config.get("per_requirement_acquisition_limit", 2)),
+        )
         self.max_pages_per_paper = max(1, int(library_config.get("max_pages_per_paper", 20)))
         self.max_chunks_per_paper = max(1, int(library_config.get("max_chunks_per_paper", 24)))
         self.chunk_size = max(500, int(library_config.get("chunk_size_chars", 2400)))
@@ -132,6 +137,16 @@ class ChromaPaperLibrary:
         self._client = client
         self._vector_store = None
         self._manifest_lock = RLock()
+        self.last_evidence_diagnostics: list[dict[str, Any]] = []
+        self._diagnostics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        self._attempted_source_ids: set[str] = set()
+
+    def begin_run(self) -> None:
+        """Reset bounded acquisition state and diagnostics for one generation run."""
+
+        self.last_evidence_diagnostics = []
+        self._diagnostics_by_key = {}
+        self._attempted_source_ids = set()
 
     @property
     def collection_name(self) -> str:
@@ -361,10 +376,116 @@ class ChromaPaperLibrary:
             values = tuple(str(query) for query in queries)
         return tuple(dict.fromkeys(query.strip() for query in values if query.strip()))
 
+    @staticmethod
+    def _normalize_query_specs(queries: str | Sequence[Any]) -> tuple[tuple[str, str], ...]:
+        """Keep optional requirement identity attached to full-text queries."""
+
+        values = (queries,) if isinstance(queries, str) else tuple(queries)
+        specs: list[tuple[str, str]] = []
+        for query in values:
+            text = str(getattr(query, "query", query)).strip()
+            requirement_id = str(getattr(query, "evidence_requirement_id", "") or "").strip()
+            if text and (text, requirement_id) not in specs:
+                specs.append((text, requirement_id))
+        return tuple(specs)
+
+    @staticmethod
+    def _document_requirement_ids(document: Document) -> tuple[str, ...]:
+        requirement_ids: list[str] = []
+        for value in document.metadata.get("reserved_requirement_ids", ()):
+            normalized = str(value or "").strip()
+            if normalized and normalized not in requirement_ids:
+                requirement_ids.append(normalized)
+        direct = str(document.metadata.get("evidence_requirement_id") or "").strip()
+        if direct and direct not in requirement_ids:
+            requirement_ids.append(direct)
+        for context in document.metadata.get("query_contexts", ()):
+            if not isinstance(context, dict):
+                continue
+            normalized = str(context.get("evidence_requirement_id") or "").strip()
+            if normalized and normalized not in requirement_ids:
+                requirement_ids.append(normalized)
+        return tuple(requirement_ids)
+
+    def _record_evidence_diagnostic(
+        self,
+        document: Document,
+        requirement_id: str,
+        *,
+        query: str = "",
+        candidate_rank: int | None = None,
+        pdf_eligible: bool | None = None,
+        acquisition_attempted: bool | None = None,
+        acquisition_result: str | None = None,
+        selected_chunk_ids: Sequence[str] | None = None,
+    ) -> None:
+        source_id = str(document.metadata.get("source_id") or "")
+        key = (source_id, requirement_id)
+        diagnostic = self._diagnostics_by_key.get(
+            key,
+            {
+                "requirement_id": requirement_id or None,
+                "query": query or document.metadata.get("retrieval_query") or document.metadata.get("search_query"),
+                "provider": document.metadata.get("provider") or document.metadata.get("source"),
+                "raw_result_count": document.metadata.get("raw_result_count"),
+                "candidate_source_id": source_id,
+                "candidate_rank": candidate_rank,
+                "reserved_for_requirement": bool(requirement_id),
+                "pdf_eligible": bool(document.metadata.get("pdf_url")),
+                "acquisition_attempted": False,
+                "acquisition_result": "not_attempted",
+                "index_status": self.get_index_status(source_id) if source_id else "MISSING",
+                "full_text_chunk_count": 0,
+                "selected_chunk_ids": [],
+                "strict_gate_retained": False,
+                "strict_gate_rejection_reason": "not_evaluated",
+                "coverage_contribution": False,
+            },
+        )
+        if query:
+            diagnostic["query"] = query
+        if candidate_rank is not None:
+            diagnostic["candidate_rank"] = candidate_rank
+        if pdf_eligible is not None:
+            diagnostic["pdf_eligible"] = pdf_eligible
+        if acquisition_attempted is not None:
+            diagnostic["acquisition_attempted"] = acquisition_attempted
+        if acquisition_result is not None:
+            diagnostic["acquisition_result"] = acquisition_result
+        if selected_chunk_ids is not None:
+            diagnostic["selected_chunk_ids"] = list(dict.fromkeys(selected_chunk_ids))
+        if source_id:
+            status = self.get_index_status(source_id)
+            diagnostic["index_status"] = status
+            if status != "MISSING":
+                diagnostic["full_text_chunk_count"] = self.verify_indexed_source(source_id).actual_count
+        self._diagnostics_by_key[key] = diagnostic
+        self.last_evidence_diagnostics = list(self._diagnostics_by_key.values())
+
+    def record_strict_gate(self, source_id: str, *, retained: bool, reason: str) -> None:
+        """Attach strict-gate decisions to every diagnostic lane for a source."""
+
+        for (candidate_source_id, _requirement_id), diagnostic in self._diagnostics_by_key.items():
+            if candidate_source_id == source_id:
+                diagnostic["strict_gate_retained"] = retained
+                diagnostic["strict_gate_rejection_reason"] = reason
+        self.last_evidence_diagnostics = list(self._diagnostics_by_key.values())
+
+    def record_coverage(self, aspect_source_ids: dict[str, Sequence[str]]) -> None:
+        """Persist which strict evidence records contributed to requirement coverage."""
+
+        for (source_id, requirement_id), diagnostic in self._diagnostics_by_key.items():
+            if requirement_id:
+                contributes = source_id in set(aspect_source_ids.get(requirement_id, ()))
+            else:
+                contributes = any(source_id in set(source_ids) for source_ids in aspect_source_ids.values())
+            diagnostic["coverage_contribution"] = contributes
+        self.last_evidence_diagnostics = list(self._diagnostics_by_key.values())
+
     def enrich_documents(
         self,
         documents: Sequence[Document],
-        queries: str | Sequence[str],
+        queries: str | Sequence[Any],
     ) -> list[Document]:
         """Acquire shortlisted PDFs, retrieve passages, and attach provenance.
 
@@ -373,58 +494,213 @@ class ChromaPaperLibrary:
         """
 
         original_documents = list(documents)
-        normalized_queries = self._normalize_queries(queries)
-        if not self.enabled or not original_documents or not normalized_queries:
+        query_specs = self._normalize_query_specs(queries)
+        if not self.enabled or not original_documents or not query_specs:
             return original_documents
 
-        candidates = [document for document in original_documents if document.metadata.get("pdf_url")][
-            : self.candidate_download_limit
-        ]
+        query_by_requirement = {requirement_id: text for text, requirement_id in query_specs if requirement_id}
+        requirement_order = list(query_by_requirement)
+        lanes: dict[str, list[Document]] = {requirement_id: [] for requirement_id in requirement_order}
+        lanes["__unscoped__"] = []
+        for document in original_documents:
+            requirement_ids = self._document_requirement_ids(document)
+            if requirement_ids:
+                for requirement_id in requirement_ids:
+                    lanes.setdefault(requirement_id, []).append(document)
+                    if requirement_id not in requirement_order:
+                        requirement_order.append(requirement_id)
+            else:
+                lanes["__unscoped__"].append(document)
+
+        for requirement_id, lane_documents in lanes.items():
+            for rank, document in enumerate(lane_documents, start=1):
+                self._record_evidence_diagnostic(
+                    document,
+                    "" if requirement_id == "__unscoped__" else requirement_id,
+                    query=query_by_requirement.get(requirement_id, ""),
+                    candidate_rank=rank,
+                    pdf_eligible=bool(document.metadata.get("pdf_url")),
+                )
+
         indexed_source_ids: set[str] = set()
         partial_source_ids: set[str] = set()
-        newly_indexed = 0
         failed_source_ids: set[str] = set()
-        for document in candidates:
+        acquisition_results: dict[str, str] = {}
+
+        # Every already COMMITTED source is eligible without consuming an
+        # acquisition attempt, regardless of its position in the accumulated list.
+        for document in original_documents:
             source_id = str(document.metadata.get("source_id", ""))
-            try:
-                if source_id and self.has_indexed_source(source_id):
-                    indexed_source_ids.add(source_id)
-                    continue
-                if newly_indexed >= self.max_papers_per_run:
-                    continue
-                if self.ensure_indexed(document):
-                    indexed_source_ids.add(source_id)
-                    newly_indexed += 1
-                elif self.get_index_status(source_id) == "PARTIAL":
-                    partial_source_ids.add(source_id)
-                else:
-                    failed_source_ids.add(source_id)
-            except Exception as exc:
+            status = self.get_index_status(source_id) if source_id else "MISSING"
+            if status == "PARTIAL":
+                partial_source_ids.add(source_id)
+                acquisition_results[source_id] = "partial"
+            elif status == "FAILED":
                 failed_source_ids.add(source_id)
-                logger.warning(
-                    "Full-text indexing skipped for %s: %s",
-                    source_id or "unknown",
-                    exc,
+                acquisition_results[source_id] = "failed"
+            if source_id and self.has_indexed_source(source_id):
+                indexed_source_ids.add(source_id)
+                acquisition_results[source_id] = (
+                    "committed" if source_id in self._attempted_source_ids else "cached_committed"
                 )
+
+        lane_positions = {requirement_id: 0 for requirement_id in lanes}
+        lane_attempts = {requirement_id: 0 for requirement_id in lanes}
+        global_attempts = 0
+
+        def attempt_one(requirement_id: str) -> bool:
+            """Make at most one new acquisition attempt in one requirement lane."""
+
+            nonlocal global_attempts
+            lane = lanes.get(requirement_id, [])
+            lane_budget = (
+                self.candidate_download_limit
+                if requirement_id == "__unscoped__"
+                else self.per_requirement_acquisition_limit
+            )
+            while (
+                lane_positions[requirement_id] < len(lane)
+                and lane_attempts[requirement_id] < lane_budget
+                and global_attempts < self.candidate_download_limit
+            ):
+                document = lane[lane_positions[requirement_id]]
+                lane_positions[requirement_id] += 1
+                source_id = str(document.metadata.get("source_id", ""))
+                public_requirement_id = "" if requirement_id == "__unscoped__" else requirement_id
+                if not source_id or not document.metadata.get("pdf_url"):
+                    acquisition_results[source_id] = "not_pdf_eligible"
+                    continue
+                if source_id in indexed_source_ids:
+                    acquisition_results.setdefault(source_id, "cached_committed")
+                    return True
+                status = self.get_index_status(source_id)
+                if status == "PARTIAL":
+                    partial_source_ids.add(source_id)
+                    acquisition_results[source_id] = "partial"
+                    continue
+                if source_id in self._attempted_source_ids:
+                    acquisition_results.setdefault(source_id, "already_attempted")
+                    continue
+
+                lane_attempts[requirement_id] += 1
+                global_attempts += 1
+                self._attempted_source_ids.add(source_id)
+                try:
+                    if self.ensure_indexed(document):
+                        indexed_source_ids.add(source_id)
+                        acquisition_results[source_id] = "committed"
+                        self._record_evidence_diagnostic(
+                            document,
+                            public_requirement_id,
+                            query=query_by_requirement.get(requirement_id, ""),
+                            acquisition_attempted=True,
+                            acquisition_result="committed",
+                        )
+                        return True
+                    if self.get_index_status(source_id) == "PARTIAL":
+                        partial_source_ids.add(source_id)
+                        result = "partial"
+                    else:
+                        failed_source_ids.add(source_id)
+                        result = "failed"
+                    acquisition_results[source_id] = result
+                    self._record_evidence_diagnostic(
+                        document,
+                        public_requirement_id,
+                        query=query_by_requirement.get(requirement_id, ""),
+                        acquisition_attempted=True,
+                        acquisition_result=result,
+                    )
+                    return False
+                except Exception as exc:
+                    failed_source_ids.add(source_id)
+                    acquisition_results[source_id] = "failed"
+                    self._record_evidence_diagnostic(
+                        document,
+                        public_requirement_id,
+                        query=query_by_requirement.get(requirement_id, ""),
+                        acquisition_attempted=True,
+                        acquisition_result="failed",
+                    )
+                    logger.warning(
+                        "Full-text indexing skipped for %s: %s",
+                        source_id or "unknown",
+                        exc,
+                    )
+                    return False
+            return False
+
+        # Requirement lanes receive the first bounded opportunities. Broad,
+        # unscoped sources may use only the remaining global budget.
+        lane_has_committed = {requirement_id: attempt_one(requirement_id) for requirement_id in requirement_order}
+        # Only after every requirement has received its first opportunity may
+        # failures consume a second per-requirement attempt.
+        for requirement_id in requirement_order:
+            if not lane_has_committed[requirement_id]:
+                lane_has_committed[requirement_id] = attempt_one(requirement_id)
+        while global_attempts < self.candidate_download_limit:
+            previous_position = lane_positions["__unscoped__"]
+            attempt_one("__unscoped__")
+            if lane_positions["__unscoped__"] == previous_position:
+                break
+
+        source_ids_by_requirement = {
+            requirement_id: [
+                str(document.metadata.get("source_id", ""))
+                for document in lanes.get(requirement_id, ())
+                if str(document.metadata.get("source_id", "")) in indexed_source_ids
+            ]
+            for requirement_id in requirement_order
+        }
 
         chunks: list[PaperChunk] = []
         if indexed_source_ids:
             try:
                 chunks = self.search_many(
-                    normalized_queries,
+                    queries,
                     sorted(indexed_source_ids),
                     self.top_k_chunks,
+                    source_ids_by_requirement=source_ids_by_requirement,
                 )
             except Exception as exc:
                 logger.warning("Chroma full-text retrieval failed; using abstracts only: %s", exc)
 
+        # A COMMITTED first choice that yields no passage must not end a lane.
+        # Spend the remaining per-lane/global budget on ranked failovers, then
+        # rerun bounded passage retrieval once.
+        covered_requirement_ids = {requirement_id for chunk in chunks for requirement_id in chunk.requirement_ids}
+        failover_attempted = False
+        for requirement_id in requirement_order:
+            if requirement_id not in covered_requirement_ids and attempt_one(requirement_id):
+                failover_attempted = True
+        if failover_attempted:
+            source_ids_by_requirement = {
+                requirement_id: [
+                    str(document.metadata.get("source_id", ""))
+                    for document in lanes.get(requirement_id, ())
+                    if str(document.metadata.get("source_id", "")) in indexed_source_ids
+                ]
+                for requirement_id in requirement_order
+            }
+            chunks = self.search_many(
+                queries,
+                sorted(indexed_source_ids),
+                self.top_k_chunks,
+                source_ids_by_requirement=source_ids_by_requirement,
+            )
+
         chunks_by_source: dict[str, list[PaperChunk]] = {}
         used_chars = 0
+        reserved_remaining = sum(bool(chunk.requirement_ids) for chunk in chunks)
         for chunk in chunks:
             if used_chars >= self.max_prompt_chars:
                 break
             remaining = self.max_prompt_chars - used_chars
-            text = chunk.text[:remaining].strip()
+            allocation = remaining
+            if chunk.requirement_ids and reserved_remaining:
+                allocation = max(1, remaining // reserved_remaining)
+                reserved_remaining -= 1
+            text = chunk.text[:allocation].strip()
             if not text:
                 continue
             chunks_by_source.setdefault(chunk.source_id, []).append(
@@ -440,9 +716,25 @@ class ChromaPaperLibrary:
                     chunk.evidence_type,
                     chunk.parser,
                     chunk.schema_version,
+                    chunk.requirement_ids,
                 )
             )
             used_chars += len(text)
+
+        selected_chunk_ids_by_source: dict[str, list[str]] = {}
+        for source_chunks in chunks_by_source.values():
+            for chunk in source_chunks:
+                selected_chunk_ids_by_source.setdefault(chunk.source_id, []).append(chunk.chunk_id)
+        for requirement_id, lane_documents in lanes.items():
+            for document in lane_documents:
+                source_id = str(document.metadata.get("source_id", ""))
+                self._record_evidence_diagnostic(
+                    document,
+                    "" if requirement_id == "__unscoped__" else requirement_id,
+                    query=query_by_requirement.get(requirement_id, ""),
+                    acquisition_result=acquisition_results.get(source_id),
+                    selected_chunk_ids=selected_chunk_ids_by_source.get(source_id, ()),
+                )
 
         enriched: list[Document] = []
         for document in original_documents:
@@ -454,6 +746,9 @@ class ChromaPaperLibrary:
             metadata["full_text_chunks_used"] = len(source_chunks)
             metadata["index_status"] = self.get_index_status(source_id)
             metadata["index_truncated"] = source_id in partial_source_ids
+            metadata["acquisition_attempted"] = source_id in self._attempted_source_ids
+            metadata["acquisition_result"] = acquisition_results.get(source_id, "not_attempted")
+            metadata["selected_chunk_ids"] = [chunk.chunk_id for chunk in source_chunks]
             if source_id in indexed_source_ids:
                 evidence_status = "full_text"
             elif source_id in partial_source_ids:
@@ -482,6 +777,7 @@ class ChromaPaperLibrary:
                     "parser": chunk.parser,
                     "schema_version": chunk.schema_version,
                     "retrieval_score": chunk.distance,
+                    "requirement_ids": list(chunk.requirement_ids),
                     "text": chunk.text,
                 }
                 for chunk in source_chunks
@@ -518,27 +814,39 @@ class ChromaPaperLibrary:
 
     def search_many(
         self,
-        queries: Sequence[str],
+        queries: Sequence[Any],
         source_ids: Sequence[str],
         top_k: int | None = None,
+        *,
+        source_ids_by_requirement: dict[str, Sequence[str]] | None = None,
     ) -> list[PaperChunk]:
-        """Fuse dense passage rankings from focused evidence queries."""
+        """Reserve strong per-requirement passages, then fill globally."""
 
         fused_scores: dict[str, float] = {}
         chunks_by_id: dict[str, PaperChunk] = {}
-        normalized_queries = self._normalize_queries(queries)
-        if not normalized_queries or not source_ids:
+        query_specs = self._normalize_query_specs(queries)
+        if not query_specs or not source_ids:
             return []
-        workers = min(self.retrieval_workers, len(normalized_queries))
+        lane_sources = source_ids_by_requirement or {}
+
+        def run_search(spec: tuple[str, str]) -> list[PaperChunk]:
+            query, requirement_id = spec
+            if requirement_id:
+                restricted_ids = list(lane_sources.get(requirement_id, ()))
+                return self.search(query, restricted_ids, top_k) if restricted_ids else []
+            return self.search(query, source_ids, top_k)
+
+        workers = min(self.retrieval_workers, len(query_specs))
         if workers == 1:
-            rankings = [self.search(query, source_ids, top_k) for query in normalized_queries]
+            rankings = [run_search(spec) for spec in query_specs]
         else:
             # Initialize the shared store before concurrent read-only queries.
             self._get_vector_store()
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                rankings = list(executor.map(lambda query: self.search(query, source_ids, top_k), normalized_queries))
+                rankings = list(executor.map(run_search, query_specs))
+        requirement_scores: dict[str, dict[str, float]] = {}
         # Fuse in query order so thread completion order cannot affect ties.
-        for ranking in rankings:
+        for (_query, requirement_id), ranking in zip(query_specs, rankings):
             for rank, chunk in enumerate(ranking, start=1):
                 chunk_id = chunk.chunk_id or self._chunk_id(
                     chunk.source_id,
@@ -565,8 +873,55 @@ class ChromaPaperLibrary:
                     ),
                 )
                 fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
+                if requirement_id:
+                    scores = requirement_scores.setdefault(requirement_id, {})
+                    scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
         ranked_ids = sorted(fused_scores, key=fused_scores.get, reverse=True)
-        return [chunks_by_id[chunk_id] for chunk_id in ranked_ids[: (top_k or self.top_k_chunks)]]
+        limit = top_k or self.top_k_chunks
+        selected_ids: list[str] = []
+        requirements_by_chunk: dict[str, list[str]] = {}
+        for _query, requirement_id in query_specs:
+            if not requirement_id or requirement_id in {
+                item for values in requirements_by_chunk.values() for item in values
+            }:
+                continue
+            lane_ranked_ids = sorted(
+                requirement_scores.get(requirement_id, {}),
+                key=requirement_scores.get(requirement_id, {}).get,
+                reverse=True,
+            )
+            if not lane_ranked_ids:
+                continue
+            winner_id = lane_ranked_ids[0]
+            requirements_by_chunk.setdefault(winner_id, []).append(requirement_id)
+            if winner_id not in selected_ids and len(selected_ids) < limit:
+                selected_ids.append(winner_id)
+        for chunk_id in ranked_ids:
+            if len(selected_ids) >= limit:
+                break
+            if chunk_id not in selected_ids:
+                selected_ids.append(chunk_id)
+
+        selected: list[PaperChunk] = []
+        for chunk_id in selected_ids:
+            chunk = chunks_by_id[chunk_id]
+            selected.append(
+                PaperChunk(
+                    chunk.source_id,
+                    chunk.title,
+                    chunk.page,
+                    chunk.text,
+                    chunk.distance,
+                    chunk.chunk_id,
+                    chunk.section,
+                    chunk.subsection,
+                    chunk.evidence_type,
+                    chunk.parser,
+                    chunk.schema_version,
+                    tuple(requirements_by_chunk.get(chunk_id, ())),
+                )
+            )
+        return selected
 
     def ensure_indexed(self, document: Document) -> bool:
         """Build, verify, and logically commit one complete paper index."""

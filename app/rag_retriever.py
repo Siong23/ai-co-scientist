@@ -353,6 +353,8 @@ class ResearchRetriever:
         self.last_query_fidelity: list[dict[str, Any]] = []
         self.last_query_plan: SearchQueryPlan | None = None
         self._search_round = 0
+        self._unique_candidate_source_ids: set[str] = set()
+        self._selected_source_ids: set[str] = set()
 
         self.arxiv = ArxivSearchTool(max_results=self.results_per_query)
         semantic_scholar_config = config.get("semantic_scholar", {})
@@ -406,6 +408,16 @@ class ResearchRetriever:
         self.last_query_fidelity = []
         self.last_query_plan = None
         self._search_round = 0
+        self._unique_candidate_source_ids = set()
+        self._selected_source_ids = set()
+
+    @property
+    def unique_candidate_count(self) -> int:
+        return len(self._unique_candidate_source_ids)
+
+    @property
+    def selected_source_count(self) -> int:
+        return len(self._selected_source_ids)
 
     @staticmethod
     def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
@@ -599,7 +611,7 @@ class ResearchRetriever:
                 "search_intent": search_query.search_intent,
             }
             normalized_results = []
-            for result in raw_results:
+            for provider_rank, result in enumerate(raw_results, start=1):
                 evidence = evidence_from_result(result, provider, source_type)
                 document_type = evidence.document_type
                 if source_type == "web" and search_query.source_type == "official":
@@ -627,6 +639,8 @@ class ResearchRetriever:
                         "hypothesis_id": search_query.hypothesis_id,
                         "search_intent": search_query.search_intent,
                         "query_contexts": (query_context,),
+                        "raw_result_count": len(raw_results),
+                        "provider_candidate_rank": provider_rank,
                     }
                 )
                 normalized_results.append(replace(evidence, metadata=metadata))
@@ -638,7 +652,43 @@ class ResearchRetriever:
                     source.last_error_status,
                 )
                 break
+            provider_status = ResearchRetriever._provider_status(
+                source,
+                len(ranked_results),
+                len(queries),
+                sum(len(items) for items in ranked_results),
+            )
+            if provider_status in {
+                "rate_limited",
+                "timeout",
+                "provider_error",
+                "quota_or_plan_rejection",
+            }:
+                logger.warning(
+                    "%s reported a provider failure; skipping its remaining queries in this retrieval round.",
+                    source_name,
+                )
+                break
         return ranked_results
+
+    @staticmethod
+    def _provider_status(source, completed: int, requested: int, result_count: int) -> str:
+        error_status = getattr(source, "last_error_status", None)
+        if not isinstance(error_status, int):
+            error_status = None
+        raw_error_kind = getattr(source, "last_error_kind", "")
+        error_kind = raw_error_kind.casefold() if isinstance(raw_error_kind, str) else ""
+        if error_status in (429, 503) or error_kind == "rate_limited":
+            return "rate_limited"
+        if error_kind == "timeout":
+            return "timeout"
+        if error_status is not None or error_kind in {"provider_error", "quota_or_plan_rejection"}:
+            return error_kind if error_kind == "quota_or_plan_rejection" else "provider_error"
+        if completed < requested:
+            return "partial"
+        if result_count == 0:
+            return "zero_yield"
+        return "ok"
 
     def _search_sources(
         self,
@@ -667,11 +717,11 @@ class ResearchRetriever:
 
         tasks = []
         if include_arxiv and academic_queries:
-            tasks.append(("arXiv", len(academic_queries), self.arxiv, lambda: self._arxiv_results(academic_queries)))
+            tasks.append(("arXiv", academic_queries, self.arxiv, lambda: self._arxiv_results(academic_queries)))
         tasks.extend(
             (
                 source_name,
-                len(academic_queries),
+                academic_queries,
                 source,
                 lambda source_name=source_name, provider=provider, source=source: self._source_results(
                     source_name,
@@ -688,7 +738,7 @@ class ResearchRetriever:
             tasks.extend(
                 (
                     source_name,
-                    len(web_queries),
+                    web_queries,
                     source,
                     lambda source_name=source_name, provider=provider, source=source: self._source_results(
                         source_name,
@@ -709,25 +759,24 @@ class ResearchRetriever:
         started_at = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = [
-                (source_name, query_total, source, executor.submit(search))
-                for source_name, query_total, source, search in tasks
+                (source_name, task_queries, source, executor.submit(search))
+                for source_name, task_queries, source, search in tasks
             ]
             ranked_results: list[list[EvidenceSource]] = []
-            for source_name, query_total, source, future in futures:
+            for source_name, task_queries, source, future in futures:
+                query_total = len(task_queries)
                 try:
                     source_results = future.result()
                     ranked_results.extend(source_results)
                     completed = len(source_results)
                     result_count = sum(len(results) for results in source_results)
+                    status = self._provider_status(source, completed, query_total, result_count)
                     error_status = getattr(source, "last_error_status", None)
-                    if completed < query_total and error_status in (429, 503):
-                        status = "rate_limited"
-                    elif completed < query_total:
-                        status = "partial"
-                    elif result_count == 0:
-                        status = "zero_yield"
-                    else:
-                        status = "ok"
+                    if not isinstance(error_status, int):
+                        error_status = None
+                    error_detail = getattr(source, "last_error_detail", "")
+                    if not isinstance(error_detail, str):
+                        error_detail = ""
                     logger.info(
                         "%s search completed queries=%d/%d results=%d status=%s elapsed_ms=%d",
                         source_name,
@@ -746,10 +795,26 @@ class ResearchRetriever:
                             "results": result_count,
                             "elapsed_ms": int((time.monotonic() - started_at) * 1000),
                             "status": status,
+                            "error_status": error_status,
+                            "error_detail": redact_secrets(error_detail),
+                            "query_results": [
+                                {
+                                    "requirement_id": query.evidence_requirement_id,
+                                    "query": query.query,
+                                    "provider": source_name,
+                                    "raw_result_count": len(source_results[index])
+                                    if index < len(source_results)
+                                    else 0,
+                                }
+                                for index, query in enumerate(task_queries)
+                            ],
                         }
                     )
                 except Exception as exc:
                     logger.error("%s search failed: %s", source_name, redact_secrets(str(exc)))
+                    error_status = getattr(source, "last_error_status", None)
+                    if not isinstance(error_status, int):
+                        error_status = None
                     self.last_search_stats.append(
                         {
                             "round": search_round,
@@ -758,7 +823,10 @@ class ResearchRetriever:
                             "queries_requested": query_total,
                             "results": 0,
                             "elapsed_ms": int((time.monotonic() - started_at) * 1000),
-                            "status": "error",
+                            "status": "provider_error",
+                            "error_status": error_status,
+                            "error_detail": redact_secrets(str(exc)),
+                            "query_results": [],
                         }
                     )
         return ranked_results
@@ -804,7 +872,7 @@ class ResearchRetriever:
                 "search_intent": search_query.search_intent,
             }
             normalized_results = []
-            for result in raw_results:
+            for provider_rank, result in enumerate(raw_results, start=1):
                 evidence = evidence_from_result(result, "arxiv", "academic")
                 evidence = replace(
                     evidence,
@@ -826,6 +894,8 @@ class ResearchRetriever:
                         "hypothesis_id": search_query.hypothesis_id,
                         "search_intent": search_query.search_intent,
                         "query_contexts": (query_context,),
+                        "raw_result_count": len(raw_results),
+                        "provider_candidate_rank": provider_rank,
                     }
                 )
                 normalized_results.append(replace(evidence, metadata=metadata))
@@ -861,6 +931,9 @@ class ResearchRetriever:
         ]
         if not documents:
             return []
+        self._unique_candidate_source_ids.update(
+            source_id for document in documents if (source_id := str(document.metadata.get("source_id", "")))
+        )
 
         vector_store = InMemoryVectorStore(embedding=self.embeddings)
         vector_store.add_documents(
@@ -880,6 +953,9 @@ class ResearchRetriever:
         )
         selected = self._promote_downloadable_documents(selected, ranked_documents)
         selected = self._extract_selected_web_documents(selected, original_query)
+        self._selected_source_ids.update(
+            source_id for document in selected if (source_id := str(document.metadata.get("source_id", "")))
+        )
         logger.info(
             "RAG selected %d sources (%d downloadable) from %d entity-matched candidates: %s",
             len(selected),
@@ -1515,6 +1591,8 @@ class ResearchRetriever:
                 "freshness": evidence.metadata.get("freshness"),
                 "evidence_requirement_id": evidence.evidence_requirement_id,
                 "query_contexts": list(evidence.metadata.get("query_contexts", ())),
+                "raw_result_count": evidence.metadata.get("raw_result_count"),
+                "provider_candidate_rank": evidence.metadata.get("provider_candidate_rank"),
                 "doi": evidence.doi,
                 "venue": evidence.venue,
                 "pdf_url": pdf_url,
@@ -1754,6 +1832,11 @@ def serialize_documents(
             "full_text_chunks_used": document.metadata.get("full_text_chunks_used", 0),
             "index_status": document.metadata.get("index_status"),
             "index_truncated": document.metadata.get("index_truncated", False),
+            "acquisition_attempted": document.metadata.get("acquisition_attempted", False),
+            "acquisition_result": document.metadata.get("acquisition_result"),
+            "selected_chunk_ids": document.metadata.get("selected_chunk_ids", []),
+            "strict_gate_retained": document.metadata.get("strict_gate_retained"),
+            "strict_gate_rejection_reason": document.metadata.get("strict_gate_rejection_reason"),
             "evidence_status": document.metadata.get("evidence_status", "abstract_only"),
             "evidence_mode": document.metadata.get("evidence_mode", "abstract_only"),
             "evidence_refs": document.metadata.get("evidence_refs", []),

@@ -12,8 +12,10 @@ from app.agents_modules.generation import GenerationAgent
 from app.agents_modules.generation_helpers import EvidenceCoverage
 from app.agents_modules.supervisor import SupervisorAgent
 from app.models import ContextMemory, Hypothesis, PairwiseDecision, ResearchGoal
+from app.paper_library import ChromaPaperLibrary, IndexIntegrityReport, PaperChunk
 from app.rag_retriever import (
     EvidenceAspect,
+    SearchQuery,
     SearchQueryPlan,
     SharedSentenceTransformerEmbeddings,
     format_documents_for_grading,
@@ -28,6 +30,181 @@ def goal_plan():
         required_terms=(),
         explicit_requirements=(EvidenceAspect("scope", "5G slice bandwidth under traffic spikes"),),
     )
+
+
+def test_corrective_full_text_path_reaches_complete_coverage_with_failover(tmp_path, monkeypatch):
+    """Exercise requirement -> acquisition -> passage -> strict gate -> generation."""
+
+    plan = SearchQueryPlan(
+        queries=(
+            SearchQuery("slice allocation evidence", evidence_requirement_id="scope"),
+            SearchQuery("traffic spike evidence", evidence_requirement_id="spikes"),
+        ),
+        required_terms=(),
+        explicit_requirements=(
+            EvidenceAspect("scope", "5G slice allocation evidence."),
+            EvidenceAspect("spikes", "Traffic spike detection evidence."),
+        ),
+    )
+
+    def candidate(source_id, requirement_id):
+        return Document(
+            page_content=f"Abstract for {source_id}",
+            metadata={
+                "source_id": source_id,
+                "source_type": "academic",
+                "provider": "arxiv",
+                "title": source_id,
+                "pdf_url": f"https://arxiv.org/pdf/{source_id.removeprefix('arXiv:')}",
+                "evidence_requirement_id": requirement_id,
+                "reserved_requirement_ids": [requirement_id],
+            },
+        )
+
+    scope = candidate("arXiv:scope", "scope")
+    failed = candidate("arXiv:spike-failed", "spikes")
+    working = candidate("arXiv:spike-working", "spikes")
+    statuses = {"arXiv:scope": "COMMITTED"}
+    attempts = []
+    library = ChromaPaperLibrary(
+        enabled=True,
+        persist_directory=tmp_path / "chroma",
+        pdf_directory=tmp_path / "papers",
+    )
+    library.require_indexed_sources_for_generation = True
+    library.candidate_download_limit = 2
+    library.per_requirement_acquisition_limit = 2
+    library.top_k_chunks = 2
+
+    monkeypatch.setattr(library, "get_index_status", lambda source_id: statuses.get(source_id, "MISSING"))
+    monkeypatch.setattr(library, "has_indexed_source", lambda source_id: statuses.get(source_id) == "COMMITTED")
+    monkeypatch.setattr(
+        library,
+        "verify_indexed_source",
+        lambda source_id: IndexIntegrityReport(
+            source_id,
+            statuses.get(source_id, "MISSING"),
+            1 if statuses.get(source_id) == "COMMITTED" else 0,
+            1 if statuses.get(source_id) == "COMMITTED" else 0,
+        ),
+    )
+
+    def ensure_indexed(document):
+        source_id = document.metadata["source_id"]
+        attempts.append(source_id)
+        statuses[source_id] = "FAILED" if source_id == "arXiv:spike-failed" else "COMMITTED"
+        return statuses[source_id] == "COMMITTED"
+
+    def search_many(_queries, source_ids, _top_k, **_kwargs):
+        chunks = []
+        if "arXiv:scope" in source_ids:
+            chunks.append(
+                PaperChunk(
+                    "arXiv:scope",
+                    "Scope",
+                    1,
+                    "5G slice allocation measurements",
+                    0.01,
+                    "scope-chunk",
+                    requirement_ids=("scope",),
+                )
+            )
+        if "arXiv:spike-working" in source_ids:
+            chunks.append(
+                PaperChunk(
+                    "arXiv:spike-working",
+                    "Spikes",
+                    2,
+                    "Traffic spike detector measurements",
+                    0.02,
+                    "spike-chunk",
+                    requirement_ids=("spikes",),
+                )
+            )
+        return chunks
+
+    monkeypatch.setattr(library, "ensure_indexed", ensure_indexed)
+    monkeypatch.setattr(library, "search_many", search_many)
+
+    incomplete = EvidenceCoverage(
+        aspect_source_ids={"scope": ("arXiv:scope",), "spikes": ()},
+        missing_aspect_ids=("spikes",),
+        gap_queries=("traffic spike detector measurements",),
+        reason="Spike evidence missing",
+    )
+    complete = EvidenceCoverage(
+        aspect_source_ids={
+            "scope": ("arXiv:scope",),
+            "spikes": ("arXiv:spike-working",),
+        },
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="All explicit requirements covered",
+    )
+    synthesis = json.dumps(
+        {
+            "established_findings": [
+                {"claim": "Slice evidence", "source_ids": ["arXiv:scope"]},
+                {"claim": "Spike evidence", "source_ids": ["arXiv:spike-working"]},
+            ],
+            "contradictions": [],
+            "knowledge_gaps": [],
+            "analytical_rationale": "The passages jointly cover the goal.",
+        }
+    )
+    generated = json.dumps(
+        [
+            {
+                "title": "Closed-loop spike allocation",
+                "hypothesis": "A detector-driven allocator can be tested.",
+                "rationale": "The two verified passage lanes support the test.",
+                "feasibility": "Measure allocation response during induced spikes.",
+                "source_ids": ["arXiv:scope", "arXiv:spike-working"],
+            }
+        ]
+    )
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        corrective_retrieval_rounds=1,
+        debate_rounds=0,
+        audit_enabled=False,
+        paper_library=library,
+        agentic_research_enabled=False,
+    )
+
+    with (
+        patch.object(agent, "_plan_and_retrieve_initial", return_value=(plan, None, [scope])),
+        patch.object(
+            agent,
+            "_retrieve_scientific_sources",
+            side_effect=[[], [failed, working]],
+        ),
+        patch.object(
+            agent,
+            "_grade_candidate_evidence",
+            side_effect=[
+                (["arXiv:scope"], None, incomplete, None),
+                (["arXiv:scope"], None, incomplete, None),
+                (["arXiv:scope", "arXiv:spike-working"], None, complete, None),
+            ],
+        ),
+        patch("app.agents.call_llm", side_effect=[synthesis, generated]),
+    ):
+        context = ContextMemory()
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("Closed-loop 5G slice allocation during traffic spikes", num_hypotheses=1),
+            context,
+        )
+
+    assert errors == []
+    assert len(hypotheses) == 1
+    assert attempts == ["arXiv:spike-failed", "arXiv:spike-working"]
+    assert {source["source_id"] for source in context.last_retrieved_sources} == {
+        "arXiv:scope",
+        "arXiv:spike-working",
+    }
+    assert context.last_generation_diagnostics["evidence_funnel"]["retrieved_passages"] == 2
+    assert context.last_generation_diagnostics["evidence_consumed"] is True
 
 
 def test_initial_search_overlaps_planning_when_models_can_run_concurrently(monkeypatch):

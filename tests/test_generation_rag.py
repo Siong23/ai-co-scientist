@@ -10,6 +10,7 @@ from app.agents import (
     GenerationAgent,
     LiteratureFinding,
     LiteratureSynthesis,
+    build_evidence_queries,
     call_llm_for_evidence_coverage,
     call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
@@ -2214,6 +2215,33 @@ def test_requirement_lanes_preserve_narrow_evidence_before_global_top_k():
     ]
 
 
+def test_corrective_merge_preserves_requirement_context_for_existing_source():
+    initial = Document(
+        page_content="Initial abstract",
+        metadata={
+            "source_id": "arXiv:2401.00001v1",
+            "query_contexts": ({"query": "broad goal", "evidence_requirement_id": None},),
+        },
+    )
+    corrective = Document(
+        page_content="Corrective abstract",
+        metadata={
+            "source_id": "arXiv:2401.00001v2",
+            "reserved_requirement_ids": ["spikes"],
+            "query_contexts": ({"query": "traffic spike measurements", "evidence_requirement_id": "spikes"},),
+        },
+    )
+
+    merged = GenerationAgent._merge_retrieved_documents([initial], [corrective])
+
+    assert len(merged) == 1
+    assert merged[0].metadata["reserved_requirement_ids"] == ["spikes"]
+    assert [item["query"] for item in merged[0].metadata["query_contexts"]] == [
+        "broad goal",
+        "traffic spike measurements",
+    ]
+
+
 def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_sources():
     indexed = Document(
         page_content="Indexed evidence",
@@ -2261,6 +2289,18 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
             "full_text_indexed": False,
         },
     )
+    partial = Document(
+        page_content="Truncated paper body",
+        metadata={
+            "source_id": "arXiv:4444.4444",
+            "source_type": "academic",
+            "full_text_indexed": False,
+            "full_text_chunks_used": 1,
+            "index_status": "PARTIAL",
+            "index_truncated": True,
+            "evidence_refs": [{"evidence_type": "full_text", "text": "Truncated body"}],
+        },
+    )
 
     class StrictPaperLibrary:
         enabled = True
@@ -2273,9 +2313,18 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
     agent = GenerationAgent(paper_library=StrictPaperLibrary())
 
     assert agent._prepare_candidate_documents(
-        [indexed, indexed_without_passage, web_content, search_only_web, academic_abstract_only],
+        [
+            indexed,
+            indexed_without_passage,
+            web_content,
+            search_only_web,
+            academic_abstract_only,
+            partial,
+        ],
         ResearchGoal("Use downloadable evidence"),
     ) == [indexed, web_content]
+    assert partial.metadata["strict_gate_rejection_reason"] == "partial_index"
+    assert indexed_without_passage.metadata["strict_gate_rejection_reason"] == "no_retrieved_full_text_passage"
 
 
 def test_retrieval_stops_arxiv_batch_after_rate_limit():
@@ -2325,6 +2374,66 @@ def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():
     assert semantic_stats["queries_completed"] == 1
     assert semantic_stats["queries_requested"] == 3
     assert semantic_stats["status"] == "rate_limited"
+
+
+def test_provider_http_failure_is_not_reported_as_zero_yield():
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.semantic_scholar = None
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.tavily = Mock(
+        is_configured=True,
+        last_error_status=432,
+        last_error_kind="provider_error",
+        last_error_detail="432 Client Error",
+    )
+    retriever.tavily.search.return_value = []
+
+    retriever._search_sources(
+        (SearchQuery("network evidence", source_type="web", evidence_requirement_id="scope"),),
+        include_arxiv=False,
+        force_web=True,
+    )
+
+    stats = retriever.last_search_stats[-1]
+    assert stats["status"] == "provider_error"
+    assert stats["status"] != "zero_yield"
+    assert stats["error_status"] == 432
+    assert stats["query_results"][0]["requirement_id"] == "scope"
+
+
+def test_no_progress_corrective_round_reformulates_instead_of_reusing_queries():
+    agent = GenerationAgent(corrective_retrieval_rounds=2)
+    missing = (EvidenceAspect("spikes", "Traffic spike detection evidence."),)
+    coverage = EvidenceCoverage(
+        aspect_source_ids={"spikes": ()},
+        missing_aspect_ids=("spikes",),
+        gap_queries=("traffic spike detector measurements",),
+        reason="Missing",
+    )
+
+    first = agent._bounded_missing_evidence_queries(coverage, missing)
+    second = agent._bounded_missing_evidence_queries(
+        coverage,
+        missing,
+        exclude_queries=first,
+        strategy_round=1,
+    )
+
+    assert first
+    assert second
+    assert {query.casefold() for query in first}.isdisjoint(query.casefold() for query in second)
+    tagged = agent._tag_corrective_queries(second, missing)
+    assert {query.evidence_requirement_id for query in tagged} == {"spikes"}
+
+
+def test_full_text_query_budget_represents_every_explicit_requirement():
+    requirements = tuple(EvidenceAspect(f"requirement-{index}", f"Evidence dimension {index}.") for index in range(5))
+
+    queries = build_evidence_queries("Research goal", requirements, max_queries=6)
+
+    assert queries[0] == "Research goal"
+    assert all(any(query.startswith(aspect.description) for query in queries) for aspect in requirements)
 
 
 def test_semantic_scholar_fallback_fuses_and_reranks_results():

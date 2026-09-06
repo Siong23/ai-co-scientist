@@ -241,6 +241,59 @@ def render_report(run: Dict[str, Any]) -> str:
         html_parts.append(f"<h3>{_escape(step_name)}</h3>")
         html_parts.append(f"<p>{len(hypotheses)} hypotheses</p>")
 
+        if step_name == "generation":
+            funnel = step_data.get("evidence_funnel", {})
+            if isinstance(funnel, dict) and funnel:
+                labels = (
+                    ("raw_search_hits", "Raw search hits"),
+                    ("unique_candidates", "Unique candidates"),
+                    ("selected_sources", "Selected sources"),
+                    ("acquisition_attempts", "Acquisition attempts"),
+                    ("committed_sources", "COMMITTED sources"),
+                    ("retrieved_passages", "Retrieved passages"),
+                    ("coverage_approved_sources", "Coverage-approved sources"),
+                    ("generation_consumed_sources", "Generation-consumed sources"),
+                )
+                html_parts.append("<h4>Evidence funnel</h4><table><tbody>")
+                for key, label in labels:
+                    html_parts.append(f"<tr><th>{_escape(label)}</th><td>{_escape(funnel.get(key, 0))}</td></tr>")
+                html_parts.append("</tbody></table>")
+
+            pipeline = step_data.get("evidence_pipeline", [])
+            if isinstance(pipeline, list) and pipeline:
+                html_parts.append(
+                    "<h4>Evidence path diagnostics</h4><table><thead><tr>"
+                    "<th>Requirement</th><th>Query</th><th>Provider</th><th>Raw results</th>"
+                    "<th>Source</th><th>Rank</th><th>Reserved</th><th>PDF eligible</th>"
+                    "<th>Attempted</th><th>Acquisition</th><th>Index</th><th>Indexed chunks</th>"
+                    "<th>Selected chunk IDs</th><th>Strict gate</th><th>Coverage</th>"
+                    "</tr></thead><tbody>"
+                )
+                for item in pipeline:
+                    if not isinstance(item, dict):
+                        continue
+                    selected_chunk_ids = ", ".join(str(value) for value in item.get("selected_chunk_ids") or [])
+                    html_parts.append(
+                        "<tr>"
+                        f"<td>{_escape(item.get('requirement_id') or 'unscoped')}</td>"
+                        f"<td>{_escape(item.get('query') or '')}</td>"
+                        f"<td>{_escape(item.get('provider') or 'unknown')}</td>"
+                        f"<td>{_escape(item.get('raw_result_count') or 0)}</td>"
+                        f"<td>{_escape(item.get('candidate_source_id') or 'unknown')}</td>"
+                        f"<td>{_escape(item.get('candidate_rank') or '')}</td>"
+                        f"<td>{_escape(bool(item.get('reserved_for_requirement')))}</td>"
+                        f"<td>{_escape(bool(item.get('pdf_eligible')))}</td>"
+                        f"<td>{_escape(bool(item.get('acquisition_attempted')))}</td>"
+                        f"<td>{_escape(item.get('acquisition_result') or 'not_attempted')}</td>"
+                        f"<td>{_escape(item.get('index_status') or 'MISSING')}</td>"
+                        f"<td>{_escape(item.get('full_text_chunk_count') or 0)}</td>"
+                        f"<td>{_escape(selected_chunk_ids)}</td>"
+                        f"<td>{_escape(item.get('strict_gate_rejection_reason') or 'not_evaluated')}</td>"
+                        f"<td>{_escape(bool(item.get('coverage_contribution')))}</td>"
+                        "</tr>"
+                    )
+                html_parts.append("</tbody></table>")
+
         # ----------------------------
         # Ranking results
         # ----------------------------

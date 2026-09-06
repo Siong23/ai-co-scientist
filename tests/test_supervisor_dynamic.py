@@ -249,6 +249,42 @@ def test_supervisor_run_dynamic_cycle():
     assert any(event.get("step") == "supervisor_planning" for event in details["research_trace"])
 
 
+def test_generation_trace_counts_unique_search_candidates_when_gate_retains_none():
+    supervisor = SupervisorAgent()
+    supervisor.generation_agent = Mock()
+
+    def fail_after_search(_goal, context):
+        context.last_retrieved_sources = []
+        context.last_hypothesis_audits = []
+        context.last_generation_diagnostics = {
+            "evidence_funnel": {
+                "raw_search_hits": 180,
+                "unique_candidates": 77,
+                "selected_sources": 10,
+                "committed_sources": 0,
+                "retrieved_passages": 0,
+                "coverage_approved_sources": 0,
+            },
+            "evidence_consumed": False,
+        }
+        return [], ["Strict evidence coverage failed."]
+
+    supervisor.generation_agent.generate_new_hypotheses.side_effect = fail_after_search
+    supervisor.generation_agent.rag_retriever.last_query_plan = None
+    supervisor.generation_agent.rag_retriever.last_query_fidelity = []
+    supervisor.generation_agent.rag_retriever.last_search_stats = []
+    published = []
+
+    supervisor.step_generation(
+        ResearchGoal(description="Test goal", num_hypotheses=1),
+        ContextMemory(),
+        lambda *args, **kwargs: published.append((args, kwargs)),
+        {},
+    )
+
+    assert published[-1][1]["source_count"] == 77
+
+
 def test_dynamic_cycle_does_not_repeat_full_generation_pipeline():
     supervisor = SupervisorAgent()
     supervisor.planner.plan_next_action = Mock(

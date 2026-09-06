@@ -211,6 +211,9 @@ paper_library:
   parser_version: "pypdf-1"
   chunking_version: "page-boundary-2"
   candidate_download_limit: 8
+  # Each explicit evidence requirement gets bounded candidate failover within
+  # the global per-enrichment acquisition budget.
+  per_requirement_acquisition_limit: 2
   max_pages_per_paper: 60
   max_chunks_per_paper: 96
   chunk_size_chars: 2400

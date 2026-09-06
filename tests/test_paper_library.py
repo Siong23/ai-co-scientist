@@ -5,8 +5,8 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 
 from app.models import ResearchGoal
-from app.paper_library import ChromaPaperLibrary, PaperChunk
-from app.rag_retriever import EvidenceAspect
+from app.paper_library import ChromaPaperLibrary, IndexIntegrityReport, PaperChunk
+from app.rag_retriever import EvidenceAspect, SearchQuery
 
 
 class FakeEmbeddings(Embeddings):
@@ -381,8 +381,168 @@ def test_generation_full_text_enrichment_uses_explicit_requirements():
         )
         == documents
     )
-    assert library.queries[0] == "Reduce latency"
-    assert any("traffic spike behavior" in query for query in library.queries)
+    assert library.queries[0].query == "Reduce latency"
+    requirement_queries = [query for query in library.queries if query.evidence_requirement_id == "spikes"]
+    assert requirement_queries
+    assert all("traffic spike behavior" in query.query for query in requirement_queries)
+
+
+def test_late_requirement_candidate_is_not_starved_by_broad_candidates(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    library.candidate_download_limit = 2
+    library.per_requirement_acquisition_limit = 1
+    broad_one = _document("arXiv:broad-1")
+    broad_two = _document("arXiv:broad-2")
+    corrective = _document("arXiv:corrective")
+    corrective.metadata["evidence_requirement_id"] = "spikes"
+    attempted = []
+
+    monkeypatch.setattr(library, "has_indexed_source", lambda _source_id: False)
+    monkeypatch.setattr(library, "get_index_status", lambda _source_id: "MISSING")
+
+    def ensure(document):
+        attempted.append(document.metadata["source_id"])
+        return True
+
+    monkeypatch.setattr(library, "ensure_indexed", ensure)
+    monkeypatch.setattr(library, "search_many", lambda *_args, **_kwargs: [])
+
+    library.enrich_documents(
+        [broad_one, broad_two, corrective],
+        (SearchQuery("traffic spike evidence", evidence_requirement_id="spikes"),),
+    )
+
+    assert attempted[0] == "arXiv:corrective"
+    assert "arXiv:broad-2" not in attempted
+
+
+def test_requirement_acquisition_fails_over_to_second_candidate(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    library.candidate_download_limit = 2
+    library.per_requirement_acquisition_limit = 2
+    first = _document("arXiv:first-choice")
+    second = _document("arXiv:second-choice")
+    for document in (first, second):
+        document.metadata["evidence_requirement_id"] = "latency"
+    statuses = {}
+    attempted = []
+
+    monkeypatch.setattr(library, "has_indexed_source", lambda source_id: statuses.get(source_id) == "COMMITTED")
+    monkeypatch.setattr(library, "get_index_status", lambda source_id: statuses.get(source_id, "MISSING"))
+    monkeypatch.setattr(
+        library,
+        "verify_indexed_source",
+        lambda source_id: IndexIntegrityReport(
+            source_id,
+            statuses.get(source_id, "MISSING"),
+            1 if statuses.get(source_id) == "COMMITTED" else 0,
+            1 if statuses.get(source_id) == "COMMITTED" else 0,
+        ),
+    )
+
+    def ensure(document):
+        source_id = document.metadata["source_id"]
+        attempted.append(source_id)
+        statuses[source_id] = "FAILED" if source_id.endswith("first-choice") else "COMMITTED"
+        return statuses[source_id] == "COMMITTED"
+
+    monkeypatch.setattr(library, "ensure_indexed", ensure)
+    monkeypatch.setattr(
+        library,
+        "search_many",
+        lambda *_args, **_kwargs: [
+            PaperChunk(
+                "arXiv:second-choice",
+                "Second choice",
+                1,
+                "Measured latency evidence",
+                0.1,
+                "second-chunk",
+                requirement_ids=("latency",),
+            )
+        ],
+    )
+
+    enriched = library.enrich_documents(
+        [first, second],
+        (SearchQuery("latency evidence", evidence_requirement_id="latency"),),
+    )
+
+    assert attempted == ["arXiv:first-choice", "arXiv:second-choice"]
+    assert enriched[1].metadata["full_text_indexed"] is True
+    assert enriched[1].metadata["full_text_chunks_used"] == 1
+
+
+def test_every_requirement_gets_first_opportunity_before_failover(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    library.candidate_download_limit = 3
+    library.per_requirement_acquisition_limit = 2
+    documents = [
+        _document("arXiv:a-1"),
+        _document("arXiv:a-2"),
+        _document("arXiv:b-1"),
+    ]
+    documents[0].metadata["evidence_requirement_id"] = "a"
+    documents[1].metadata["evidence_requirement_id"] = "a"
+    documents[2].metadata["evidence_requirement_id"] = "b"
+    attempted = []
+
+    monkeypatch.setattr(library, "has_indexed_source", lambda _source_id: False)
+    monkeypatch.setattr(library, "get_index_status", lambda _source_id: "MISSING")
+
+    def fail(document):
+        attempted.append(document.metadata["source_id"])
+        return False
+
+    monkeypatch.setattr(library, "ensure_indexed", fail)
+    monkeypatch.setattr(library, "search_many", lambda *_args, **_kwargs: [])
+
+    library.enrich_documents(
+        documents,
+        (
+            SearchQuery("requirement a", evidence_requirement_id="a"),
+            SearchQuery("requirement b", evidence_requirement_id="b"),
+        ),
+    )
+
+    assert attempted == ["arXiv:a-1", "arXiv:b-1", "arXiv:a-2"]
+
+
+def test_requirement_passages_are_reserved_before_global_chunk_fill(tmp_path, monkeypatch):
+    library = _library(tmp_path)
+    library.retrieval_workers = 1
+    chunks = {
+        "global evidence": [
+            PaperChunk("source-a", "A", 1, "generic winner", 0.01, "a-1"),
+            PaperChunk("source-a", "A", 2, "generic runner up", 0.02, "a-2"),
+        ],
+        "spike evidence": [PaperChunk("source-a", "A", 3, "spike passage", 0.03, "a-3")],
+        "latency evidence": [PaperChunk("source-b", "B", 4, "latency passage", 0.04, "b-1")],
+    }
+    calls = []
+
+    def search(query, source_ids, _top_k):
+        calls.append((query, tuple(source_ids)))
+        return chunks[query]
+
+    monkeypatch.setattr(library, "search", search)
+    selected = library.search_many(
+        (
+            SearchQuery("global evidence"),
+            SearchQuery("spike evidence", evidence_requirement_id="spikes"),
+            SearchQuery("latency evidence", evidence_requirement_id="latency"),
+        ),
+        ["source-a", "source-b"],
+        top_k=2,
+        source_ids_by_requirement={"spikes": ["source-a"], "latency": ["source-b"]},
+    )
+
+    assert [chunk.chunk_id for chunk in selected] == ["a-3", "b-1"]
+    assert [chunk.requirement_ids for chunk in selected] == [("spikes",), ("latency",)]
+    assert calls[1:] == [
+        ("spike evidence", ("source-a",)),
+        ("latency evidence", ("source-b",)),
+    ]
 
 
 def test_collection_name_changes_when_index_schema_changes(tmp_path):

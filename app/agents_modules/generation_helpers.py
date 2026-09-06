@@ -3304,8 +3304,12 @@ def build_evidence_queries(
         "experimental results metrics baseline comparison",
         "limitations failure cases assumptions",
     )
+    # Give every explicit requirement one passage query before spending the
+    # remaining budget on deeper variations of earlier requirements.
     for requirement in explicit_requirements:
-        for suffix in suffixes:
+        queries.append(f"{requirement.description} {suffixes[0]}".strip())
+    for suffix in suffixes[1:]:
+        for requirement in explicit_requirements:
             queries.append(f"{requirement.description} {suffix}".strip())
     return tuple(dict.fromkeys(query for query in queries if query))[:max_queries]
 

@@ -9,6 +9,77 @@ import requests
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 15
+_ARXIV_FIELD_CLAUSE = re.compile(
+    r"(?:^|\s|\()(?:all|ti|abs|au|co|jr|cat|rn|id|submittedDate):",
+    re.IGNORECASE,
+)
+_QUERY_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "develop",
+    "during",
+    "dynamically",
+    "for",
+    "framework",
+    "from",
+    "how",
+    "in",
+    "into",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "using",
+    "what",
+    "with",
+}
+
+
+def build_arxiv_query(query: str, *, max_concepts: int = 6) -> str:
+    """Convert a natural-language need into a bounded field-aware arXiv query.
+
+    Existing arXiv field syntax is preserved. Natural-language searches retain
+    compound concepts and connect a small number of meaningful terms with AND,
+    avoiding the API's extremely broad default free-text behavior.
+    """
+
+    normalized = re.sub(r"\s+", " ", query).strip()
+    if not normalized or _ARXIV_FIELD_CLAUSE.search(normalized):
+        return normalized
+
+    concepts: list[str] = []
+    consumed_parts: set[str] = set()
+    for compound in re.findall(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\b", normalized):
+        phrase = compound.replace("-", " ").casefold()
+        concepts.append(f'all:"{phrase}"')
+        consumed_parts.update(phrase.split())
+
+    tokens = re.findall(r"\b[A-Za-z0-9][A-Za-z0-9+._]*\b", normalized)
+    prioritized = [token for token in tokens if any(char.isdigit() for char in token) or token.isupper()]
+    prioritized.extend(tokens)
+    for token in prioritized:
+        folded = token.casefold().strip("._")
+        if (
+            not folded
+            or folded in consumed_parts
+            or folded in _QUERY_STOP_WORDS
+            or (len(folded) < 3 and not any(char.isdigit() for char in folded))
+        ):
+            continue
+        clause = f"all:{token}"
+        if clause.casefold() not in {item.casefold() for item in concepts}:
+            concepts.append(clause)
+        if len(concepts) >= max(1, max_concepts):
+            break
+
+    return " AND ".join(concepts) if concepts else f'all:"{normalized.replace(chr(34), "")}"'
 
 
 class _TimeoutSession(requests.Session):
@@ -54,11 +125,10 @@ class ArxivSearchTool:
         self.last_error_status = None
 
         # Build search query with category filter if provided
-        cleaned_query = re.sub(r'["\']', "", query).strip() or query.strip()
-        search_query = cleaned_query
+        search_query = build_arxiv_query(query)
         if categories:
             category_filter = " OR ".join([f"cat:{cat}" for cat in categories])
-            search_query = f"({cleaned_query}) AND ({category_filter})"
+            search_query = f"({search_query}) AND ({category_filter})"
 
         # Set sort criteria
         sort_criterion = arxiv.SortCriterion.Relevance
