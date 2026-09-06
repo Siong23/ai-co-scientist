@@ -406,13 +406,6 @@ class GenerationAgent:
             )
             if (is_web and metadata.get("content_extracted") is True) or metadata.get("full_text_indexed") is True:
                 retained_documents.append(document)
-        if not retained_documents and enriched_documents:
-            logger.warning(
-                "No full-text indexed documents available; falling back to %d abstract-only source(s).",
-                len(enriched_documents),
-            )
-            return list(enriched_documents)
-
         logger.info(
             "Evidence gate retained %d/%d source(s): web sources require "
             "extracted content; academic sources require indexed full text.",
@@ -806,6 +799,14 @@ Your refined contribution:
     ):
         """Run independent relevance and coverage judgments concurrently."""
 
+        if not candidate_source_ids:
+            return [], None, EvidenceCoverage(
+                aspect_source_ids={aspect.aspect_id: () for aspect in query_plan.explicit_requirements},
+                missing_aspect_ids=tuple(aspect.aspect_id for aspect in query_plan.explicit_requirements),
+                gap_queries=(research_goal.description,),
+                reason="No eligible evidence sources are available.",
+            ), None
+
         def grade_relevance():
             return call_llm_for_relevance_filter(
                 research_goal.description,
@@ -837,6 +838,27 @@ Your refined contribution:
 
         return relevant_source_ids, relevance_error, coverage, coverage_error
 
+    def _plan_and_retrieve_initial(self, research_goal: ResearchGoal):
+        """Overlap query planning with the independent original-goal search."""
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            retrieval = executor.submit(self._retrieve_original_scientific_sources, research_goal)
+            query_plan, rewrite_error = call_llm_for_search_queries(
+                research_goal.description,
+                model=getattr(research_goal, "query_rewrite_model", research_goal.llm_model),
+                query_count=self.rag_retriever.query_count,
+                research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
+                query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
+                query_fidelity_validator=lambda plan: self.rag_retriever.validate_query_plan_fidelity(
+                    research_goal.description, plan,
+                ),
+            )
+            try:
+                candidate_documents = retrieval.result()
+            except Exception as exc:
+                logger.warning("Original-goal retrieval failed: %s", redact_secrets(str(exc)))
+                candidate_documents = []
+        return query_plan, rewrite_error, candidate_documents
+
     def generate_new_hypotheses(
         self,
         research_goal: ResearchGoal,
@@ -851,42 +873,11 @@ Your refined contribution:
         if execution_cancelled():
             return [], ["Cycle cancelled before hypothesis generation started."]
 
-        # ==================================================================
-        # Step 1: Two-stage search query planning
-        # First calls Research Planner (goal analysis & provisional hypotheses),
-        # then calls Query Rewriter (routed search queries & explicit requirements).
-        # ==================================================================
-        query_plan, rewrite_error = call_llm_for_search_queries(
-            research_goal.description,
-            model=getattr(
-                research_goal,
-                "query_rewrite_model",
-                getattr(research_goal, "llm_model", None),
-            ),
-            query_count=self.rag_retriever.query_count,
-            research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
-            query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
-            query_fidelity_validator=lambda plan: self.rag_retriever.validate_query_plan_fidelity(
-                research_goal.description,
-                plan,
-            ),
-        )
-
+        # Planning and original-goal retrieval are independent. Overlap their
+        # latency while retaining the original goal as the retrieval anchor.
+        query_plan, rewrite_error, candidate_documents = self._plan_and_retrieve_initial(research_goal)
         if execution_cancelled():
             return [], ["Cycle cancelled during search planning."]
-
-        # ==================================================================
-        # Step 2: Initial retrieval with user's unmodified research goal
-        # ==================================================================
-        try:
-            candidate_documents = self._retrieve_original_scientific_sources(research_goal)
-        except Exception as exc:
-            logger.error(
-                "Original-goal retrieval failed: %s",
-                exc,
-                exc_info=True,
-            )
-            candidate_documents = []
 
         # If both query planning and initial retrieval fail, abort early
         if (rewrite_error or query_plan is None) and not candidate_documents:
@@ -995,26 +986,10 @@ Your refined contribution:
 
             # 3B: Explicit requirement coverage grading
             if coverage_error or coverage is None:
-                if documents_for_grading:
-                    logger.warning(
-                        "Evidence coverage grading was unavailable (%s); falling back to provisional coverage for %d retrieved source(s).",
-                        coverage_error or "no coverage result",
-                        len(documents_for_grading),
-                    )
-                    aspect_source_ids = {
-                        aspect.aspect_id: tuple(candidate_source_ids) for aspect in query_plan.explicit_requirements
-                    }
-                    coverage = EvidenceCoverage(
-                        aspect_source_ids=aspect_source_ids,
-                        missing_aspect_ids=(),
-                        gap_queries=(),
-                        reason="Provisional coverage fallback due to LLM coverage grading unavailability.",
-                    )
-                else:
-                    context.last_retrieved_sources = []
-                    error = coverage_error or "Evidence coverage grading failed."
-                    logger.error(error)
-                    return [], [error]
+                context.last_retrieved_sources = []
+                error = redact_secrets(coverage_error or "Evidence coverage grading failed.")
+                logger.error("Coverage is unverified; hypothesis generation stopped: %s", error)
+                return [], [error]
 
             # If all requirements are satisfied by current evidence, exit gate loop
             if coverage.sufficient:
@@ -1170,22 +1145,6 @@ Your refined contribution:
         ]
 
         minimum_sources = self.rag_retriever.minimum_relevant_sources
-
-        # Retain top candidate sources if count is below minimum required threshold
-        if len(retrieved_documents) < minimum_sources and graded_documents:
-            logger.info(
-                "Coverage matched %d source(s); retaining top candidate source(s) from %d graded document(s).",
-                len(retrieved_documents),
-                len(graded_documents),
-            )
-            retained_ids = {str(doc.metadata["source_id"]) for doc in retrieved_documents}
-            for doc in graded_documents:
-                doc_id = str(doc.metadata["source_id"])
-                if doc_id not in retained_ids:
-                    retrieved_documents.append(doc)
-                    retained_ids.add(doc_id)
-                    if len(retrieved_documents) >= max(minimum_sources, self.rag_retriever.top_k):
-                        break
 
         if len(retrieved_documents) < minimum_sources:
             error = (

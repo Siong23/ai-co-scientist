@@ -4,9 +4,9 @@
 # OpenRouter API Base URL
 openrouter_base_url: "https://openrouter.ai/api/v1"
 
-# lmstudio_base_url: "http://127.0.0.1:1234/v1"
-lmstudio_base_url: "http://100.117.90.5:1234/v1"
-# lmstudio_base_url: "http://100.96.215.41:1234/v1"
+# Override this per machine with LMSTUDIO_BASE_URL in .env. Keeping a private
+# network address here makes local and deployed checkouts fail unpredictably.
+lmstudio_base_url: "http://127.0.0.1:1234/v1"
 
 # LLM Model. Use a compact free default so the public Hugging Face demo can
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
@@ -23,6 +23,9 @@ num_hypotheses: 4
 # Per-provider request timeout. Keeps slow free endpoints from consuming the
 # whole Gradio cycle budget before fallback can try another model.
 llm_request_timeout_seconds: 300
+# Fail quickly when the configured LM Studio host cannot be reached while still
+# allowing long model inference reads up to llm_request_timeout_seconds.
+lmstudio_connect_timeout_seconds: 10
 
 # Absorb a transient LM Studio inference-engine 5xx without changing endpoints
 # or losing the native API's explicit reasoning control.
@@ -150,7 +153,7 @@ step_temperatures:
 # Shared embedding model used by proximity analysis and RAG retrieval.
 # sentence_transformer_model: "all-MiniLM-L6-v2"
 use_lmstudio_embeddings: true
-sentence_transformer_model: "qwen/text-embedding-qwen3-embedding-8b"
+sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
 
 rag:
   # Maximum rewritten/corrective queries per retrieval round. The planner uses
@@ -230,6 +233,8 @@ paper_library:
 
 evidence_retrieval:
   max_queries: 8
+  # Reuse document embeddings across corrective retrieval rounds in a session.
+  embedding_cache_size: 512
   # Query instructions apply only on the query side; indexed passages remain
   # unchanged. Disable for embedding models that do not use instructions.
   query_instruction_enabled: true

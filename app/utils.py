@@ -6,6 +6,7 @@ import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional
 
+import httpx
 import numpy as np
 import requests
 from openai import OpenAI
@@ -80,6 +81,22 @@ def _request_timeout() -> float:
     return max(0.1, min(configured, deadline - time.monotonic()))
 
 
+def _openai_timeout() -> httpx.Timeout:
+    """Use a short connection timeout while preserving long inference reads."""
+
+    total = _request_timeout()
+    connect = max(0.1, min(total, float(config.get("lmstudio_connect_timeout_seconds", 10))))
+    return httpx.Timeout(total, connect=connect)
+
+
+def _native_request_timeout() -> tuple[float, float]:
+    """Return separate connect/read limits for the requests-based native API."""
+
+    total = _request_timeout()
+    connect = max(0.1, min(total, float(config.get("lmstudio_connect_timeout_seconds", 10))))
+    return connect, total
+
+
 def get_lmstudio_base_url() -> str:
     """Return the OpenAI-compatible LM Studio API base URL."""
     value = os.getenv("LMSTUDIO_BASE_URL") or config.get("lmstudio_base_url") or DEFAULT_LMSTUDIO_BASE_URL
@@ -108,7 +125,11 @@ def get_lmstudio_model(model: Optional[str] = None) -> str:
 def redact_secrets(text: str) -> str:
     """Remove provider credentials from logs and user-facing errors."""
     redacted = str(text)
-    for variable in ("LMSTUDIO_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INST_TOKEN"):
+    for variable in (
+        "LMSTUDIO_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INST_TOKEN",
+        "SEMANTIC_SCHOLAR_API_KEY", "SPRINGER_API_KEY", "SPRINGER_OPEN_ACCESS_API_KEY",
+        "SPRINGER_META_API_KEY", "TAVILY_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+    ):
         secret = os.getenv(variable)
         if secret:
             redacted = redacted.replace(secret, "***REDACTED***")
@@ -186,6 +207,10 @@ def classify_llm_error(error_text: str) -> str:
 
 def _format_lmstudio_error(exc: Exception, model: str) -> str:
     error = redact_secrets(str(exc))
+    response = getattr(exc, "response", None)
+    body = getattr(response, "text", None)
+    if isinstance(body, str) and body.strip():
+        error += " Response: " + redact_secrets(" ".join(body.split()))[:1000]
     lowered = error.lower()
     if "401" in error or "unauthorized" in lowered or "authentication" in lowered:
         return "Error: LM Studio authentication failed. Check LMSTUDIO_API_KEY."
@@ -221,6 +246,10 @@ def call_llm(
         return "Error: Cycle execution cancelled after reaching its time limit."
 
     started_at = time.perf_counter()
+    logger.info(
+        "LLM call started model=%s prompt_chars=%d max_output_tokens=%s reasoning=%s",
+        selected_model, len(prompt), max_tokens or config.get("llm_default_max_tokens", 8192), reasoning,
+    )
     try:
         output_token_limit = max_tokens
         if output_token_limit is None:
@@ -249,7 +278,7 @@ def call_llm(
                         get_lmstudio_native_chat_url(),
                         headers=_lmstudio_headers(),
                         json=payload,
-                        timeout=_request_timeout(),
+                        timeout=_native_request_timeout(),
                     )
                     response.raise_for_status()
                     response_payload = response.json()
@@ -271,30 +300,34 @@ def call_llm(
                 except Exception as exc:
                     response = getattr(exc, "response", None)
                     status_code = getattr(response, "status_code", None)
-                    retryable = isinstance(status_code, int) and 500 <= status_code < 600 and attempt < retry_count
-                    if not retryable:
+                    server_error = isinstance(status_code, int) and 500 <= status_code < 600
+                    if not server_error:
                         raise
-                    logger.warning(
-                        "LM Studio native chat returned HTTP %d; retrying once.",
-                        status_code,
-                    )
-                    time.sleep(
-                        max(
-                            0.0,
-                            float(
-                                config.get(
-                                    "lmstudio_native_retry_backoff_seconds",
-                                    1.0,
-                                )
-                            ),
+                    details = _format_lmstudio_error(exc, selected_model)
+                    if attempt < retry_count:
+                        logger.warning(
+                            "LM Studio native chat returned HTTP %d; retrying (%d/%d). model=%s prompt_chars=%d details=%s",
+                            status_code, attempt + 1, retry_count, selected_model, len(prompt), details,
                         )
+                        time.sleep(
+                            max(
+                                0.0,
+                                float(config.get("lmstudio_native_retry_backoff_seconds", 1.0)),
+                            )
+                        )
+                        continue
+                    logger.warning(
+                        "LM Studio native chat remained unavailable after %d attempt(s); "
+                        "falling back to /v1/chat/completions. model=%s prompt_chars=%d details=%s",
+                        attempt + 1, selected_model, len(prompt), details,
                     )
+                    break
 
         client = OpenAI(
             base_url=get_lmstudio_base_url(),
             api_key=get_lmstudio_api_key(),
             max_retries=0,
-            timeout=_request_timeout(),
+            timeout=_openai_timeout(),
         )
         messages = []
         if system_prompt:
@@ -385,7 +418,7 @@ class LMStudioSentenceTransformer:
 
     def __init__(self, model_name: Optional[str] = None):
         self.model_name = model_name or config.get(
-            "sentence_transformer_model", "qwen/text-embedding-qwen3-embedding-8b"
+            "sentence_transformer_model", "text-embedding-qwen3-embedding-8b"
         )
 
     def encode(
@@ -403,7 +436,7 @@ class LMStudioSentenceTransformer:
             base_url=get_lmstudio_base_url(),
             api_key=get_lmstudio_api_key(),
             max_retries=0,
-            timeout=config.get("llm_request_timeout_seconds", 180),
+            timeout=_openai_timeout(),
         )
         response = client.embeddings.create(
             model=self.model_name,

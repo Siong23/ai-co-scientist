@@ -89,12 +89,19 @@ jobs:
         run: |
           for attempt in {1..12}; do
             if curl --fail --silent http://127.0.0.1:7860/ > /dev/null; then
-              echo "AI Co-Scientist is ready."
-              exit 0
+              echo "AI Co-Scientist answered its first health probe."
+              break
             fi
             echo "Waiting for AI Co-Scientist (${attempt}/12)..."
             sleep 5
           done
+
+          sleep 10
+          if systemctl is-active --quiet ai-co-scientist.service && \
+             curl --fail --silent http://127.0.0.1:7860/ > /dev/null; then
+            echo "AI Co-Scientist stayed healthy after startup."
+            exit 0
+          fi
 
           systemctl status ai-co-scientist.service --no-pager || true
           journalctl -u ai-co-scientist.service -n 100 --no-pager || true

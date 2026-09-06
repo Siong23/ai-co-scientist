@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from math import sqrt
+from threading import Lock
 from typing import Any, Literal, Sequence, cast
 from urllib.parse import urlparse
 
@@ -146,6 +148,10 @@ class SharedSentenceTransformerEmbeddings(Embeddings):
         query_instruction: str | None = None,
     ) -> None:
         retrieval_config = config.get("evidence_retrieval", {})
+        self._embedding_cache = OrderedDict()
+        self._embedding_cache_lock = Lock()
+        self._embedding_cache_size = max(0, int(retrieval_config.get("embedding_cache_size", 512)))
+        self._embedding_cache_model = None
         self.query_instruction_enabled = (
             bool(retrieval_config.get("query_instruction_enabled", False))
             if query_instruction_enabled is None
@@ -165,6 +171,29 @@ class SharedSentenceTransformerEmbeddings(Embeddings):
             return []
 
         model = get_sentence_transformer_model()
+        if self._embedding_cache_size:
+            with self._embedding_cache_lock:
+                if self._embedding_cache_model is not model:
+                    self._embedding_cache.clear()
+                    self._embedding_cache_model = model
+                cached = {text: list(self._embedding_cache[text]) for text in texts if text in self._embedding_cache}
+                for text in cached:
+                    self._embedding_cache.move_to_end(text)
+            missing = list(dict.fromkeys(text for text in texts if text not in cached))
+            if missing:
+                vectors = model.encode(
+                    missing, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False,
+                ).tolist()
+                if len(vectors) != len(missing):
+                    raise ValueError("Embedding response does not match the requested document count.")
+                cached.update(zip(missing, vectors))
+                with self._embedding_cache_lock:
+                    if self._embedding_cache_model is model:
+                        for text in missing:
+                            self._embedding_cache[text] = list(cached[text])
+                        while len(self._embedding_cache) > self._embedding_cache_size:
+                            self._embedding_cache.popitem(last=False)
+            return [list(cached[text]) for text in texts]
         vectors = model.encode(
             texts,
             convert_to_numpy=True,
@@ -1637,6 +1666,14 @@ def format_documents_for_grading(
         )
         requested_freshness = field(document.metadata.get("freshness"), limit=40, default="Not specified")
         summary = str(document.metadata.get("summary") or document.metadata.get("abstract") or "")
+        full_text_passages = [
+            str(ref["text"]) for ref in document.metadata.get("evidence_refs", [])
+            if isinstance(ref, dict) and ref.get("evidence_type") == "full_text" and ref.get("text")
+        ]
+        if document.metadata.get("full_text_indexed") and full_text_passages:
+            summary = "\n".join(full_text_passages)
+        elif document.metadata.get("content_extracted") is True:
+            summary = document.page_content
         venue_line = ""
         if source_type == "academic":
             venue = field(document.metadata.get("venue") or document.metadata.get("primary_category"), limit=120)

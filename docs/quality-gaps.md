@@ -50,6 +50,33 @@ query scheduling, not live model throughput or total hypothesis generation time.
 Regression tests cover concurrent overlap, deterministic output, empty queries,
 error propagation, shared embedding reuse and explicit-model compatibility.
 
+## Local 5G run follow-up (2026-09-06)
+
+- Coverage evaluation failures stop generation instead of assigning every source
+  to every requirement. Unrelated candidates cannot fill the minimum source count.
+- Full-text-required mode no longer falls back to abstracts when every download
+  fails. Grading uses indexed evidence passages or extracted web content when
+  available. Empty evidence skips wasteful LLM grading calls.
+- Original-goal retrieval overlaps query planning. A bounded document-embedding
+  cache reuses unchanged documents across corrective rounds, and resets when the
+  shared model changes. Query-side instructions remain separate from documents.
+- An empty failed generation stops the dynamic cycle after its own bounded retries
+  rather than repeatedly restarting the entire pipeline. Finalization reports
+  `generation_failed`, preserving the error and incomplete status.
+- `python app.py` writes redacted rotating logs to `results/runtime-<PID>.log`.
+  LLM start/end records show elapsed time; HTTP error bodies are included in
+  redacted bounded form. Restart the application to enable this logging.
+- The configured embedding ID now matches the ID advertised by the user's
+  running LM Studio server. The collection identity includes the model name, so
+  the corrected configuration may populate a new collection on first use; old
+  collections remain intact.
+
+Observed live status: the application remained responsive, but its startup model
+probe to the configured private-network address timed out. The reported native
+HTTP 500 previously discarded its response body and ended the request after one
+retry. Runtime logging now preserves a bounded redacted body, and repeated native
+5xx responses fall back to the OpenAI-compatible chat endpoint.
+
 ## Current status and remaining work
 
 | Agent | Implemented | Remaining work / trade-off |
@@ -70,7 +97,7 @@ runs and cannot be inferred from unit tests. The Windows environment may need a
 writable `--basetemp` and `-p no:cacheprovider`; when GNU Make is unavailable, run
 `.venv/Scripts/python.exe -m pytest` with the same default marker exclusions.
 
-Final application validation: 420 passed, 4 skipped, 9 deselected in 15.50 s.
+Latest application validation: 433 passed, 4 skipped, 9 deselected in 18.78 s.
 Independent eval validation: 14 passed with its own uv environment.
 Repository-wide `ruff check .` passes. Existing untouched formatting differences
 remain outside this behavioral audit.

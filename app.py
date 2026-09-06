@@ -26,6 +26,7 @@ from app.run_store import (
     save_run,
     write_report,
 )
+from app.runtime_logging import configure_runtime_logging
 from app.utils import (
     classify_llm_error,
     execution_budget,
@@ -1692,6 +1693,8 @@ def create_gradio_interface():
 
 
 if __name__ == "__main__":
+    runtime_log = configure_runtime_logging()
+    logger.info("Runtime diagnostics are saved to %s", runtime_log)
     # Create and launch the Gradio app
     logger.info("Using LM Studio API at %s", get_lmstudio_base_url())
     demo = create_gradio_interface()

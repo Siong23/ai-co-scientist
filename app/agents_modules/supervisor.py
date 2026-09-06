@@ -698,6 +698,7 @@ class SupervisorAgent:
         context.supervisor_state["pending_tasks"] = []
 
         step_count = 0
+        stopped_reason = None
         while step_count < max_steps:
             if execution_cancelled():
                 cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
@@ -771,6 +772,12 @@ class SupervisorAgent:
 
             elif decision.action == "GENERATE":
                 last_new_hypotheses = self.step_generation(research_goal, context, publish, cycle_details)
+                if not last_new_hypotheses and not context.get_active_hypotheses() and cycle_details.get("errors"):
+                    # Generation already exhausted its bounded retrieval/repair
+                    # attempts. Repeating the entire pipeline wastes minutes.
+                    stopped_reason = "generation_failed"
+                    logger.warning("Stopping empty research cycle after generation failed.")
+                    break
 
             elif decision.action == "REFLECT":
                 target_hypos = None
@@ -824,7 +831,7 @@ class SupervisorAgent:
             )
 
         finalization = evaluate_finalization_readiness(context, research_goal)
-        finalization["status"] = "completed" if finalization["ready"] else "budget_exhausted"
+        finalization["status"] = "completed" if finalization["ready"] else (stopped_reason or "budget_exhausted")
         cycle_details["finalization"] = finalization
         cycle_details.setdefault("steps", {})["finalization"] = finalization
         context.supervisor_state["status"] = "completed" if finalization["ready"] else "incomplete"
@@ -843,7 +850,10 @@ class SupervisorAgent:
             (
                 "Finalization quality gate passed."
                 if finalization["ready"]
-                else "Compute budget ended before every finalization requirement passed."
+                else (
+                    "Generation could not produce verified candidates; inspect the reported evidence or model error."
+                    if stopped_reason else "Compute budget ended before every finalization requirement passed."
+                )
             ),
             details=list(finalization["reasons"]),
         )
