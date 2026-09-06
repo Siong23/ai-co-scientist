@@ -11,4 +11,3 @@ def normalize_goal(goal: str) -> str:
 def goals_match(actual: str, expected: str) -> bool:
     """Return whether two research goals match after whitespace normalization."""
     return normalize_goal(actual) == normalize_goal(expected)
-

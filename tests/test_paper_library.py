@@ -224,11 +224,14 @@ def test_generation_full_text_enrichment_uses_explicit_requirements():
     agent = GenerationAgent(paper_library=library)
     documents = [_document()]
 
-    assert agent._enrich_with_full_text(
-        documents,
-        ResearchGoal("Reduce latency"),
-        (EvidenceAspect("spikes", "traffic spike behavior"),),
-    ) == documents
+    assert (
+        agent._enrich_with_full_text(
+            documents,
+            ResearchGoal("Reduce latency"),
+            (EvidenceAspect("spikes", "traffic spike behavior"),),
+        )
+        == documents
+    )
     assert library.queries[0] == "Reduce latency"
     assert any("traffic spike behavior" in query for query in library.queries)
 

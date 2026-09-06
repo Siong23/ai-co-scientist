@@ -184,21 +184,9 @@ def academic_evidence_from_result(
         sub_question=str(result.get("sub_question") or "").strip() or None,
         purpose=str(result.get("purpose") or "").strip(),
         evidence_requirement_id=str(result.get("evidence_requirement_id") or "").strip() or None,
-        search_score=(
-            float(result["search_score"])
-            if isinstance(result.get("search_score"), (int, float))
-            else None
-        ),
-        rerank_score=(
-            float(result["rerank_score"])
-            if isinstance(result.get("rerank_score"), (int, float))
-            else None
-        ),
-        full_text_available=bool(
-            result.get("full_text_available")
-            or result.get("full_text_indexed")
-            or content
-        ),
+        search_score=(float(result["search_score"]) if isinstance(result.get("search_score"), (int, float)) else None),
+        rerank_score=(float(result["rerank_score"]) if isinstance(result.get("rerank_score"), (int, float)) else None),
+        full_text_available=bool(result.get("full_text_available") or result.get("full_text_indexed") or content),
         metadata=dict(result),
     )
 
@@ -277,15 +265,9 @@ def web_evidence_from_result(
         purpose=str(result.get("purpose") or "").strip(),
         evidence_requirement_id=str(result.get("evidence_requirement_id") or "").strip() or None,
         search_score=float(score) if isinstance(score, (int, float)) else None,
-        rerank_score=(
-            float(result["rerank_score"])
-            if isinstance(result.get("rerank_score"), (int, float))
-            else None
-        ),
+        rerank_score=(float(result["rerank_score"]) if isinstance(result.get("rerank_score"), (int, float)) else None),
         full_text_available=bool(
-            result.get("full_text_available")
-            or result.get("content_extracted")
-            or result.get("raw_content")
+            result.get("full_text_available") or result.get("content_extracted") or result.get("raw_content")
         ),
         metadata=dict(result),
     )

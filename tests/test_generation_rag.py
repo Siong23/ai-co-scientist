@@ -1449,6 +1449,35 @@ def test_literature_synthesis_recovers_an_empty_analytical_rationale_locally():
     assert "Closed-loop allocation improves responsiveness." in synthesis.analytical_rationale
     assert "abrupt traffic spikes" in synthesis.analytical_rationale
     assert "established findings" in synthesis.analytical_rationale
+    assert synthesis.warnings == (
+        "Literature synthesis omitted analytical_rationale; a conservative "
+        "rationale was constructed from validated findings and gaps.",
+    )
+    assert mock_call.call_count == 1
+
+
+def test_literature_synthesis_does_not_recover_without_established_findings():
+    payload = json.dumps(
+        {
+            "established_findings": [],
+            "contradictions": [],
+            "knowledge_gaps": ["Performance during abrupt traffic spikes is unresolved."],
+            "analytical_rationale": "",
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Allocate 5G slice bandwidth during traffic spikes.",
+            (EvidenceAspect("core_topic", "The user-stated core topic."),),
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+        )
+
+    assert synthesis is None
+    assert synthesis_error is not None
+    assert "No established finding cited a retrieved source" in synthesis_error
     assert mock_call.call_count == 1
 
 

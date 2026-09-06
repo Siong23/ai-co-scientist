@@ -237,11 +237,7 @@ def render_report(run: Dict[str, Any]) -> str:
     #     if step_name == "meta_review":
     #         html_parts.append(f"<pre>{_escape(json.dumps(step_data, indent=2, sort_keys=True))}</pre>")
     for step_name, step_data in steps.items():
-        hypotheses = (
-            step_data.get("hypotheses", [])
-            if isinstance(step_data, dict)
-            else []
-        )
+        hypotheses = step_data.get("hypotheses", []) if isinstance(step_data, dict) else []
         html_parts.append(f"<h3>{_escape(step_name)}</h3>")
         html_parts.append(f"<p>{len(hypotheses)} hypotheses</p>")
 
@@ -267,18 +263,9 @@ def render_report(run: Dict[str, Any]) -> str:
                 for result in tournament:
                     confidence = f"{result.get('confidence', 1)}/10"
                     criteria = ", ".join(result.get("criteria", []))
-                    title_lookup = {
-                        h["id"]: h["title"]
-                        for h in hypotheses
-                    }
-                    title_a = title_lookup.get(
-                        result.get("hypothesis_a"),
-                        result.get("hypothesis_a")
-                    )
-                    title_b = title_lookup.get(
-                        result.get("hypothesis_b"),
-                        result.get("hypothesis_b")
-                    )
+                    title_lookup = {h["id"]: h["title"] for h in hypotheses}
+                    title_a = title_lookup.get(result.get("hypothesis_a"), result.get("hypothesis_a"))
+                    title_b = title_lookup.get(result.get("hypothesis_b"), result.get("hypothesis_b"))
                     html_parts.append(f"""
                     <tr>
                         <td>
@@ -300,7 +287,7 @@ def render_report(run: Dict[str, Any]) -> str:
                         </td>
 
                         <td>
-                            {_escape(result.get("reasoning",""))}
+                            {_escape(result.get("reasoning", ""))}
                         </td>
                     </tr>
                     """)
@@ -411,7 +398,7 @@ def _hypothesis_block(index: int, hypothesis: Dict[str, Any]) -> str:
     return (
         '<div class="hypothesis">'
         f"<h3>Rank #{index}</h3>"
-        f"<p><strong>Title:</strong> {_escape(hypothesis.get('title'),'Untitled')}</p>"
+        f"<p><strong>Title:</strong> {_escape(hypothesis.get('title'), 'Untitled')}</p>"
         f"<p><strong>ID:</strong> {_escape(hypothesis.get('id'))}</p>"
         f"<p><strong>Elo Score:</strong> {_escape(hypothesis.get('elo_score'))}</p>"
         f"<p><strong>Novelty:</strong> {_escape(hypothesis.get('novelty_review'))}</p>"

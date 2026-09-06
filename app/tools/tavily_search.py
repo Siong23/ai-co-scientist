@@ -61,11 +61,7 @@ class TavilySearchTool:
         self.last_error_status = None
         limit = max_results if max_results is not None else self.max_results
         domains = list(
-            dict.fromkeys(
-                str(domain).strip().casefold()
-                for domain in include_domains
-                if str(domain).strip()
-            )
+            dict.fromkeys(str(domain).strip().casefold() for domain in include_domains if str(domain).strip())
         )
         freshness = str(time_range or "").strip().casefold()
         if freshness not in {"day", "week", "month", "year"}:
@@ -119,18 +115,12 @@ class TavilySearchTool:
     ) -> dict[str, str]:
         """Extract bounded query-relevant chunks from already selected URLs."""
 
-        selected_urls = list(
-            dict.fromkeys(str(url).strip() for url in urls if str(url).strip())
-        )
+        selected_urls = list(dict.fromkeys(str(url).strip() for url in urls if str(url).strip()))
         query = query.strip()
         if not selected_urls or not query or not self.is_configured:
             return {}
 
-        chunk_limit = (
-            self.extract_chunks_per_source
-            if chunks_per_source is None
-            else max(1, min(5, chunks_per_source))
-        )
+        chunk_limit = self.extract_chunks_per_source if chunks_per_source is None else max(1, min(5, chunks_per_source))
         self.last_error_status = None
         try:
             response = requests.post(
@@ -145,14 +135,10 @@ class TavilySearchTool:
                 },
                 timeout=_DEFAULT_EXTRACT_TIMEOUT,
             )
-            self.last_error_status = (
-                response.status_code if response.status_code in (429, 503) else None
-            )
+            self.last_error_status = response.status_code if response.status_code in (429, 503) else None
             response.raise_for_status()
             extracted = {
-                canonicalize_url(str(result.get("url") or "")): str(
-                    result.get("raw_content") or ""
-                ).strip()
+                canonicalize_url(str(result.get("url") or "")): str(result.get("raw_content") or "").strip()
                 for result in response.json().get("results", [])
                 if result.get("url") and str(result.get("raw_content") or "").strip()
             }

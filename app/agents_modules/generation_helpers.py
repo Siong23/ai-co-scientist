@@ -1841,6 +1841,7 @@ class LiteratureSynthesis:
     contradictions: tuple[LiteratureFinding, ...]
     knowledge_gaps: tuple[str, ...]
     analytical_rationale: str
+    warnings: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -2687,6 +2688,7 @@ Malformed response:
             return None, f"Literature synthesis failed after format repair: {exc}"
 
     try:
+
         def validated_findings(field_name: str) -> tuple[LiteratureFinding, ...]:
             raw_findings = payload.get(field_name)
             if not isinstance(raw_findings, list):
@@ -2720,13 +2722,9 @@ Malformed response:
                         abstract_ref = available_evidence_refs.get(f"abstract:{source_id}")
                         if abstract_ref is not None:
                             evidence_refs.append(dict(abstract_ref))
-                evidence_refs = list(
-                    {str(ref["chunk_id"]): ref for ref in evidence_refs}.values()
-                )
+                evidence_refs = list({str(ref["chunk_id"]): ref for ref in evidence_refs}.values())
                 if evidence_refs:
-                    valid_source_ids = list(
-                        dict.fromkeys(str(ref["source_id"]) for ref in evidence_refs)
-                    )
+                    valid_source_ids = list(dict.fromkeys(str(ref["source_id"]) for ref in evidence_refs))
                 # Once chunk provenance is available, paper-level citations by
                 # themselves are not sufficient for an established finding.
                 provenance_valid = not available_evidence_refs or bool(evidence_refs)
@@ -2749,38 +2747,36 @@ Malformed response:
         knowledge_gaps = tuple(dict.fromkeys(gap.strip() for gap in raw_gaps if isinstance(gap, str) and gap.strip()))
         if not established_findings:
             raise ValueError("No established finding cited a retrieved source.")
+        synthesis_warnings: tuple[str, ...] = ()
         if not analytical_rationale:
             # Some local reasoning models occasionally return a complete,
             # otherwise valid synthesis with only this prose field empty. The
             # cited findings and gaps already contain everything needed for a
             # conservative bridge, so recover locally instead of discarding the
             # entire retrieval pass or making another long model call.
-            finding_summary = "; ".join(
-                finding.claim for finding in established_findings[:3]
-            )
-            rationale_parts = [
-                f"The cited literature establishes the following relevant evidence: {finding_summary}."
-            ]
+            finding_summary = "; ".join(finding.claim for finding in established_findings[:3])
+            rationale_parts = [f"The cited literature establishes the following relevant evidence: {finding_summary}."]
             if knowledge_gaps:
                 gap_summary = "; ".join(knowledge_gaps[:3])
-                rationale_parts.append(
-                    f"The review also leaves these questions unresolved: {gap_summary}."
-                )
+                rationale_parts.append(f"The review also leaves these questions unresolved: {gap_summary}.")
             rationale_parts.append(
                 "These unresolved questions motivate testable research directions "
                 "without treating the proposed directions as established findings."
             )
             analytical_rationale = " ".join(rationale_parts)
-            logger.warning(
-                "Literature synthesis omitted analytical_rationale; built a "
-                "conservative rationale from validated findings and gaps."
+            recovery_warning = (
+                "Literature synthesis omitted analytical_rationale; a conservative "
+                "rationale was constructed from validated findings and gaps."
             )
+            synthesis_warnings = (recovery_warning,)
+            logger.warning(recovery_warning)
 
         synthesis = LiteratureSynthesis(
             established_findings=established_findings,
             contradictions=contradictions,
             knowledge_gaps=knowledge_gaps,
             analytical_rationale=analytical_rationale,
+            warnings=synthesis_warnings,
         )
         logger.info(
             "Literature synthesis produced %d findings, %d contradictions, and %d gaps.",
@@ -2916,11 +2912,7 @@ def classify_numeric_specificity(
                 classification = "user_provided"
             elif _is_experimental_design_parameter(field_name, text, match):
                 window = text[max(0, match.start() - 80) : match.end() + 80].casefold()
-                classification = (
-                    "derived_research_margin"
-                    if "margin" in window
-                    else "experimental_design_parameter"
-                )
+                classification = "derived_research_margin" if "margin" in window else "experimental_design_parameter"
             else:
                 classification = "unsupported"
             classifications.append(
@@ -2931,7 +2923,6 @@ def classify_numeric_specificity(
                 }
             )
     return classifications
-
 
 
 def _grounded_numeric_specificity_not_in_evidence(
@@ -2948,6 +2939,7 @@ def _grounded_numeric_specificity_not_in_evidence(
             if item["classification"] == "unsupported"
         )
     )
+
 
 def call_llm_for_grounded_hypothesis_audit(
     research_goal: str,
@@ -3052,9 +3044,7 @@ original draft. A rejected item may use null for final_hypothesis.
                 scores = {score_name: score * 10 for score_name, score in scores.items()}
 
             known_evidence_ref_ids = (
-                set(available_evidence_refs)
-                if available_evidence_refs is not None
-                else available_evidence_ref_ids
+                set(available_evidence_refs) if available_evidence_refs is not None else available_evidence_ref_ids
             )
             claim_assessments: list[dict] = []
             raw_claim_assessments = raw_audit.get("claim_assessments", [])
@@ -3072,33 +3062,36 @@ original draft. A rejected item may use null for final_hypothesis.
                     }:
                         continue
                     raw_chunk_ids = raw_claim.get("chunk_ids", [])
-                    chunk_ids = [
-                        str(chunk_id).strip()
-                        for chunk_id in raw_chunk_ids
-                        if isinstance(chunk_id, str)
-                        and str(chunk_id).strip()
-                        and (
-                            known_evidence_ref_ids is None
-                            or str(chunk_id).strip() in known_evidence_ref_ids
-                        )
-                    ] if isinstance(raw_chunk_ids, list) else []
+                    chunk_ids = (
+                        [
+                            str(chunk_id).strip()
+                            for chunk_id in raw_chunk_ids
+                            if isinstance(chunk_id, str)
+                            and str(chunk_id).strip()
+                            and (known_evidence_ref_ids is None or str(chunk_id).strip() in known_evidence_ref_ids)
+                        ]
+                        if isinstance(raw_chunk_ids, list)
+                        else []
+                    )
                     chunk_ids = list(dict.fromkeys(chunk_ids))
                     raw_spans = raw_claim.get("evidence_spans", [])
-                    evidence_spans = [
-                        span.strip()
-                        for span in raw_spans
-                        if isinstance(span, str)
-                        and span.strip()
-                        and span.strip().casefold() in retrieved_context.casefold()
-                    ] if isinstance(raw_spans, list) else []
+                    evidence_spans = (
+                        [
+                            span.strip()
+                            for span in raw_spans
+                            if isinstance(span, str)
+                            and span.strip()
+                            and span.strip().casefold() in retrieved_context.casefold()
+                        ]
+                        if isinstance(raw_spans, list)
+                        else []
+                    )
                     source_id = _resolve_retrieved_source_id(
                         str(raw_claim.get("source_id", "")),
                         available_source_ids,
                     )
                     provenance = (
-                        available_evidence_refs.get(chunk_ids[0], {})
-                        if available_evidence_refs and chunk_ids
-                        else {}
+                        available_evidence_refs.get(chunk_ids[0], {}) if available_evidence_refs and chunk_ids else {}
                     )
                     if source_id is None and provenance:
                         source_id = str(provenance.get("source_id", "")) or None
@@ -3139,16 +3132,17 @@ original draft. A rejected item may use null for final_hypothesis.
                         valid_final = {field: final_hypothesis[field].strip() for field in required_fields}
                         valid_final["source_ids"] = valid_source_ids
                         raw_evidence_refs = final_hypothesis.get("evidence_refs", [])
-                        valid_final["evidence_refs"] = [
-                            str(value).strip()
-                            for value in raw_evidence_refs
-                            if isinstance(value, str)
-                            and str(value).strip()
-                            and (
-                                known_evidence_ref_ids is None
-                                or str(value).strip() in known_evidence_ref_ids
-                            )
-                        ] if isinstance(raw_evidence_refs, list) else []
+                        valid_final["evidence_refs"] = (
+                            [
+                                str(value).strip()
+                                for value in raw_evidence_refs
+                                if isinstance(value, str)
+                                and str(value).strip()
+                                and (known_evidence_ref_ids is None or str(value).strip() in known_evidence_ref_ids)
+                            ]
+                            if isinstance(raw_evidence_refs, list)
+                            else []
+                        )
 
             draft_unsupported_claims = tuple(
                 dict.fromkeys(
@@ -3184,9 +3178,7 @@ original draft. A rejected item may use null for final_hypothesis.
                     if isinstance(value, str) and value.strip()
                 )
             )
-            numeric_grounding_enabled = bool(
-                config.get("validation", {}).get("numeric_grounding_enabled", True)
-            )
+            numeric_grounding_enabled = bool(config.get("validation", {}).get("numeric_grounding_enabled", True))
             if valid_final is not None and numeric_grounding_enabled:
                 unsupported_numbers = list(
                     dict.fromkeys(
@@ -3246,9 +3238,7 @@ original draft. A rejected item may use null for final_hypothesis.
             if known_evidence_ref_ids is not None and not claim_assessments:
                 hard_failures.append("No atomic claim assessments were provided.")
             non_entailed_claims = [
-                assessment
-                for assessment in claim_assessments
-                if assessment["support_status"] != "entailed"
+                assessment for assessment in claim_assessments if assessment["support_status"] != "entailed"
             ]
             if non_entailed_claims:
                 hard_failures.append("One or more final factual claims are not entailed by their evidence chunks.")
@@ -3294,6 +3284,7 @@ original draft. A rejected item may use null for final_hypothesis.
         logger.error("Could not parse hypothesis audit response: %s", response, exc_info=True)
         return None, f"Hypothesis audit failed: {exc}"
 
+
 def build_evidence_queries(
     research_goal: str,
     explicit_requirements: tuple[EvidenceAspect, ...],
@@ -3318,6 +3309,7 @@ def build_evidence_queries(
             queries.append(f"{requirement.description} {suffix}".strip())
     return tuple(dict.fromkeys(query for query in queries if query))[:max_queries]
 
+
 def call_llm_for_full_text_evidence_coverage(
     research_goal: str,
     explicit_requirements: tuple[EvidenceAspect, ...],
@@ -3328,9 +3320,7 @@ def call_llm_for_full_text_evidence_coverage(
 ) -> tuple[EvidenceCoverage | None, str | None]:
     """Validate requirements against exact retrieved passages after indexing."""
 
-    aspect_text = "\n".join(
-        f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements
-    )
+    aspect_text = "\n".join(f"- {aspect.aspect_id}: {aspect.description}" for aspect in explicit_requirements)
     prompt = f"""
 You are the full-text evidence-coverage gate for scientific hypothesis generation.
 
@@ -3385,12 +3375,8 @@ Retrieved evidence:
             raise ValueError("Expected 'aspect_coverage' and 'gap_queries' arrays.")
 
         known_aspect_ids = {aspect.aspect_id for aspect in explicit_requirements}
-        aspect_evidence_refs: dict[str, tuple[dict, ...]] = {
-            aspect_id: () for aspect_id in known_aspect_ids
-        }
-        aspect_source_ids: dict[str, tuple[str, ...]] = {
-            aspect_id: () for aspect_id in known_aspect_ids
-        }
+        aspect_evidence_refs: dict[str, tuple[dict, ...]] = {aspect_id: () for aspect_id in known_aspect_ids}
+        aspect_source_ids: dict[str, tuple[str, ...]] = {aspect_id: () for aspect_id in known_aspect_ids}
         for item in raw_coverage:
             if not isinstance(item, dict):
                 continue
@@ -3408,26 +3394,16 @@ Retrieved evidence:
                 if known_ref is None or str(known_ref.get("source_id", "")) != source_id:
                     continue
                 valid_refs.append(dict(known_ref))
-            deduplicated = {
-                str(ref["chunk_id"]): ref for ref in valid_refs if ref.get("chunk_id")
-            }
+            deduplicated = {str(ref["chunk_id"]): ref for ref in valid_refs if ref.get("chunk_id")}
             ordered_refs = tuple(deduplicated.values())
             aspect_evidence_refs[aspect_id] = ordered_refs
-            aspect_source_ids[aspect_id] = tuple(
-                dict.fromkeys(str(ref["source_id"]) for ref in ordered_refs)
-            )
+            aspect_source_ids[aspect_id] = tuple(dict.fromkeys(str(ref["source_id"]) for ref in ordered_refs))
 
         missing_aspect_ids = tuple(
-            aspect.aspect_id
-            for aspect in explicit_requirements
-            if not aspect_evidence_refs[aspect.aspect_id]
+            aspect.aspect_id for aspect in explicit_requirements if not aspect_evidence_refs[aspect.aspect_id]
         )
         gap_queries = tuple(
-            dict.fromkeys(
-                query.strip()
-                for query in raw_gap_queries
-                if isinstance(query, str) and query.strip()
-            )
+            dict.fromkeys(query.strip() for query in raw_gap_queries if isinstance(query, str) and query.strip())
         )[:max_gap_queries]
         coverage = EvidenceCoverage(
             aspect_source_ids=aspect_source_ids,

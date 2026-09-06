@@ -37,6 +37,26 @@ def _source_details(sources: List[Mapping[str, Any]]) -> List[str]:
     return details
 
 
+def _generation_stage_details(diagnostics: Mapping[str, Any]) -> List[str]:
+    """Format retrieval, synthesis, and generation as distinct run stages."""
+
+    labels = {
+        "evidence_retrieval": "Evidence retrieval",
+        "literature_synthesis": "Literature synthesis",
+        "hypothesis_generation": "Hypothesis generation",
+    }
+    details = []
+    for stage_name, label in labels.items():
+        stage = diagnostics.get(stage_name, {})
+        if not isinstance(stage, Mapping):
+            continue
+        status = str(stage.get("status") or "unknown").replace("_", " ")
+        detail = _shorten(stage.get("detail") or "", 220)
+        suffix = f" — {detail}" if detail else ""
+        details.append(f"{label}: {status}{suffix}")
+    return details
+
+
 def _reflection_details(hypotheses: List[Any]) -> List[str]:
     details = []
     for hypothesis in hypotheses[:4]:
@@ -169,6 +189,14 @@ class SupervisorAgent:
 
         generation_sources = list(context.last_retrieved_sources)
         generation_audits = list(context.last_hypothesis_audits)
+        generation_diagnostics = dict(context.last_generation_diagnostics)
+        raw_generation_warnings = generation_diagnostics.get("warnings", [])
+        if not isinstance(raw_generation_warnings, (list, tuple)):
+            raw_generation_warnings = []
+        generation_warnings = [str(warning) for warning in raw_generation_warnings if str(warning).strip()]
+        evidence_consumed = generation_diagnostics.get("evidence_consumed")
+        if not isinstance(evidence_consumed, bool):
+            evidence_consumed = bool(new_hypotheses and generation_sources)
         query_plan = getattr(
             self.generation_agent.rag_retriever,
             "last_query_plan",
@@ -214,13 +242,24 @@ class SupervisorAgent:
             "search_stats": list(getattr(self.generation_agent.rag_retriever, "last_search_stats", [])),
             "query_plan": query_plan_details,
             "query_fidelity": list(query_fidelity),
+            "stages": {
+                name: dict(generation_diagnostics.get(name, {}))
+                for name in (
+                    "evidence_retrieval",
+                    "literature_synthesis",
+                    "hypothesis_generation",
+                )
+            },
+            "warnings": generation_warnings,
+            "evidence_consumed": evidence_consumed,
         }
 
         audit_counts: Dict[str, int] = {}
         for audit in generation_audits:
             verdict = str(audit.get("verdict") or audit.get("status") or "unknown").upper()
             audit_counts[verdict] = audit_counts.get(verdict, 0) + 1
-        generation_details = _source_details(generation_sources)
+        generation_details = _generation_stage_details(generation_diagnostics)
+        generation_details.extend(_source_details(generation_sources))
         for hypothesis in query_plan_details["provisional_hypotheses"]:
             generation_details.append(
                 f"Provisional {hypothesis['role']} retrieval hypothesis: {hypothesis['statement']}"
@@ -231,9 +270,17 @@ class SupervisorAgent:
 
         publish(
             "generation",
-            "warning" if generation_errors else "completed",
+            "warning" if generation_errors or generation_warnings else "completed",
             "Discovering evidence and generating hypotheses",
-            f"Generated {len(new_hypotheses)} candidate hypotheses from {len(generation_sources)} evidence sources.",
+            (
+                f"Generated {len(new_hypotheses)} candidate hypotheses from "
+                f"{len(generation_sources)} validated evidence sources."
+                if evidence_consumed
+                else (
+                    f"Retrieved and validated {len(generation_sources)} evidence sources; "
+                    "hypothesis generation was not executed."
+                )
+            ),
             details=generation_details,
             elapsed_seconds=time.perf_counter() - phase_started,
             sources=generation_sources,
@@ -241,6 +288,9 @@ class SupervisorAgent:
 
         if generation_errors:
             cycle_details["errors"] = generation_errors
+        if generation_warnings:
+            warnings = cycle_details.setdefault("warnings", [])
+            warnings.extend(warning for warning in generation_warnings if warning not in warnings)
 
         return new_hypotheses
 
@@ -752,16 +802,11 @@ class SupervisorAgent:
                             "Finalization gate found evidence gaps; evolving finalists with grounding strategies."
                         )
 
-            if (
-                decision.action == "GENERATE"
-                and generation_step_count >= self.max_generation_steps_per_cycle
-            ):
+            if decision.action == "GENERATE" and generation_step_count >= self.max_generation_steps_per_cycle:
                 active_hypotheses = context.get_active_hypotheses()
                 routing = _reflection_routing(active_hypotheses)
                 actions_taken = {
-                    str(item.get("action", "")).upper()
-                    for item in supervisor_decisions
-                    if isinstance(item, dict)
+                    str(item.get("action", "")).upper() for item in supervisor_decisions if isinstance(item, dict)
                 }
                 if routing["unreviewed"]:
                     decision.action = "REFLECT"
@@ -769,9 +814,7 @@ class SupervisorAgent:
                         "The bounded Generation batch is complete; reviewing its remaining candidates "
                         "instead of repeating retrieval and generation."
                     )
-                    decision.target_hypothesis_ids = [
-                        hypothesis.hypothesis_id for hypothesis in routing["unreviewed"]
-                    ]
+                    decision.target_hypothesis_ids = [hypothesis.hypothesis_id for hypothesis in routing["unreviewed"]]
                 elif active_hypotheses and "EVOLVE" not in actions_taken:
                     decision.action = "EVOLVE"
                     decision.reasoning = (

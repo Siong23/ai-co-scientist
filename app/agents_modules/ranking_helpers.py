@@ -24,10 +24,12 @@ RANKING_LLM_MODEL = "qwen/qwen3.6-35b-a3b"
 
 def _get_ranking_model() -> str:
     from ..config import config
+
     model = config.get("ranking_llm_model")
     if model:
         return model
     return config.get("llm_model", RANKING_LLM_MODEL)
+
 
 def clean_markdown(text):
     if not text:
@@ -36,6 +38,7 @@ def clean_markdown(text):
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = text.replace("**", "")
     return text.strip()
+
 
 def score_hypothesis(
     hypothesis: Hypothesis,
@@ -57,6 +60,7 @@ def score_hypothesis(
         "overall_confidence": report.overall_confidence,
     }
 
+
 def parse_confidence(response: str) -> int:
     """Parse the ranking judge's required integer confidence score from 1 to 10."""
 
@@ -66,6 +70,7 @@ def parse_confidence(response: str) -> int:
         re.IGNORECASE,
     )
     return int(match.group(1)) if match else 1
+
 
 def parse_decisive_criteria(response: str) -> List[str]:
 
@@ -115,13 +120,7 @@ def format_evidence_sources(hypothesis: Hypothesis) -> str:
         url = source.get("url", "")
 
         # Prefer the most useful available text representation.
-        evidence_text = (
-            content
-            or abstract
-            or summary
-            or source.get("finding", "")
-            or "No source content available."
-        )
+        evidence_text = content or abstract or summary or source.get("finding", "") or "No source content available."
 
         entry = [
             f"Evidence {idx}",
@@ -235,17 +234,23 @@ def format_reflection_report(
             claim_text = getattr(claim, "claim", "")
             status = getattr(claim, "status", "UNVERIFIED")
 
-            supporting_ids = getattr(
-                claim,
-                "supporting_source_ids",
-                [],
-            ) or []
+            supporting_ids = (
+                getattr(
+                    claim,
+                    "supporting_source_ids",
+                    [],
+                )
+                or []
+            )
 
-            contradictory_ids = getattr(
-                claim,
-                "contradictory_source_ids",
-                [],
-            ) or []
+            contradictory_ids = (
+                getattr(
+                    claim,
+                    "contradictory_source_ids",
+                    [],
+                )
+                or []
+            )
 
             output.extend(
                 [
@@ -253,18 +258,8 @@ def format_reflection_report(
                     f"Claim {idx}: {claim_text}",
                     f"Status: {status}",
                     f"Confidence: {getattr(claim, 'confidence', 1.0)}/10",
-                    "Supporting Source IDs: "
-                    + (
-                        ", ".join(supporting_ids)
-                        if supporting_ids
-                        else "None"
-                    ),
-                    "Contradictory Source IDs: "
-                    + (
-                        ", ".join(contradictory_ids)
-                        if contradictory_ids
-                        else "None"
-                    ),
+                    "Supporting Source IDs: " + (", ".join(supporting_ids) if supporting_ids else "None"),
+                    "Contradictory Source IDs: " + (", ".join(contradictory_ids) if contradictory_ids else "None"),
                 ]
             )
     else:
@@ -304,6 +299,7 @@ def format_reflection_report(
 
     return "\n".join(output)
 
+
 def generate_debate_argument(
     candidate: Hypothesis,
     opponent: Hypothesis,
@@ -316,9 +312,7 @@ def generate_debate_argument(
     """
 
     considerations = (
-        "\n".join(f"- {k}: {v}" for k, v in research_goal.constraints.items())
-        if research_goal.constraints
-        else "None"
+        "\n".join(f"- {k}: {v}" for k, v in research_goal.constraints.items()) if research_goal.constraints else "None"
     )
     candidate_evidence = format_evidence_sources(candidate)
     opponent_evidence = format_evidence_sources(opponent)
@@ -378,6 +372,7 @@ def generate_debate_argument(
         model=_get_ranking_model(),
         reasoning="off",
     )
+
 
 def judge_debate(
     hypoA: Hypothesis,
@@ -685,11 +680,7 @@ def run_pairwise_debate(
         if not report_b:
             missing.append(f"B ({hypoB.hypothesis_id})")
 
-        reason = (
-            "Ranking abstained because the required ReflectionReport "
-            "is missing for: "
-            + ", ".join(missing)
-        )
+        reason = "Ranking abstained because the required ReflectionReport is missing for: " + ", ".join(missing)
 
         logger.warning(reason)
 
@@ -701,9 +692,7 @@ def run_pairwise_debate(
             scores_b={},
             confidence=1,
             reasoning=reason,
-            decisive_criteria=[
-                "Required ReflectionReport is missing."
-            ],
+            decisive_criteria=["Required ReflectionReport is missing."],
         )
 
     # ------------------------------------------------------------
@@ -727,10 +716,7 @@ def run_pairwise_debate(
 
     # Defensive check
     if not scores_a or not scores_b:
-        reason = (
-            "Ranking abstained because one or both ReflectionReports "
-            "could not produce valid ranking scores."
-        )
+        reason = "Ranking abstained because one or both ReflectionReports could not produce valid ranking scores."
 
         logger.warning(reason)
 
@@ -742,9 +728,7 @@ def run_pairwise_debate(
             scores_b=scores_b,
             confidence=1,
             reasoning=reason,
-            decisive_criteria=[
-                "Invalid or incomplete ReflectionReport scores."
-            ],
+            decisive_criteria=["Invalid or incomplete ReflectionReport scores."],
         )
 
     # ------------------------------------------------------------
@@ -767,9 +751,7 @@ def run_pairwise_debate(
 
     confidence = parse_confidence(response)
     criteria = parse_decisive_criteria(response)
-    reasoning = clean_markdown(
-        parse_short_justification(response)
-    )
+    reasoning = clean_markdown(parse_short_justification(response))
     if not reasoning:
         decision_label = {
             "A": "Hypothesis A was selected",
@@ -777,9 +759,7 @@ def run_pairwise_debate(
             "TIE": "The hypotheses were judged to be tied",
             "ABSTAIN": "The ranking judge abstained",
         }[outcome]
-        reasoning = (
-            f"{decision_label}, but the ranking judge did not provide a parseable justification."
-        )
+        reasoning = f"{decision_label}, but the ranking judge did not provide a parseable justification."
 
     logger.info(
         "Pairwise ranking response:\n%s",
@@ -800,21 +780,16 @@ def run_pairwise_debate(
 
 def update_elo_tie(hypoA: Hypothesis, hypoB: Hypothesis, k_factor: int):
 
-    ratingA=hypoA.elo_score
-    ratingB=hypoB.elo_score
+    ratingA = hypoA.elo_score
+    ratingB = hypoB.elo_score
 
+    expectedA = 1 / (1 + math.pow(10, (ratingB - ratingA) / 400))
 
-    expectedA = 1/(1+math.pow(
-        10,
-        (ratingB-ratingA)/400
-    ))
+    expectedB = 1 - expectedA
 
-    expectedB = 1-expectedA
+    hypoA.elo_score += k_factor * (0.5 - expectedA)
 
-
-    hypoA.elo_score += k_factor*(0.5-expectedA)
-
-    hypoB.elo_score += k_factor*(0.5-expectedB)
+    hypoB.elo_score += k_factor * (0.5 - expectedB)
 
 
 def parse_pairwise_result(response: str) -> str:
@@ -842,7 +817,7 @@ def parse_pairwise_result(response: str) -> str:
         ],
         "ABSTAIN": [
             r"decision\s*:\s*ABSTAIN\b",
-        ]
+        ],
     }
 
     for label, regexes in patterns.items():
@@ -850,9 +825,7 @@ def parse_pairwise_result(response: str) -> str:
             if re.search(pattern, response, re.IGNORECASE):
                 return label
 
-    raise ValueError(
-        "Could not determine ranking decision."
-    )
+    raise ValueError("Could not determine ranking decision.")
 
 
 def update_elo(winner: Hypothesis, loser: Hypothesis, k_factor: int):

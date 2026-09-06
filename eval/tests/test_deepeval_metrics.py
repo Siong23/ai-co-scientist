@@ -7,11 +7,7 @@ from rubrics.deepeval_metrics import (
 
 
 def parsed_run(*, evidence=True):
-    sources = (
-        [{"source_id": "doi:example", "title": "Humidity barrier study"}]
-        if evidence
-        else []
-    )
+    sources = [{"source_id": "doi:example", "title": "Humidity barrier study"}] if evidence else []
     return {
         "run_id": "run-test",
         "research_goal": "Improve perovskite humidity stability.",
@@ -47,9 +43,7 @@ def test_build_test_case_maps_saved_artifact_fields():
 
     assert "Hydrophobic barrier" in case.actual_output
     assert "1,000 hours" in case.actual_output
-    assert case.retrieval_context == [
-        '{"source_id": "doi:example", "title": "Humidity barrier study"}'
-    ]
+    assert case.retrieval_context == ['{"source_id": "doi:example", "title": "Humidity barrier study"}']
     assert case.metadata["hypothesis_id"] == "H1"
 
 

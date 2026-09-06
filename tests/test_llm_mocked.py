@@ -193,11 +193,7 @@ def test_generation_retries_when_model_reports_incomplete_candidate_response():
         "source_ids": ["arXiv:1111.1111"],
     }
     incomplete_error = json.dumps(
-        {
-            "error": (
-                "Incomplete candidate response: missing closing brackets and remaining fields."
-            )
-        }
+        {"error": ("Incomplete candidate response: missing closing brackets and remaining fields.")}
     )
 
     with patch(
@@ -218,9 +214,7 @@ def test_generation_recovers_when_format_repair_reports_missing_candidate_conten
         "feasibility": "Complete feasibility.",
         "source_ids": ["arXiv:1111.1111"],
     }
-    incomplete_error = json.dumps(
-        {"error": "Incomplete candidate response: missing remaining fields."}
-    )
+    incomplete_error = json.dumps({"error": "Incomplete candidate response: missing remaining fields."})
 
     with patch(
         "app.agents.call_llm",
@@ -280,10 +274,10 @@ def test_reflection_error_returns_not_reviewed():
     hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-id-1")
     research_goal = ResearchGoal(description="test goal", constraints="")
     context = ContextMemory()
-    
+
     with patch("app.agents.call_llm", return_value="Error: API call failed"):
         review = call_llm_for_reflection(hypothesis, research_goal, context)
-    
+
     assert review["novelty_review"] == "UNREVIEWED"
     assert review["feasibility_review"] == "UNREVIEWED"
     assert review["references"] == []
@@ -394,37 +388,82 @@ def test_reflection_three_tier_recommendations():
     from app.agents_modules.reflection_helpers import _recommendation_from_scores
 
     # All >= 5 -> ACCEPT
-    assert _recommendation_from_scores({
-        "alignment_score": 5, "novelty_score": 6, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "ACCEPT"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 5,
+                "novelty_score": 6,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "ACCEPT"
+    )
 
     # Any in [3, 4] and none < 3 -> REVISE
-    assert _recommendation_from_scores({
-        "alignment_score": 5, "novelty_score": 4, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "REVISE"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 5,
+                "novelty_score": 4,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "REVISE"
+    )
 
-    assert _recommendation_from_scores({
-        "alignment_score": 3, "novelty_score": 6, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "REVISE"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 3,
+                "novelty_score": 6,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "REVISE"
+    )
 
     # Any < 3 -> REJECT
-    assert _recommendation_from_scores({
-        "alignment_score": 2, "novelty_score": 6, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "REJECT"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 2,
+                "novelty_score": 6,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "REJECT"
+    )
 
-    assert _recommendation_from_scores({
-        "alignment_score": 1, "novelty_score": 1, "feasibility_score": 1,
-        "plausibility_score": 1, "testability_score": 1, "evidence_quality_score": 1,
-        "expected_research_value_score": 1,
-    }) == "REJECT"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 1,
+                "novelty_score": 1,
+                "feasibility_score": 1,
+                "plausibility_score": 1,
+                "testability_score": 1,
+                "evidence_quality_score": 1,
+                "expected_research_value_score": 1,
+            }
+        )
+        == "REJECT"
+    )
 
 
 def test_reflection_rejects_model_references_when_no_verified_sources_exist():
@@ -581,10 +620,7 @@ def test_reflection_agent_stores_sub_claim_assessments_on_report():
 
 
 def test_reflection_agent_reviews_independent_hypotheses_concurrently():
-    hypotheses = [
-        Hypothesis(text=f"hypothesis {index}", hypothesis_id=f"H{index}")
-        for index in range(3)
-    ]
+    hypotheses = [Hypothesis(text=f"hypothesis {index}", hypothesis_id=f"H{index}") for index in range(3)]
     all_started = threading.Barrier(3, timeout=2)
 
     def review(hypothesis, **kwargs):

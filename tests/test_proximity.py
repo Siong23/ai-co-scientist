@@ -2,6 +2,7 @@
 Run with:
     pytest tests/test_proximity.py -v -s
 """
+
 import numpy as np
 import pytest
 
@@ -18,19 +19,11 @@ from app.agents_modules.proximity_helpers import (
 @pytest.fixture
 def context():
     class MockContext:
-
         def __init__(self, hypotheses):
-            self.hypotheses = {
-                h.hypothesis_id: h
-                for h in hypotheses
-            }
+            self.hypotheses = {h.hypothesis_id: h for h in hypotheses}
 
         def get_active_hypotheses(self):
-            return [
-                h
-                for h in self.hypotheses.values()
-                if h.is_active
-            ]
+            return [h for h in self.hypotheses.values() if h.is_active]
 
     hypotheses = [
         ProximityTestFactory.create_mock_hypothesis(
@@ -54,8 +47,8 @@ def context():
 # SimilarityScorer tests
 # ---------------------------------------------------------------------------
 
-class TestSimilarityScorer:
 
+class TestSimilarityScorer:
     def test_jaccard_similarity_identical_text(self):
         scorer = SimilarityScorer()
 
@@ -136,11 +129,7 @@ class TestSimilarityScorer:
             )
 
     def test_combined_similarity_range(self):
-        scorer = SimilarityScorer(
-            SimilarityConfig(
-                allow_embedding_fallback=True
-            )
-        )
+        scorer = SimilarityScorer(SimilarityConfig(allow_embedding_fallback=True))
 
         score = scorer.combined_similarity(
             "gene regulates protein expression",
@@ -165,8 +154,8 @@ class TestSimilarityScorer:
 # GraphOptimizer tests
 # ---------------------------------------------------------------------------
 
-class TestGraphOptimizer:
 
+class TestGraphOptimizer:
     @pytest.fixture
     def sample_graph(self):
         return {
@@ -194,10 +183,7 @@ class TestGraphOptimizer:
 
         assert len(filtered["H1"]) == 2
 
-        similarities = [
-            edge["similarity"]
-            for edge in filtered["H1"]
-        ]
+        similarities = [edge["similarity"] for edge in filtered["H1"]]
 
         assert 0.9 in similarities
         assert 0.4 in similarities
@@ -228,9 +214,7 @@ class TestGraphOptimizer:
     def test_node_degree(self, sample_graph):
         optimizer = GraphOptimizer()
 
-        degree = optimizer.compute_node_degree(
-            sample_graph
-        )
+        degree = optimizer.compute_node_degree(sample_graph)
 
         assert degree["H1"] == 3
         assert degree["H2"] == 1
@@ -240,12 +224,8 @@ class TestGraphOptimizer:
         optimizer = GraphOptimizer()
 
         graph = {
-            "H1": [
-                {"other_id": "H2", "similarity": 0.9}
-            ],
-            "H2": [
-                {"other_id": "H1", "similarity": 0.9}
-            ],
+            "H1": [{"other_id": "H2", "similarity": 0.9}],
+            "H2": [{"other_id": "H1", "similarity": 0.9}],
             "H3": [],
             "H4": [],
         }
@@ -275,9 +255,7 @@ class TestGraphOptimizer:
         assert len(result["adjacency_graph"]) == 3
 
     def test_default_method_from_config(self, context):
-        config = SimilarityConfig(
-            default_method="jaccard"
-        )
+        config = SimilarityConfig(default_method="jaccard")
 
         agent = ProximityAgent(config)
 
@@ -319,16 +297,12 @@ class TestGraphOptimizer:
                 other_id = edge["other_id"]
 
                 reverse_edges = [
-                    reverse_edge
-                    for reverse_edge in adjacency[other_id]
-                    if reverse_edge["other_id"] == node_id
+                    reverse_edge for reverse_edge in adjacency[other_id] if reverse_edge["other_id"] == node_id
                 ]
 
                 assert len(reverse_edges) == 1
 
-                assert reverse_edges[0]["similarity"] == pytest.approx(
-                    edge["similarity"]
-                )
+                assert reverse_edges[0]["similarity"] == pytest.approx(edge["similarity"])
 
     def test_optimized_graph_top_k(self, context):
         agent = ProximityAgent()
@@ -361,35 +335,25 @@ class TestGraphOptimizer:
         standard_graph = standard["adjacency_graph"]
         optimized_graph = optimized["adjacency_graph"]
 
-        assert set(standard_graph.keys()) == set(
-            optimized_graph.keys()
-        )
+        assert set(standard_graph.keys()) == set(optimized_graph.keys())
 
         for node_id in standard_graph:
-            standard_edges = {
-                edge["other_id"]: edge["similarity"]
-                for edge in standard_graph[node_id]
-            }
+            standard_edges = {edge["other_id"]: edge["similarity"] for edge in standard_graph[node_id]}
 
-            optimized_edges = {
-                edge["other_id"]: edge["similarity"]
-                for edge in optimized_graph[node_id]
-            }
+            optimized_edges = {edge["other_id"]: edge["similarity"] for edge in optimized_graph[node_id]}
 
             assert standard_edges.keys() == optimized_edges.keys()
 
             for other_id in standard_edges:
-                assert optimized_edges[other_id] == pytest.approx(
-                    standard_edges[other_id]
-                )
+                assert optimized_edges[other_id] == pytest.approx(standard_edges[other_id])
 
 
 # ---------------------------------------------------------------------------
 # BatchSimilarityCalculator tests
 # ---------------------------------------------------------------------------
 
-class TestBatchSimilarityCalculator:
 
+class TestBatchSimilarityCalculator:
     def test_empty_similarity_matrix(self):
         scorer = SimilarityScorer()
 
@@ -506,14 +470,12 @@ class TestBatchSimilarityCalculator:
 # ProximityTestFactory tests
 # ---------------------------------------------------------------------------
 
-class TestProximityTestFactory:
 
+class TestProximityTestFactory:
     def test_create_mock_hypothesis(self):
-        hypothesis = (
-            ProximityTestFactory.create_mock_hypothesis(
-                "H1",
-                "Test hypothesis",
-            )
+        hypothesis = ProximityTestFactory.create_mock_hypothesis(
+            "H1",
+            "Test hypothesis",
         )
 
         assert hypothesis.hypothesis_id == "H1"
@@ -521,21 +483,14 @@ class TestProximityTestFactory:
         assert hypothesis.is_active is True
 
     def test_create_test_hypotheses_count(self):
-        hypotheses = (
-            ProximityTestFactory.create_test_hypotheses(10)
-        )
+        hypotheses = ProximityTestFactory.create_test_hypotheses(10)
 
         assert len(hypotheses) == 10
 
     def test_create_test_hypotheses_unique_ids(self):
-        hypotheses = (
-            ProximityTestFactory.create_test_hypotheses(10)
-        )
+        hypotheses = ProximityTestFactory.create_test_hypotheses(10)
 
-        ids = [
-            h.hypothesis_id
-            for h in hypotheses
-        ]
+        ids = [h.hypothesis_id for h in hypotheses]
 
         assert len(ids) == len(set(ids))
 
@@ -544,8 +499,8 @@ class TestProximityTestFactory:
 # ProximityAgent tests
 # ---------------------------------------------------------------------------
 
-class TestProximityAgent:
 
+class TestProximityAgent:
     # @pytest.fixture
     # def context(self):
     #     class MockContext:
@@ -582,15 +537,12 @@ class TestProximityAgent:
 
     def test_empty_context(self):
         class EmptyContext:
-
             def get_active_hypotheses(self):
                 return []
 
         agent = ProximityAgent()
 
-        result = agent.build_proximity_graph(
-            EmptyContext()
-        )
+        result = agent.build_proximity_graph(EmptyContext())
 
         assert result["adjacency_graph"] == {}
         assert result["nodes"] == []
@@ -623,22 +575,16 @@ class TestProximityAgent:
         adjacency = result["adjacency_graph"]
 
         for node_id, edges in adjacency.items():
-
             for edge in edges:
-
                 other_id = edge["other_id"]
 
                 reverse_edges = [
-                    reverse_edge
-                    for reverse_edge in adjacency[other_id]
-                    if reverse_edge["other_id"] == node_id
+                    reverse_edge for reverse_edge in adjacency[other_id] if reverse_edge["other_id"] == node_id
                 ]
 
                 assert len(reverse_edges) == 1
 
-                assert reverse_edges[0]["similarity"] == pytest.approx(
-                    edge["similarity"]
-                )
+                assert reverse_edges[0]["similarity"] == pytest.approx(edge["similarity"])
 
     def test_threshold_removes_weak_edges(self, context):
         agent = ProximityAgent()
@@ -655,15 +601,9 @@ class TestProximityAgent:
             similarity_threshold=0.8,
         )
 
-        low_edges = sum(
-            len(edges)
-            for edges in low_threshold["adjacency_graph"].values()
-        )
+        low_edges = sum(len(edges) for edges in low_threshold["adjacency_graph"].values())
 
-        high_edges = sum(
-            len(edges)
-            for edges in high_threshold["adjacency_graph"].values()
-        )
+        high_edges = sum(len(edges) for edges in high_threshold["adjacency_graph"].values())
 
         assert high_edges <= low_edges
 
@@ -682,7 +622,6 @@ class TestProximityAgent:
         agent = ProximityAgent()
 
         with pytest.raises(ValueError):
-
             agent.build_proximity_graph(
                 context,
                 similarity_threshold=1.5,
@@ -715,10 +654,7 @@ class TestProximityAgent:
             "H3",
         }
 
-        assert all(
-            isinstance(value, int)
-            for value in connectivity.values()
-        )
+        assert all(isinstance(value, int) for value in connectivity.values())
 
     def test_get_hypothesis_clusters(self, context):
         agent = ProximityAgent()
@@ -762,16 +698,13 @@ class TestProximityAgent:
         cluster_members = result["cluster_members"]
 
         for hypothesis_id, cluster_id in clusters.items():
-
             assert hypothesis_id in cluster_members[cluster_id]
 
     def test_clear_similarity_cache(self):
         agent = ProximityAgent()
 
         agent.scorer._cache["test"] = 0.5
-        agent.scorer._embedding_cache["test"] = np.array(
-            [1.0, 0.0]
-        )
+        agent.scorer._embedding_cache["test"] = np.array([1.0, 0.0])
 
         agent.clear_similarity_cache()
 

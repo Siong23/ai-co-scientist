@@ -147,6 +147,10 @@ class ContextMemory:
         self.iteration_number: int = 0
         # Sources retrieved before generation in the latest cycle.
         self.last_retrieved_sources: List[Dict] = []
+        # Stage-level status from the latest Generation pass. This keeps
+        # successful evidence retrieval distinct from later synthesis or
+        # hypothesis-generation failures in reports and progress diagnostics.
+        self.last_generation_diagnostics: Dict = {}
         # Parse status and redacted excerpts for each Evolution strategy call.
         self.last_evolution_attempts: List[Dict] = []
         # Quality-gate reports for every generated candidate, including rejects.

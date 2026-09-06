@@ -10,7 +10,8 @@ from app.agents import (
     SupervisorAgent,
     parse_evolution_response,
 )
-from app.models import ContextMemory, Hypothesis, ResearchGoal
+from app.agents_modules.evolution_helpers import build_evolution_prompt
+from app.models import ClaimAssessment, ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 
 
 def _goal(*, top_k: int = 2) -> ResearchGoal:
@@ -46,6 +47,66 @@ def _context() -> tuple[ContextMemory, Hypothesis, Hypothesis]:
     context.add_hypothesis(first)
     context.add_hypothesis(second)
     return context, first, second
+
+
+def test_evolution_prompt_bounds_nested_review_and_evidence_documents():
+    context, first, second = _context()
+    oversized_text = "full retrieved document " * 5000
+    first.text = "Test the transport mechanism. " + oversized_text
+    first.review_comments = [oversized_text]
+    first.reflection_report = ReflectionReport(
+        alignment_score=8,
+        novelty_score=7,
+        feasibility_score=8,
+        plausibility_score=7,
+        testability_score=9,
+        evidence_quality_score=8,
+        expected_research_value_score=8,
+        strengths=[oversized_text],
+        weaknesses=[oversized_text],
+        recommendation="ACCEPT",
+        claims=[
+            ClaimAssessment(
+                claim=f"Claim {index}: {oversized_text}",
+                status="SUPPORTED",
+                confidence=8,
+                supporting_evidence=[
+                    {
+                        "source_id": f"paper:{index}",
+                        "content": oversized_text,
+                    }
+                ],
+            )
+            for index in range(8)
+        ],
+        overall_confidence=8,
+    )
+    evidence_sources = [
+        {
+            "source_id": f"paper:{index}",
+            "title": f"Evidence {index}",
+            "content": oversized_text,
+        }
+        for index in range(12)
+    ]
+    original_sources = deepcopy(evidence_sources)
+
+    prompt = build_evolution_prompt(
+        "combination",
+        [first, second],
+        _goal(),
+        evidence_sources=evidence_sources,
+    )
+
+    assert len(prompt) < 30_000
+    assert '"recommendation": "ACCEPT"' in prompt
+    assert '"supporting_source_ids": [' in prompt
+    assert '"paper:0"' in prompt
+    assert '"source_id": "paper:5"' in prompt
+    assert '"source_id": "paper:6"' not in prompt
+    assert oversized_text not in prompt
+    assert evidence_sources == original_sources
+    assert context.hypotheses["H1"] is first
 
 
 def test_parse_evolution_response_requires_a_complete_json_hypothesis():
@@ -420,4 +481,3 @@ def test_evolution_injects_meta_review_feedback():
     assert "Prior cycle meta-review feedback to address:" in prompt
     assert "Explore orthogonal mechanisms." in prompt
     assert "Use out_of_box strategy." in prompt
-

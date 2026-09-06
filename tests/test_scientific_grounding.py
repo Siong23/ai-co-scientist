@@ -77,9 +77,7 @@ def test_number_component_transplantation_is_a_hard_failure():
         "app.agents.call_llm",
         return_value=_audit_response(
             final,
-            remaining_claims=[
-                "The 25 μs measurement applies to MLP inference, not PRB assignment."
-            ],
+            remaining_claims=["The 25 μs measurement applies to MLP inference, not PRB assignment."],
         ),
     ):
         audits, error = call_llm_for_hypothesis_audit(
@@ -260,9 +258,7 @@ def test_standards_composition_requires_direct_entailment():
         "app.agents.call_llm",
         return_value=_audit_response(
             final,
-            remaining_claims=[
-                "No supplied authoritative evidence establishes a 3GPP Rel-18 E2 service model."
-            ],
+            remaining_claims=["No supplied authoritative evidence establishes a 3GPP Rel-18 E2 service model."],
         ),
     ):
         audits, error = call_llm_for_hypothesis_audit(
@@ -290,9 +286,7 @@ def test_synthesis_prompt_prioritizes_full_text_qualification():
                 {
                     "claim": "The positive result holds only under restricted conditions.",
                     "source_ids": [SOURCE_ID],
-                    "evidence_refs": [
-                        {"source_id": SOURCE_ID, "chunk_id": "chunk-results"}
-                    ],
+                    "evidence_refs": [{"source_id": SOURCE_ID, "chunk_id": "chunk-results"}],
                 }
             ],
             "contradictions": [],
@@ -351,9 +345,7 @@ def test_full_text_coverage_accepts_only_exact_chunk_provenance():
     assert coverage.sufficient is True
     assert coverage.stage == "full_text"
     assert coverage.aspect_source_ids == {"latency": (SOURCE_ID,)}
-    assert [ref["chunk_id"] for ref in coverage.aspect_evidence_refs["latency"]] == [
-        "known-chunk"
-    ]
+    assert [ref["chunk_id"] for ref in coverage.aspect_evidence_refs["latency"]] == ["known-chunk"]
 
 
 def test_qwen_style_query_instruction_is_query_side_only():
@@ -377,6 +369,4 @@ def test_qwen_style_query_instruction_is_query_side_only():
         embeddings.embed_query("latency evidence")
 
     assert model.inputs[0] == ["indexed passage"]
-    assert model.inputs[1] == (
-        "Instruct: retrieve direct scientific evidence\nQuery: latency evidence"
-    )
+    assert model.inputs[1] == ("Instruct: retrieve direct scientific evidence\nQuery: latency evidence")

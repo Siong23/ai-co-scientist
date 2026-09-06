@@ -42,14 +42,19 @@ class EvolutionAgent:
         configured_transport_retries = evolution_config.get("transport_retry_attempts", 2)
         self.transport_retry_attempts = max(
             0,
-            int(
-                configured_transport_retries
-                if transport_retry_attempts is None
-                else transport_retry_attempts
-            ),
+            int(configured_transport_retries if transport_retry_attempts is None else transport_retry_attempts),
         )
         self.max_tokens = int(config.get("llm_max_tokens", {}).get("evolution", 2048))
-        self.max_workers = max(1, int(max_workers if max_workers is not None else evolution_config.get("max_workers", config.get("agent_parallelism", {}).get("evolution_workers", 3))))
+        self.max_workers = max(
+            1,
+            int(
+                max_workers
+                if max_workers is not None
+                else evolution_config.get(
+                    "max_workers", config.get("agent_parallelism", {}).get("evolution_workers", 3)
+                )
+            ),
+        )
 
     def _strategies_for_cycle(self, context: ContextMemory, parent_count: int) -> list[EvolutionStrategy]:
         """Rotate through the strategy library while respecting parent-count requirements."""
@@ -81,6 +86,7 @@ class EvolutionAgent:
             getattr(context, "proximity_analysis", None),
         )
         strategies = self._strategies_for_cycle(context, len(top_candidates))
+
         def evolve_one(strategy: EvolutionStrategy) -> tuple[Hypothesis | None, list[dict]]:
             diagnostics: list[dict] = []
             if execution_cancelled():

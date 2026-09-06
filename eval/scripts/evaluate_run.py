@@ -60,8 +60,7 @@ def validate_research_goal(run: Mapping[str, Any], expected_goal: str) -> str:
     actual_goal = get_research_goal(run)
     if not goals_match(actual_goal, expected_goal):
         raise RunValidationError(
-            "research goal mismatch: "
-            f"expected {expected_goal.strip()!r}, found {actual_goal.strip()!r}"
+            f"research goal mismatch: expected {expected_goal.strip()!r}, found {actual_goal.strip()!r}"
         )
     return actual_goal
 
@@ -75,9 +74,7 @@ def _hypotheses_from_step(step_name: str, step_data: Any) -> list[dict[str, Any]
     if not isinstance(hypotheses, list):
         raise RunValidationError(f"cycle_details.steps.{step_name}.hypotheses must be a list")
     if not all(isinstance(item, dict) for item in hypotheses):
-        raise RunValidationError(
-            f"cycle_details.steps.{step_name}.hypotheses must contain only objects"
-        )
+        raise RunValidationError(f"cycle_details.steps.{step_name}.hypotheses must contain only objects")
     return hypotheses
 
 
@@ -212,8 +209,7 @@ def configure_local_judge(model: str | None, base_url: str | None) -> dict[str, 
     base_url = base_url or os.environ.get("LOCAL_MODEL_BASE_URL")
     if not model or not base_url:
         raise RunValidationError(
-            "LLM metrics require --judge-model and --judge-base-url "
-            "(or LOCAL_MODEL_NAME and LOCAL_MODEL_BASE_URL)"
+            "LLM metrics require --judge-model and --judge-base-url (or LOCAL_MODEL_NAME and LOCAL_MODEL_BASE_URL)"
         )
     if not base_url.startswith(("http://", "https://")):
         raise RunValidationError("judge base URL must start with http:// or https://")
@@ -237,9 +233,7 @@ def redact_environment_secrets(message: str) -> str:
     redacted = message
     for name, value in os.environ.items():
         upper_name = name.upper()
-        if value and len(value) >= 4 and any(
-            marker in upper_name for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")
-        ):
+        if value and len(value) >= 4 and any(marker in upper_name for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
             redacted = redacted.replace(value, "[REDACTED]")
     return redacted
 

@@ -32,13 +32,9 @@ class SpringerSearchTool:
             "https://api.springernature.com/openaccess/jats",
         ).strip()
         self.openaccess_key = (
-            os.environ.get("SPRINGER_OPEN_ACCESS_API_KEY", "")
-            or os.environ.get("SPRINGER_API_KEY", "")
+            os.environ.get("SPRINGER_OPEN_ACCESS_API_KEY", "") or os.environ.get("SPRINGER_API_KEY", "")
         ).strip()
-        self.meta_key = (
-            os.environ.get("SPRINGER_META_API_KEY", "")
-            or os.environ.get("SPRINGER_API_KEY", "")
-        ).strip()
+        self.meta_key = (os.environ.get("SPRINGER_META_API_KEY", "") or os.environ.get("SPRINGER_API_KEY", "")).strip()
         self.api_key = self.openaccess_key or self.meta_key
 
     @property
@@ -111,11 +107,7 @@ class SpringerSearchTool:
 
         abstract = cls._extract_abstract(record)
         creators = record.get("creators") or []
-        authors = [
-            c.get("creator", "").strip()
-            for c in creators
-            if isinstance(c, dict) and c.get("creator")
-        ]
+        authors = [c.get("creator", "").strip() for c in creators if isinstance(c, dict) and c.get("creator")]
 
         publication_date = record.get("publicationDate")
         published = str(publication_date).strip() if publication_date else None
@@ -134,7 +126,9 @@ class SpringerSearchTool:
                     elif fmt == "html" or not web_url:
                         web_url = val
 
-        entry_url = web_url or (f"https://doi.org/{doi}" if doi else f"https://api.springernature.com/meta/v2/json?q=doi:{doi}")
+        entry_url = web_url or (
+            f"https://doi.org/{doi}" if doi else f"https://api.springernature.com/meta/v2/json?q=doi:{doi}"
+        )
 
         return {
             "arxiv_id": source_id,

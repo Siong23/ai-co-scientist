@@ -146,14 +146,10 @@ def evaluate_parsed_run(
             score = getattr(metric, "score", None)
             passed = bool(metric.is_successful())
         except Exception as exc:
-            raise LLMEvaluationError(
-                f"DeepEval metric {definition['name']!r} failed: {exc}"
-            ) from exc
+            raise LLMEvaluationError(f"DeepEval metric {definition['name']!r} failed: {exc}") from exc
 
         if isinstance(score, bool) or not isinstance(score, (int, float)):
-            raise LLMEvaluationError(
-                f"DeepEval metric {definition['name']!r} returned no numeric score"
-            )
+            raise LLMEvaluationError(f"DeepEval metric {definition['name']!r} returned no numeric score")
         results.append(
             {
                 "name": definition["name"],

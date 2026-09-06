@@ -31,6 +31,16 @@ EVOLUTION_STRATEGIES: tuple[EvolutionStrategy, ...] = (
 )
 
 _NEAR_DUPLICATE_THRESHOLD = 0.92
+_MAX_PARENT_TEXT_CHARS = 3500
+_MAX_REVIEW_TEXT_CHARS = 500
+_MAX_REVIEW_ITEMS = 2
+_MAX_REVIEW_CLAIMS = 4
+_MAX_CLAIM_TEXT_CHARS = 400
+_MAX_CLAIM_SOURCE_IDS = 6
+_MAX_EVIDENCE_SOURCES = 6
+_MAX_EVIDENCE_EXCERPT_CHARS = 800
+_MAX_META_REVIEW_ITEMS = 3
+_MAX_META_REVIEW_TEXT_CHARS = 800
 
 _STRATEGY_INSTRUCTIONS: dict[EvolutionStrategy, str] = {
     "grounding": (
@@ -165,17 +175,74 @@ Return only the corrected JSON object using the exact schema above.
 """.strip()
 
 
+def _bounded_text(value: object, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _claim_source_ids(evidence: object) -> list[str]:
+    if not isinstance(evidence, (list, tuple)):
+        return []
+    source_ids = []
+    for item in evidence:
+        if not isinstance(item, Mapping):
+            continue
+        source_id = str(item.get("source_id") or item.get("id") or item.get("url") or "").strip()
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+        if len(source_ids) >= _MAX_CLAIM_SOURCE_IDS:
+            break
+    return source_ids
+
+
+def _reflection_summary(parent: Hypothesis) -> dict | None:
+    """Keep scientific judgments while excluding full retrieved documents."""
+    report = parent.reflection_report
+    if report is None:
+        return None
+
+    claims = []
+    for claim in report.claims[:_MAX_REVIEW_CLAIMS]:
+        claims.append(
+            {
+                "claim": _bounded_text(claim.claim, _MAX_CLAIM_TEXT_CHARS),
+                "status": claim.status,
+                "confidence": claim.confidence,
+                "supporting_source_ids": _claim_source_ids(claim.supporting_evidence),
+                "contradictory_source_ids": _claim_source_ids(claim.contradictory_evidence),
+            }
+        )
+
+    return {
+        "alignment_score": report.alignment_score,
+        "novelty_score": report.novelty_score,
+        "feasibility_score": report.feasibility_score,
+        "plausibility_score": report.plausibility_score,
+        "testability_score": report.testability_score,
+        "evidence_quality_score": report.evidence_quality_score,
+        "expected_research_value_score": report.expected_research_value_score,
+        "strengths": [_bounded_text(item, _MAX_REVIEW_TEXT_CHARS) for item in report.strengths[:_MAX_REVIEW_ITEMS]],
+        "weaknesses": [_bounded_text(item, _MAX_REVIEW_TEXT_CHARS) for item in report.weaknesses[:_MAX_REVIEW_ITEMS]],
+        "recommendation": report.recommendation,
+        "claims": claims,
+        "overall_confidence": report.overall_confidence,
+    }
+
+
 def _parent_payload(parent: Hypothesis) -> dict:
-    reflection = parent.reflection_report.model_dump() if parent.reflection_report else None
     return {
         "id": parent.hypothesis_id,
-        "title": parent.title,
-        "hypothesis": parent.text,
+        "title": _bounded_text(parent.title, _MAX_REVIEW_TEXT_CHARS),
+        "hypothesis": _bounded_text(parent.text, _MAX_PARENT_TEXT_CHARS),
         "elo_score": parent.elo_score,
         "novelty_review": parent.novelty_review,
         "feasibility_review": parent.feasibility_review,
-        "review_comments": parent.review_comments,
-        "reflection_report": reflection,
+        "review_comments": [
+            _bounded_text(item, _MAX_REVIEW_TEXT_CHARS) for item in parent.review_comments[:_MAX_REVIEW_ITEMS]
+        ],
+        "reflection_report": _reflection_summary(parent),
     }
 
 
@@ -222,7 +289,11 @@ def resolve_parent_evidence(
     return resolved
 
 
-def _evidence_context(evidence_sources: Sequence[Mapping], *, limit: int = 8) -> str:
+def _evidence_context(
+    evidence_sources: Sequence[Mapping],
+    *,
+    limit: int = _MAX_EVIDENCE_SOURCES,
+) -> str:
     evidence = []
     seen = set()
     for source in evidence_sources:
@@ -235,7 +306,13 @@ def _evidence_context(evidence_sources: Sequence[Mapping], *, limit: int = 8) ->
         excerpt = str(
             source.get("abstract") or source.get("summary") or source.get("content") or source.get("text") or ""
         ).strip()
-        evidence.append({"source_id": source_id, "title": title, "excerpt": excerpt[:1200]})
+        evidence.append(
+            {
+                "source_id": source_id,
+                "title": _bounded_text(title, _MAX_REVIEW_TEXT_CHARS),
+                "excerpt": _bounded_text(excerpt, _MAX_EVIDENCE_EXCERPT_CHARS),
+            }
+        )
         if len(evidence) >= limit:
             return json.dumps(evidence, indent=2, ensure_ascii=False)
     return json.dumps(evidence, indent=2, ensure_ascii=False)
@@ -245,7 +322,8 @@ def _format_evolution_meta_review(feedback: Sequence[Mapping] | str | None) -> s
     if not feedback:
         return ""
     if isinstance(feedback, str):
-        return f"\nPrior cycle meta-review feedback to address:\n{feedback}\n"
+        bounded = _bounded_text(feedback, _MAX_META_REVIEW_TEXT_CHARS * _MAX_META_REVIEW_ITEMS)
+        return f"\nPrior cycle meta-review feedback to address:\n{bounded}\n"
     if isinstance(feedback, (list, tuple)) and feedback:
         latest = feedback[-1]
         if isinstance(latest, dict):
@@ -253,9 +331,21 @@ def _format_evolution_meta_review(feedback: Sequence[Mapping] | str | None) -> s
             next_steps = (latest.get("research_overview", {}) or {}).get("suggested_next_steps", [])
             parts = []
             if critiques:
-                parts.append("Critiques:\n" + "\n".join(f"- {c}" for c in critiques))
+                parts.append(
+                    "Critiques:\n"
+                    + "\n".join(
+                        f"- {_bounded_text(item, _MAX_META_REVIEW_TEXT_CHARS)}"
+                        for item in critiques[:_MAX_META_REVIEW_ITEMS]
+                    )
+                )
             if next_steps:
-                parts.append("Suggested next steps:\n" + "\n".join(f"- {s}" for s in next_steps))
+                parts.append(
+                    "Suggested next steps:\n"
+                    + "\n".join(
+                        f"- {_bounded_text(item, _MAX_META_REVIEW_TEXT_CHARS)}"
+                        for item in next_steps[:_MAX_META_REVIEW_ITEMS]
+                    )
+                )
             if parts:
                 return "\nPrior cycle meta-review feedback to address:\n" + "\n\n".join(parts) + "\n"
     return ""

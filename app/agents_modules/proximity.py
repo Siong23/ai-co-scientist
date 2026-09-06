@@ -21,13 +21,9 @@ class ProximityAgent:
         self,
         similarity_config: Optional[SimilarityConfig] = None,
     ):
-        self.similarity_config = (
-            similarity_config or SimilarityConfig()
-        )
+        self.similarity_config = similarity_config or SimilarityConfig()
 
-        self.scorer = SimilarityScorer(
-            self.similarity_config
-        )
+        self.scorer = SimilarityScorer(self.similarity_config)
 
         self.optimizer = GraphOptimizer()
 
@@ -48,9 +44,7 @@ class ProximityAgent:
             return min(1.0, threshold)
 
         if not 0.0 <= similarity_threshold <= 1.0:
-            raise ValueError(
-                "similarity_threshold must be between 0.0 and 1.0."
-            )
+            raise ValueError("similarity_threshold must be between 0.0 and 1.0.")
 
         return similarity_threshold
 
@@ -90,9 +84,7 @@ class ProximityAgent:
         # Validate parameters
         # ---------------------------------------------------------
         if top_k is not None and top_k < 0:
-            raise ValueError(
-                "top_k must be non-negative"
-            )
+            raise ValueError("top_k must be non-negative")
 
         # ---------------------------------------------------------
         # Get active hypotheses
@@ -107,22 +99,15 @@ class ProximityAgent:
                 "edges": [],
             }
 
-        node_ids = [
-            hypothesis.hypothesis_id
-            for hypothesis in hypotheses
-        ]
+        node_ids = [hypothesis.hypothesis_id for hypothesis in hypotheses]
 
-        adjacency_graph = {
-            node_id: []
-            for node_id in node_ids
-        }
+        adjacency_graph = {node_id: [] for node_id in node_ids}
 
         # ---------------------------------------------------------
         # Compute pairwise similarities
         # ---------------------------------------------------------
         for i in range(len(hypotheses)):
             for j in range(i + 1, len(hypotheses)):
-
                 hypothesis_a = hypotheses[i]
                 hypothesis_b = hypotheses[j]
 
@@ -133,11 +118,8 @@ class ProximityAgent:
                 )
 
                 if similarity >= similarity_threshold:
-
                     # A -> B
-                    adjacency_graph[
-                        hypothesis_a.hypothesis_id
-                    ].append(
+                    adjacency_graph[hypothesis_a.hypothesis_id].append(
                         {
                             "other_id": hypothesis_b.hypothesis_id,
                             "similarity": similarity,
@@ -145,9 +127,7 @@ class ProximityAgent:
                     )
 
                     # B -> A
-                    adjacency_graph[
-                        hypothesis_b.hypothesis_id
-                    ].append(
+                    adjacency_graph[hypothesis_b.hypothesis_id].append(
                         {
                             "other_id": hypothesis_a.hypothesis_id,
                             "similarity": similarity,
@@ -159,10 +139,7 @@ class ProximityAgent:
         # ---------------------------------------------------------
         if top_k is not None:
             if top_k == 0:
-                adjacency_graph = {
-                    node_id: []
-                    for node_id in node_ids
-                }
+                adjacency_graph = {node_id: [] for node_id in node_ids}
             else:
                 adjacency_graph = self.optimizer.get_top_k_edges(
                     adjacency_graph,
@@ -231,9 +208,7 @@ class ProximityAgent:
         # Validate parameters
         # ---------------------------------------------------------
         if top_k is not None and top_k < 0:
-            raise ValueError(
-                "top_k must be non-negative"
-            )
+            raise ValueError("top_k must be non-negative")
 
         # ---------------------------------------------------------
         # Get active hypotheses only
@@ -251,22 +226,14 @@ class ProximityAgent:
         # ---------------------------------------------------------
         # Extract IDs and text
         # ---------------------------------------------------------
-        node_ids = [
-            hypothesis.hypothesis_id
-            for hypothesis in hypotheses
-        ]
+        node_ids = [hypothesis.hypothesis_id for hypothesis in hypotheses]
 
-        texts = [
-            self._similarity_text(hypothesis.text, research_goal, method)
-            for hypothesis in hypotheses
-        ]
+        texts = [self._similarity_text(hypothesis.text, research_goal, method) for hypothesis in hypotheses]
 
         # ---------------------------------------------------------
         # Compute similarity matrix in batch
         # ---------------------------------------------------------
-        calculator = BatchSimilarityCalculator(
-            self.scorer
-        )
+        calculator = BatchSimilarityCalculator(self.scorer)
 
         similarity_matrix = calculator.compute_similarity_matrix(
             texts,
@@ -287,10 +254,7 @@ class ProximityAgent:
         # ---------------------------------------------------------
         if top_k is not None:
             if top_k == 0:
-                adjacency_graph = {
-                    node_id: []
-                    for node_id in node_ids
-                }
+                adjacency_graph = {node_id: [] for node_id in node_ids}
             else:
                 adjacency_graph = self.optimizer.get_top_k_edges(
                     adjacency_graph,
@@ -362,9 +326,7 @@ class ProximityAgent:
             similarity_threshold=similarity_threshold,
         )
 
-        return self.optimizer.compute_node_degree(
-            graph["adjacency_graph"]
-        )
+        return self.optimizer.compute_node_degree(graph["adjacency_graph"])
 
     def get_proximity_analysis(
         self,
@@ -401,9 +363,7 @@ class ProximityAgent:
             threshold,
         )
 
-        connectivity = self.optimizer.compute_node_degree(
-            adjacency
-        )
+        connectivity = self.optimizer.compute_node_degree(adjacency)
 
         cluster_members = {}
 
@@ -419,24 +379,13 @@ class ProximityAgent:
             reverse=True,
         )
 
-        max_degree = (
-            max(connectivity.values())
-            if connectivity
-            else 0
-        )
+        max_degree = max(connectivity.values()) if connectivity else 0
 
         highly_connected = [
-            hypothesis_id
-            for hypothesis_id, degree in connectivity.items()
-            if max_degree > 0
-            and degree == max_degree
+            hypothesis_id for hypothesis_id, degree in connectivity.items() if max_degree > 0 and degree == max_degree
         ]
 
-        isolated = [
-            hypothesis_id
-            for hypothesis_id, degree in connectivity.items()
-            if degree == 0
-        ]
+        isolated = [hypothesis_id for hypothesis_id, degree in connectivity.items() if degree == 0]
 
         duplicate_threshold = near_duplicate_threshold
         if duplicate_threshold is None:
@@ -512,8 +461,7 @@ class ProximityAgent:
             "cluster_exemplars": cluster_exemplars,
             "diversity_score": diversity_score,
             "cluster_labels": {
-                cluster_id: {"label": f"Cluster {index}"}
-                for index, cluster_id in enumerate(cluster_members, start=1)
+                cluster_id: {"label": f"Cluster {index}"} for index, cluster_id in enumerate(cluster_members, start=1)
             },
         }
         context.proximity_analysis = result
@@ -524,6 +472,4 @@ class ProximityAgent:
 
         self.scorer.clear_cache()
 
-        logger.debug(
-            "Cleared similarity and embedding caches."
-        )
+        logger.debug("Cleared similarity and embedding caches.")

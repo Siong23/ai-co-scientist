@@ -65,9 +65,7 @@ def test_extract_returns_bounded_content_keyed_by_canonical_url(monkeypatch):
             query="MEC security constraints",
         )
 
-    assert extracted == {
-        "https://example.com/guidance": "<chunk 1> relevant evidence"
-    }
+    assert extracted == {"https://example.com/guidance": "<chunk 1> relevant evidence"}
     assert mock_post.call_args.args[0] == "https://api.tavily.com/extract"
     assert mock_post.call_args.kwargs["json"] == {
         "urls": ["https://example.com/guidance"],

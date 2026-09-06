@@ -823,12 +823,17 @@ Your refined contribution:
         """Run independent relevance and coverage judgments concurrently."""
 
         if not candidate_source_ids:
-            return [], None, EvidenceCoverage(
-                aspect_source_ids={aspect.aspect_id: () for aspect in query_plan.explicit_requirements},
-                missing_aspect_ids=tuple(aspect.aspect_id for aspect in query_plan.explicit_requirements),
-                gap_queries=(research_goal.description,),
-                reason="No eligible evidence sources are available.",
-            ), None
+            return (
+                [],
+                None,
+                EvidenceCoverage(
+                    aspect_source_ids={aspect.aspect_id: () for aspect in query_plan.explicit_requirements},
+                    missing_aspect_ids=tuple(aspect.aspect_id for aspect in query_plan.explicit_requirements),
+                    gap_queries=(research_goal.description,),
+                    reason="No eligible evidence sources are available.",
+                ),
+                None,
+            )
 
         def grade_relevance():
             return call_llm_for_relevance_filter(
@@ -872,7 +877,8 @@ Your refined contribution:
                 research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
                 query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
                 query_fidelity_validator=lambda plan: self.rag_retriever.validate_query_plan_fidelity(
-                    research_goal.description, plan,
+                    research_goal.description,
+                    plan,
                 ),
             )
 
@@ -910,6 +916,17 @@ Your refined contribution:
         num_to_generate = research_goal.num_hypotheses
         gen_temp = research_goal.generation_temperature
         self.rag_retriever.reset_search_stats()
+        context.last_retrieved_sources = []
+        context.last_generation_diagnostics = {
+            "evidence_retrieval": {
+                "status": "running",
+                "source_count": 0,
+            },
+            "literature_synthesis": {"status": "not_started"},
+            "hypothesis_generation": {"status": "not_started"},
+            "warnings": [],
+            "evidence_consumed": False,
+        }
 
         if execution_cancelled():
             return [], ["Cycle cancelled before hypothesis generation started."]
@@ -922,8 +939,12 @@ Your refined contribution:
 
         # If both query planning and initial retrieval fail, abort early
         if (rewrite_error or query_plan is None) and not candidate_documents:
-            context.last_retrieved_sources = []
             error = rewrite_error or "Query rewriting failed."
+            context.last_generation_diagnostics["evidence_retrieval"] = {
+                "status": "failed",
+                "source_count": 0,
+                "detail": error,
+            }
             logger.error(error)
             return [], [error]
 
@@ -964,7 +985,13 @@ Your refined contribution:
                     exc,
                     exc_info=True,
                 )
-                return [], [f"Expanded RAG retrieval failed: {exc}"]
+                error = f"Expanded RAG retrieval failed: {exc}"
+                context.last_generation_diagnostics["evidence_retrieval"] = {
+                    "status": "failed",
+                    "source_count": 0,
+                    "detail": redact_secrets(error),
+                }
+                return [], [error]
 
         retrieved_documents = []
         coverage = None
@@ -1028,8 +1055,12 @@ Your refined contribution:
 
             # 3B: Explicit requirement coverage grading
             if coverage_error or coverage is None:
-                context.last_retrieved_sources = []
                 error = redact_secrets(coverage_error or "Evidence coverage grading failed.")
+                context.last_generation_diagnostics["evidence_retrieval"] = {
+                    "status": "failed",
+                    "source_count": 0,
+                    "detail": error,
+                }
                 logger.error("Coverage is unverified; hypothesis generation stopped: %s", error)
                 return [], [error]
 
@@ -1121,7 +1152,11 @@ Your refined contribution:
                 )
 
                 logger.error(error)
-                context.last_retrieved_sources = []
+                context.last_generation_diagnostics["evidence_retrieval"] = {
+                    "status": "failed",
+                    "source_count": 0,
+                    "detail": error,
+                }
                 return [], [error]
 
             # 3C: Perform corrective retrieval round for missing requirements
@@ -1196,7 +1231,11 @@ Your refined contribution:
                 "was not executed."
             )
             logger.error(error)
-            context.last_retrieved_sources = []
+            context.last_generation_diagnostics["evidence_retrieval"] = {
+                "status": "failed",
+                "source_count": 0,
+                "detail": error,
+            }
             return [], [error]
 
         if execution_cancelled():
@@ -1209,6 +1248,19 @@ Your refined contribution:
                 research_goal,
                 query_plan.explicit_requirements,
             )
+
+        # Preserve the validated retrieval result before synthesis. If a later
+        # structured-output stage fails, diagnostics and the UI must not claim
+        # that no evidence was retrieved.
+        context.last_retrieved_sources = serialize_documents(retrieved_documents)
+        context.last_generation_diagnostics["evidence_retrieval"] = {
+            "status": "completed",
+            "source_count": len(context.last_retrieved_sources),
+            "detail": "Validated evidence passed relevance, coverage, and source-eligibility gates.",
+        }
+        context.last_generation_diagnostics["literature_synthesis"] = {
+            "status": "running",
+        }
 
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
@@ -1227,10 +1279,24 @@ Your refined contribution:
         )
 
         if synthesis_error or synthesis is None:
-            context.last_retrieved_sources = []
             error = synthesis_error or "Literature synthesis failed."
+            context.last_generation_diagnostics["literature_synthesis"] = {
+                "status": "failed",
+                "detail": redact_secrets(error),
+            }
+            context.last_generation_diagnostics["hypothesis_generation"] = {
+                "status": "not_executed",
+                "detail": "Literature synthesis did not produce a validated input.",
+            }
             logger.error(error)
             return [], [error]
+
+        synthesis_warnings = list(synthesis.warnings)
+        context.last_generation_diagnostics["warnings"] = synthesis_warnings
+        context.last_generation_diagnostics["literature_synthesis"] = {
+            "status": "warning" if synthesis_warnings else "completed",
+            "detail": synthesis_warnings[0] if synthesis_warnings else "Validated literature synthesis completed.",
+        }
 
         if execution_cancelled():
             return [], ["Cycle cancelled after literature synthesis."]
@@ -1258,6 +1324,14 @@ Your refined contribution:
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
+        for warning in synthesis.warnings:
+            if warning not in context.last_generation_diagnostics["warnings"]:
+                context.last_generation_diagnostics["warnings"].append(warning)
+        if synthesis.warnings:
+            context.last_generation_diagnostics["literature_synthesis"] = {
+                "status": "warning",
+                "detail": synthesis.warnings[0],
+            }
 
         synthesis_text = format_literature_synthesis(synthesis)
         assumption_text = format_assumption_assessments(assumptions)
@@ -1375,6 +1449,10 @@ Your refined contribution:
         # ==================================================================
         # Step 7: Call LLM to generate initial candidate hypotheses
         # ==================================================================
+        context.last_generation_diagnostics["hypothesis_generation"] = {
+            "status": "running",
+        }
+        context.last_generation_diagnostics["evidence_consumed"] = True
         raw_output = call_llm_for_generation(
             prompt,
             num_hypotheses=num_to_generate,
@@ -1412,6 +1490,10 @@ Your refined contribution:
             if audit_error or audits is None:
                 context.last_hypothesis_audits = []
                 error = audit_error or "Hypothesis audit failed."
+                context.last_generation_diagnostics["hypothesis_generation"] = {
+                    "status": "failed",
+                    "detail": redact_secrets(error),
+                }
                 logger.error(error)
                 return [], [error]
 
@@ -1437,6 +1519,10 @@ Your refined contribution:
             ]
 
             if not raw_output:
+                context.last_generation_diagnostics["hypothesis_generation"] = {
+                    "status": "failed",
+                    "detail": "All candidates were rejected by the novelty and grounding audit.",
+                }
                 return [], ["All generated hypotheses were rejected by the novelty and grounding audit."]
 
         # ==================================================================
@@ -1529,4 +1615,13 @@ Your refined contribution:
             )
             new_hypos.append(hypothesis)
 
+        context.last_generation_diagnostics["hypothesis_generation"] = {
+            "status": "completed" if new_hypos else "failed",
+            "candidate_count": len(new_hypos),
+            "detail": (
+                f"Constructed {len(new_hypos)} validated hypothesis candidate(s)."
+                if new_hypos
+                else (errors[0] if errors else "No validated hypothesis candidates were constructed.")
+            ),
+        }
         return new_hypos, errors

@@ -352,9 +352,7 @@ def execute_cycle(
             else:
                 headline = f"⚠️ Cycle {iteration} reached its compute budget before finalization"
             status_msg = (
-                f"{headline} ({unmet}).\n\n"
-                f"{to_bold('Execution Time:')} {formatted_time}\n"
-                f"{to_bold('Log:')} {log_file}"
+                f"{headline} ({unmet}).\n\n{to_bold('Execution Time:')} {formatted_time}\n{to_bold('Log:')} {log_file}"
             )
         else:
             status_msg = (
@@ -490,11 +488,7 @@ def format_evidence_sources_html(
         for chunk_id in dict.fromkeys(evidence_refs)
         if isinstance(chunk_id, str) and chunk_id
     )
-    provenance = (
-        f"<p><strong>Evidence chunks:</strong> {rendered_refs}</p>"
-        if rendered_refs
-        else ""
-    )
+    provenance = f"<p><strong>Evidence chunks:</strong> {rendered_refs}</p>" if rendered_refs else ""
     return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>{provenance}"
 
 
@@ -721,10 +715,23 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         html += f"""
         <div style="margin: 20px 0; padding: 15px; border: 2px solid #e74c3c; border-radius: 8px; background-color: #fff5f5;">
             <h3>⚠️ Generation could not complete</h3>
-            <p>The model/API reported the following, so some or all hypotheses were not generated:</p>
+            <p>The Generation pipeline reported the following, so some or all hypotheses were not generated:</p>
             <ul style="color: #c0392b;">{items}</ul>
         </div>
         """
+
+    warnings = cycle_details.get("warnings", [])
+    if isinstance(warnings, list) and warnings:
+        warning_items = "".join(
+            f"<li>{html_lib.escape(str(warning))}</li>" for warning in warnings if str(warning).strip()
+        )
+        if warning_items:
+            html += f"""
+            <div style="margin: 20px 0; padding: 15px; border: 2px solid #e67e22; border-radius: 8px; background-color: #fffaf2;">
+                <h3>⚠️ Generation completed with recovery warnings</h3>
+                <ul style="color: #a65f00;">{warning_items}</ul>
+            </div>
+            """
 
     # Process steps in order
     steps = cycle_details.get("steps", {})
@@ -755,6 +762,23 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         # Step-specific content
         if step_name == "generation":
             hypotheses = step_data.get("hypotheses", [])
+            generation_stages = step_data.get("stages", {})
+            if isinstance(generation_stages, dict) and generation_stages:
+                stage_labels = {
+                    "evidence_retrieval": "Evidence retrieval",
+                    "literature_synthesis": "Literature synthesis",
+                    "hypothesis_generation": "Hypothesis generation",
+                }
+                html += "<p><strong>Generation stage diagnostics:</strong></p><ul>"
+                for stage_name, stage_label in stage_labels.items():
+                    stage = generation_stages.get(stage_name, {})
+                    if not isinstance(stage, dict):
+                        continue
+                    status = html_lib.escape(str(stage.get("status") or "unknown").replace("_", " "))
+                    detail = html_lib.escape(str(stage.get("detail") or ""))
+                    suffix = f" — {detail}" if detail else ""
+                    html += f"<li><strong>{stage_label}:</strong> {status}{suffix}</li>"
+                html += "</ul>"
             search_stats = step_data.get("search_stats", [])
             query_plan = step_data.get("query_plan", {})
             if not isinstance(query_plan, dict):
@@ -1169,14 +1193,22 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
 
 
 def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoal] = None) -> str:
-    """Render the exact sources supplied to the Generation Agent."""
+    """Render validated sources and whether Generation consumed them."""
     import html as html_lib
 
-    sources = cycle_details.get("steps", {}).get("generation", {}).get("sources", [])
+    generation_step = cycle_details.get("steps", {}).get("generation", {})
+    sources = generation_step.get("sources", [])
     if not isinstance(sources, list) or not sources:
         return "<p>No retrieved evidence was used for generation.</p>"
 
-    html = "<h3>📚 Retrieved Evidence Used for Generation</h3>"
+    evidence_consumed = generation_step.get("evidence_consumed")
+    if evidence_consumed is False:
+        html = (
+            "<h3>📚 Evidence Retrieval Completed</h3>"
+            "<p>Validated evidence was retrieved, but hypothesis generation did not execute.</p>"
+        )
+    else:
+        html = "<h3>📚 Retrieved Evidence Used for Generation</h3>"
     for source in sources:
         if not isinstance(source, dict):
             continue
@@ -1210,21 +1242,15 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
         content_label = "Web content" if source_type == "web" else "Abstract"
         author_line = f"<p><strong>Authors:</strong> {authors}</p>" if authors else ""
         evidence_refs = source.get("evidence_refs", [])
-        full_text_refs = [
-            ref
-            for ref in evidence_refs
-            if isinstance(ref, dict) and ref.get("evidence_type") == "full_text"
-        ] if isinstance(evidence_refs, list) else []
-        sections = ", ".join(
-            dict.fromkeys(str(ref.get("section") or "Unknown") for ref in full_text_refs)
+        full_text_refs = (
+            [ref for ref in evidence_refs if isinstance(ref, dict) and ref.get("evidence_type") == "full_text"]
+            if isinstance(evidence_refs, list)
+            else []
         )
-        pages = ", ".join(
-            dict.fromkeys(str(ref.get("page")) for ref in full_text_refs if ref.get("page") is not None)
-        )
+        sections = ", ".join(dict.fromkeys(str(ref.get("section") or "Unknown") for ref in full_text_refs))
+        pages = ", ".join(dict.fromkeys(str(ref.get("page")) for ref in full_text_refs if ref.get("page") is not None))
         chunk_ids = ", ".join(
-            f"<code>{html_lib.escape(str(ref.get('chunk_id')))}</code>"
-            for ref in full_text_refs
-            if ref.get("chunk_id")
+            f"<code>{html_lib.escape(str(ref.get('chunk_id')))}</code>" for ref in full_text_refs if ref.get("chunk_id")
         )
         provenance_html = ""
         if full_text_refs:

@@ -123,9 +123,7 @@ class SearchQueryPlan:
             self,
             "queries",
             tuple(
-                query
-                if isinstance(query, SearchQuery)
-                else SearchQuery(query=str(query), source_type="all")
+                query if isinstance(query, SearchQuery) else SearchQuery(query=str(query), source_type="all")
                 for query in self.queries
                 if isinstance(query, SearchQuery) or str(query).strip()
             ),
@@ -182,7 +180,10 @@ class SharedSentenceTransformerEmbeddings(Embeddings):
             missing = list(dict.fromkeys(text for text in texts if text not in cached))
             if missing:
                 vectors = model.encode(
-                    missing, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False,
+                    missing,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
                 ).tolist()
                 if len(vectors) != len(missing):
                     raise ValueError("Embedding response does not match the requested document count.")
@@ -261,11 +262,7 @@ def reciprocal_rank_fusion(
                     if context_key not in seen_contexts:
                         seen_contexts.add(context_key)
                         merged_contexts.append(context)
-                preferred = (
-                    evidence
-                    if (evidence.search_score or 0) > (existing.search_score or 0)
-                    else existing
-                )
+                preferred = evidence if (evidence.search_score or 0) > (existing.search_score or 0) else existing
                 merged_metadata = dict(preferred.metadata)
                 merged_metadata["query_contexts"] = tuple(merged_contexts)
                 evidence_by_key[canonical_key] = replace(
@@ -315,9 +312,7 @@ class ResearchRetriever:
         self.top_k = max(self.top_k, self.minimum_relevant_sources)
         self.rrf_k = rrf_k or int(rag_config.get("rrf_k", 60))
         self.max_abstract_chars = max_abstract_chars or int(rag_config.get("max_abstract_chars", 4000))
-        self.query_fidelity_enabled = bool(
-            rag_config.get("query_fidelity_enabled", True)
-        )
+        self.query_fidelity_enabled = bool(rag_config.get("query_fidelity_enabled", True))
         self.query_fidelity_min_similarity = max(
             0.0,
             min(1.0, float(rag_config.get("query_fidelity_min_similarity", 0.35))),
@@ -395,13 +390,9 @@ class ResearchRetriever:
             TavilySearchTool(
                 max_results=tavily_results,
                 search_depth=str(tavily_config.get("search_depth", "advanced")),
-                search_chunks_per_source=int(
-                    tavily_config.get("search_chunks_per_source", 3)
-                ),
+                search_chunks_per_source=int(tavily_config.get("search_chunks_per_source", 3)),
                 extract_depth=str(tavily_config.get("extract_depth", "basic")),
-                extract_chunks_per_source=int(
-                    tavily_config.get("extract_chunks_per_source", 3)
-                ),
+                extract_chunks_per_source=int(tavily_config.get("extract_chunks_per_source", 3)),
             )
             if tavily_config.get("enabled", True)
             else None
@@ -443,14 +434,8 @@ class ResearchRetriever:
         if not goal or not query_plan.queries:
             return False, "The research goal and at least one query are required."
 
-        requirements = {
-            requirement.aspect_id: requirement
-            for requirement in query_plan.explicit_requirements
-        }
-        hypotheses = {
-            hypothesis.hypothesis_id: hypothesis
-            for hypothesis in query_plan.provisional_hypotheses
-        }
+        requirements = {requirement.aspect_id: requirement for requirement in query_plan.explicit_requirements}
+        hypotheses = {hypothesis.hypothesis_id: hypothesis for hypothesis in query_plan.provisional_hypotheses}
         anchor_texts: dict[str, str] = {"goal": goal}
         for requirement in requirements.values():
             anchor_texts[f"requirement:{requirement.aspect_id}"] = " ".join(
@@ -462,19 +447,12 @@ class ResearchRetriever:
                 if value
             )
         for hypothesis in hypotheses.values():
-            anchor_texts[f"hypothesis:{hypothesis.hypothesis_id}"] = (
-                hypothesis.statement
-            )
-            anchor_texts[f"hypothesis_anchor:{hypothesis.hypothesis_id}"] = (
-                " ".join(
-                    value for value in (goal, hypothesis.goal_quote) if value
-                )
+            anchor_texts[f"hypothesis:{hypothesis.hypothesis_id}"] = hypothesis.statement
+            anchor_texts[f"hypothesis_anchor:{hypothesis.hypothesis_id}"] = " ".join(
+                value for value in (goal, hypothesis.goal_quote) if value
             )
 
-        query_texts = {
-            f"query:{index}": query.query
-            for index, query in enumerate(query_plan.queries)
-        }
+        query_texts = {f"query:{index}": query.query for index, query in enumerate(query_plan.queries)}
         texts = {**anchor_texts, **query_texts}
         try:
             vectors = self.embeddings.embed_documents(list(texts.values()))
@@ -500,9 +478,7 @@ class ResearchRetriever:
         for hypothesis in hypotheses.values():
             score = self._cosine_similarity(
                 vector_by_key[f"hypothesis:{hypothesis.hypothesis_id}"],
-                vector_by_key[
-                    f"hypothesis_anchor:{hypothesis.hypothesis_id}"
-                ],
+                vector_by_key[f"hypothesis_anchor:{hypothesis.hypothesis_id}"],
             )
             accepted = score >= self.provisional_hypothesis_min_similarity
             if not accepted:
@@ -521,15 +497,9 @@ class ResearchRetriever:
         for index, query in enumerate(query_plan.queries):
             anchor_vectors = [goal_vector]
             if query.evidence_requirement_id in requirements:
-                anchor_vectors.append(
-                    vector_by_key[
-                        f"requirement:{query.evidence_requirement_id}"
-                    ]
-                )
+                anchor_vectors.append(vector_by_key[f"requirement:{query.evidence_requirement_id}"])
             if query.hypothesis_id in hypotheses:
-                anchor_vectors.append(
-                    vector_by_key[f"hypothesis:{query.hypothesis_id}"]
-                )
+                anchor_vectors.append(vector_by_key[f"hypothesis:{query.hypothesis_id}"])
             score = max(
                 self._cosine_similarity(
                     vector_by_key[f"query:{index}"],
@@ -537,10 +507,7 @@ class ResearchRetriever:
                 )
                 for anchor_vector in anchor_vectors
             )
-            accepted = (
-                score >= self.query_fidelity_min_similarity
-                and query.hypothesis_id not in rejected_hypotheses
-            )
+            accepted = score >= self.query_fidelity_min_similarity and query.hypothesis_id not in rejected_hypotheses
             if not accepted:
                 rejected_queries.append(query.query)
             report.append(
@@ -559,14 +526,9 @@ class ResearchRetriever:
         if rejected_hypotheses or rejected_queries:
             details = []
             if rejected_hypotheses:
-                details.append(
-                    "misaligned provisional hypotheses: "
-                    + ", ".join(sorted(rejected_hypotheses))
-                )
+                details.append("misaligned provisional hypotheses: " + ", ".join(sorted(rejected_hypotheses)))
             if rejected_queries:
-                details.append(
-                    "misaligned queries: " + "; ".join(rejected_queries)
-                )
+                details.append("misaligned queries: " + "; ".join(rejected_queries))
             return False, ". ".join(details)
         return True, "All provisional hypotheses and queries passed fidelity checks."
 
@@ -696,17 +658,11 @@ class ResearchRetriever:
         if not normalized_queries:
             return []
 
-        academic_queries = tuple(
-            query for query in normalized_queries if query.source_type in ("academic", "all")
-        )
+        academic_queries = tuple(query for query in normalized_queries if query.source_type in ("academic", "all"))
         web_queries = (
             normalized_queries
             if force_web
-            else tuple(
-                query
-                for query in normalized_queries
-                if query.source_type in ("web", "official", "news", "all")
-            )
+            else tuple(query for query in normalized_queries if query.source_type in ("web", "official", "news", "all"))
         )
 
         tasks = []
@@ -751,8 +707,7 @@ class ResearchRetriever:
         started_at = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = [
-                (source_name, query_total, executor.submit(search))
-                for source_name, query_total, search in tasks
+                (source_name, query_total, executor.submit(search)) for source_name, query_total, search in tasks
             ]
             ranked_results: list[list[EvidenceSource]] = []
             for source_name, query_total, future in futures:
@@ -927,8 +882,7 @@ class ResearchRetriever:
 
         scored_results = vector_store.similarity_search_with_score(query, k=count)
         if isinstance(scored_results, list) and all(
-            isinstance(item, tuple) and len(item) == 2
-            for item in scored_results
+            isinstance(item, tuple) and len(item) == 2 for item in scored_results
         ):
             ranked = []
             for document, score in scored_results:
@@ -957,22 +911,16 @@ class ResearchRetriever:
     ) -> list[Document]:
         """Turn top-ranked Tavily discoveries into bounded web evidence."""
 
-        academic_documents = [
-            document
-            for document in selected
-            if document.metadata.get("source_type") != "web"
-        ]
+        academic_documents = [document for document in selected if document.metadata.get("source_type") != "web"]
         ready_web = [
             document
             for document in selected
-            if document.metadata.get("source_type") == "web"
-            and document.metadata.get("content_extracted") is True
+            if document.metadata.get("source_type") == "web" and document.metadata.get("content_extracted") is True
         ]
         pending_web = [
             document
             for document in selected
-            if document.metadata.get("source_type") == "web"
-            and document.metadata.get("content_extracted") is not True
+            if document.metadata.get("source_type") == "web" and document.metadata.get("content_extracted") is not True
         ][: self.max_web_extract_results]
         if not pending_web:
             return academic_documents + self._rank_extracted_web_chunks(
@@ -988,13 +936,8 @@ class ResearchRetriever:
 
         extraction_groups: dict[str, list[str]] = {}
         for document in pending_web:
-            extraction_query = str(
-                document.metadata.get("sub_question")
-                or query
-            ).strip()
-            extraction_groups.setdefault(extraction_query, []).append(
-                str(document.metadata.get("url") or "")
-            )
+            extraction_query = str(document.metadata.get("sub_question") or query).strip()
+            extraction_groups.setdefault(extraction_query, []).append(str(document.metadata.get("url") or ""))
 
         extracted_by_url: dict[str, str] = {}
         for extraction_query, urls in extraction_groups.items():
@@ -1005,18 +948,12 @@ class ResearchRetriever:
         enriched_web: list[Document] = []
         for document in pending_web:
             canonical_url = canonicalize_url(
-                str(
-                    document.metadata.get("canonical_url")
-                    or document.metadata.get("url")
-                    or ""
-                )
+                str(document.metadata.get("canonical_url") or document.metadata.get("url") or "")
             )
             extracted_content = str(extracted_by_url.get(canonical_url) or "").strip()
             if not extracted_content:
                 continue
-            enriched_web.append(
-                self._with_extracted_web_content(document, extracted_content)
-            )
+            enriched_web.append(self._with_extracted_web_content(document, extracted_content))
 
         web_chunks = self._rank_extracted_web_chunks(
             [*ready_web, *enriched_web],
@@ -1052,11 +989,7 @@ class ResearchRetriever:
             if document.metadata.get("source_type") != "web":
                 continue
             canonical_url = canonicalize_url(
-                str(
-                    document.metadata.get("canonical_url")
-                    or document.metadata.get("url")
-                    or ""
-                )
+                str(document.metadata.get("canonical_url") or document.metadata.get("url") or "")
             )
             if canonical_url and canonical_url not in documents_by_url:
                 documents_by_url[canonical_url] = document
@@ -1080,11 +1013,7 @@ class ResearchRetriever:
             if not extracted_content:
                 continue
             metadata = dict(document.metadata)
-            parent_source_id = str(
-                metadata.get("parent_source_id")
-                or metadata.get("source_id")
-                or ""
-            )
+            parent_source_id = str(metadata.get("parent_source_id") or metadata.get("source_id") or "")
             metadata.update(
                 {
                     "source_id": parent_source_id,
@@ -1192,11 +1121,7 @@ class ResearchRetriever:
         documents: list[Document] = []
         for chunk in evidence_chunks:
             chunk_metadata = dict(metadata)
-            chunk_source_id = (
-                parent_source_id
-                if chunk.chunk_index == 1
-                else chunk.chunk_id
-            )
+            chunk_source_id = parent_source_id if chunk.chunk_index == 1 else chunk.chunk_id
             chunk_metadata.update(
                 {
                     "source_id": chunk_source_id,
@@ -1237,11 +1162,7 @@ class ResearchRetriever:
     ) -> list[Document]:
         """Rerank extracted passages against their assigned sub-question."""
 
-        chunks = [
-            chunk
-            for document in documents
-            for chunk in self._document_to_evidence_chunks(document)
-        ]
+        chunks = [chunk for document in documents for chunk in self._document_to_evidence_chunks(document)]
         if not chunks:
             return []
         if len(chunks) == 1:
@@ -1253,9 +1174,7 @@ class ResearchRetriever:
         grouped_chunks: dict[str, list[Document]] = {}
         for chunk in chunks:
             ranking_query = str(
-                chunk.metadata.get("sub_question")
-                or chunk.metadata.get("retrieval_query")
-                or fallback_query
+                chunk.metadata.get("sub_question") or chunk.metadata.get("retrieval_query") or fallback_query
             ).strip()
             grouped_chunks.setdefault(ranking_query, []).append(chunk)
 
@@ -1491,15 +1410,10 @@ class ResearchRetriever:
                 "title": evidence.title,
                 "summary": summary,
                 "content": (
-                    summary
-                    if evidence.source_family == "web"
-                    and evidence.metadata.get("content_extracted")
-                    else ""
+                    summary if evidence.source_family == "web" and evidence.metadata.get("content_extracted") else ""
                 ),
                 "snippet": evidence.summary if evidence.source_family == "web" else "",
-                "content_extracted": bool(
-                    evidence.metadata.get("content_extracted")
-                )
+                "content_extracted": bool(evidence.metadata.get("content_extracted"))
                 if evidence.source_family == "web"
                 else None,
                 "authors": list(evidence.authors),
@@ -1564,9 +1478,7 @@ def format_documents_for_prompt(
             title = document.metadata.get("title", "Untitled")
             published = document.metadata.get("published", "Unknown")
             evidence_status = document.metadata.get("evidence_status", "abstract_only")
-            evidence_sections = [
-                f"Title: {title}\nPublished: {published}\nEvidence status: {evidence_status}"
-            ]
+            evidence_sections = [f"Title: {title}\nPublished: {published}\nEvidence status: {evidence_status}"]
             for evidence_ref in evidence_refs:
                 if not isinstance(evidence_ref, dict):
                     continue
@@ -1586,9 +1498,7 @@ def format_documents_for_prompt(
                 serialized_attributes = " ".join(
                     f'{key}="{value}"' for key, value in attributes.items() if value not in (None, "")
                 )
-                evidence_sections.append(
-                    f"<evidence {serialized_attributes}>\n{text.strip()}\n</evidence>"
-                )
+                evidence_sections.append(f"<evidence {serialized_attributes}>\n{text.strip()}\n</evidence>")
             content = "\n\n".join(evidence_sections)
         else:
             content = document.page_content
@@ -1667,7 +1577,8 @@ def format_documents_for_grading(
         requested_freshness = field(document.metadata.get("freshness"), limit=40, default="Not specified")
         summary = str(document.metadata.get("summary") or document.metadata.get("abstract") or "")
         full_text_passages = [
-            str(ref["text"]) for ref in document.metadata.get("evidence_refs", [])
+            str(ref["text"])
+            for ref in document.metadata.get("evidence_refs", [])
             if isinstance(ref, dict) and ref.get("evidence_type") == "full_text" and ref.get("text")
         ]
         if document.metadata.get("full_text_indexed") and full_text_passages:
@@ -1716,8 +1627,7 @@ def serialize_documents(
         {
             "source_id": document.metadata.get("source_id"),
             "source_type": document.metadata.get("source_type", "academic"),
-            "source_family": document.metadata.get("source_family")
-            or document.metadata.get("source_type", "academic"),
+            "source_family": document.metadata.get("source_family") or document.metadata.get("source_type", "academic"),
             "document_type": document.metadata.get("document_type"),
             "provider": document.metadata.get("provider") or document.metadata.get("source"),
             "url": document.metadata.get("url") or document.metadata.get("arxiv_url"),
@@ -1737,8 +1647,7 @@ def serialize_documents(
             "document_rerank_score": document.metadata.get("document_rerank_score"),
             "chunk_rerank_score": document.metadata.get("chunk_rerank_score"),
             "full_text_available": document.metadata.get("full_text_available", False),
-            "retrieval_query": document.metadata.get("retrieval_query")
-            or document.metadata.get("search_query"),
+            "retrieval_query": document.metadata.get("retrieval_query") or document.metadata.get("search_query"),
             "search_query": document.metadata.get("search_query"),
             "sub_question": document.metadata.get("sub_question"),
             "purpose": document.metadata.get("purpose"),

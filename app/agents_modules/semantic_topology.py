@@ -117,9 +117,7 @@ def call_llm_for_cluster_label(
     Returns a dict with keys ``label`` and ``explanation``.  Falls back to a
     generic label on any error so the pipeline is never blocked.
     """
-    joined = "\n\n".join(
-        f"[{i + 1}] {snip}" for i, snip in enumerate(hypothesis_snippets[:5])
-    )
+    joined = "\n\n".join(f"[{i + 1}] {snip}" for i, snip in enumerate(hypothesis_snippets[:5]))
     prompt = _CLUSTER_LABEL_TMPL.format(hypotheses=joined)
     try:
         raw = call_llm(
@@ -257,9 +255,7 @@ class ProximityAgent:
         self._similarity_cache[cache_key] = score
         return score
 
-    def _cluster_hypotheses(
-        self, hypotheses: List[Hypothesis], sim_matrix: List[List[float]]
-    ) -> Dict[int, List[str]]:
+    def _cluster_hypotheses(self, hypotheses: List[Hypothesis], sim_matrix: List[List[float]]) -> Dict[int, List[str]]:
         """Groups hypotheses into clusters via BFS connected components."""
         n = len(hypotheses)
         visited: Set[int] = set()
@@ -276,10 +272,7 @@ class ProximityAgent:
                 curr = queue.pop(0)
                 component.append(hypotheses[curr].hypothesis_id)
                 for neighbor in range(n):
-                    if (
-                        neighbor not in visited
-                        and sim_matrix[curr][neighbor] >= self.cluster_threshold
-                    ):
+                    if neighbor not in visited and sim_matrix[curr][neighbor] >= self.cluster_threshold:
                         visited.add(neighbor)
                         queue.append(neighbor)
             clusters[cluster_id] = component
@@ -336,13 +329,8 @@ class ProximityAgent:
                 if sim < self.near_dup_sim_threshold:
                     continue
                 # Stage 2: LLM confirmation
-                result = call_llm_for_near_duplicate_check(
-                    hypotheses[i], hypotheses[j]
-                )
-                if (
-                    result["near_duplicate"]
-                    and result["confidence"] >= self.near_dup_llm_confidence
-                ):
+                result = call_llm_for_near_duplicate_check(hypotheses[i], hypotheses[j])
+                if result["near_duplicate"] and result["confidence"] >= self.near_dup_llm_confidence:
                     near_dups.append(
                         {
                             "id_a": hypotheses[i].hypothesis_id,
@@ -407,9 +395,7 @@ class ProximityAgent:
             }
 
         n = len(active_hypotheses)
-        adjacency: Dict[str, List[Dict[str, Any]]] = {
-            h.hypothesis_id: [] for h in active_hypotheses
-        }
+        adjacency: Dict[str, List[Dict[str, Any]]] = {h.hypothesis_id: [] for h in active_hypotheses}
 
         if n == 1:
             h = active_hypotheses[0]
@@ -417,9 +403,7 @@ class ProximityAgent:
             single_label = {0: {"label": h.title or h.hypothesis_id, "explanation": ""}}
             return {
                 "adjacency_graph": adjacency,
-                "nodes": visjs_data.get(
-                    "nodes", [{"id": h.hypothesis_id, "label": h.hypothesis_id}]
-                ),
+                "nodes": visjs_data.get("nodes", [{"id": h.hypothesis_id, "label": h.hypothesis_id}]),
                 "edges": visjs_data.get("edges", []),
                 "clusters": {0: [h.hypothesis_id]},
                 "cluster_labels": single_label,
@@ -443,9 +427,7 @@ class ProximityAgent:
 
             for j in range(i + 1, n):
                 hypo_j = active_hypotheses[j]
-                text_j = (
-                    f"{hypo_j.title}\n{hypo_j.text}" if hypo_j.title else hypo_j.text
-                )
+                text_j = f"{hypo_j.title}\n{hypo_j.text}" if hypo_j.title else hypo_j.text
 
                 if text_i and text_j:
                     sim = self._get_similarity(text_i, text_j)
@@ -462,12 +444,8 @@ class ProximityAgent:
                 all_pair_similarities.append(sim)
 
                 if sim >= self.similarity_threshold:
-                    adjacency[hypo_i.hypothesis_id].append(
-                        {"other_id": hypo_j.hypothesis_id, "similarity": sim}
-                    )
-                    adjacency[hypo_j.hypothesis_id].append(
-                        {"other_id": hypo_i.hypothesis_id, "similarity": sim}
-                    )
+                    adjacency[hypo_i.hypothesis_id].append({"other_id": hypo_j.hypothesis_id, "similarity": sim})
+                    adjacency[hypo_j.hypothesis_id].append({"other_id": hypo_i.hypothesis_id, "similarity": sim})
 
         # ----------------------------------------------------------------
         # Step 2: Per-hypothesis mean similarity and overall diversity
@@ -479,20 +457,14 @@ class ProximityAgent:
                 sum(other_sims) / len(other_sims) if other_sims else 0.0
             )
 
-        avg_pairwise_sim = (
-            sum(all_pair_similarities) / len(all_pair_similarities)
-            if all_pair_similarities
-            else 0.0
-        )
+        avg_pairwise_sim = sum(all_pair_similarities) / len(all_pair_similarities) if all_pair_similarities else 0.0
         diversity_score = max(0.0, min(1.0, 1.0 - avg_pairwise_sim))
 
         # ----------------------------------------------------------------
         # Step 3: Outliers
         # ----------------------------------------------------------------
         outliers: List[str] = [
-            h_id
-            for h_id, mean_sim in mean_similarities.items()
-            if mean_sim < self.outlier_threshold
+            h_id for h_id, mean_sim in mean_similarities.items() if mean_sim < self.outlier_threshold
         ]
 
         # ----------------------------------------------------------------
@@ -513,13 +485,9 @@ class ProximityAgent:
         exemplars: List[str] = []
         hypo_map = {h.hypothesis_id: h for h in active_hypotheses}
         for _cluster_id, member_ids in clusters.items():
-            cluster_hypos = [
-                hypo_map[m_id] for m_id in member_ids if m_id in hypo_map
-            ]
+            cluster_hypos = [hypo_map[m_id] for m_id in member_ids if m_id in hypo_map]
             if cluster_hypos:
-                best = max(
-                    cluster_hypos, key=lambda h: getattr(h, "elo_score", 1200.0)
-                )
+                best = max(cluster_hypos, key=lambda h: getattr(h, "elo_score", 1200.0))
                 exemplars.append(best.hypothesis_id)
 
         # ----------------------------------------------------------------
@@ -553,30 +521,20 @@ class ProximityAgent:
             hypo = hypo_map.get(node_id)
             if hypo:
                 c_id = id_to_cluster.get(node_id, 0)
-                cluster_label = cluster_labels.get(c_id, {}).get(
-                    "label", f"Cluster {c_id + 1}"
-                )
+                cluster_label = cluster_labels.get(c_id, {}).get("label", f"Cluster {c_id + 1}")
                 node["group"] = cluster_label
                 elo = getattr(hypo, "elo_score", 1200.0)
                 node["value"] = max(10, min(30, int(elo / 50)))
                 title_text = hypo.title or node_id
-                snippet = (
-                    (hypo.text[:150] + "...") if len(hypo.text) > 150 else hypo.text
-                )
-                is_dup = any(
-                    nd["id_a"] == node_id or nd["id_b"] == node_id
-                    for nd in near_duplicates
-                )
+                snippet = (hypo.text[:150] + "...") if len(hypo.text) > 150 else hypo.text
+                is_dup = any(nd["id_a"] == node_id or nd["id_b"] == node_id for nd in near_duplicates)
                 dup_flag = " ⚠ near-duplicate" if is_dup else ""
                 node["title"] = (
-                    f"<b>{node_id}: {title_text}</b>"
-                    f"<br>Elo: {elo:.1f} | {cluster_label}{dup_flag}"
-                    f"<br><br>{snippet}"
+                    f"<b>{node_id}: {title_text}</b><br>Elo: {elo:.1f} | {cluster_label}{dup_flag}<br><br>{snippet}"
                 )
 
         logger.info(
-            "Built proximity graph: %d nodes, %d edges, %d clusters, "
-            "%d outliers, %d near-duplicates, diversity: %.3f",
+            "Built proximity graph: %d nodes, %d edges, %d clusters, %d outliers, %d near-duplicates, diversity: %.3f",
             len(active_hypotheses),
             len(edges),
             len(clusters),

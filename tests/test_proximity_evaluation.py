@@ -28,6 +28,7 @@ from app.agents_modules.proximity_helpers import SimilarityConfig
 # Lightweight evaluation hypothesis/context
 # ============================================================
 
+
 @dataclass
 class EvaluationHypothesis:
     hypothesis_id: str
@@ -46,16 +47,13 @@ class EvaluationContext:
         self.hypotheses = hypotheses
 
     def get_active_hypotheses(self):
-        return [
-            hypothesis
-            for hypothesis in self.hypotheses
-            if hypothesis.is_active
-        ]
+        return [hypothesis for hypothesis in self.hypotheses if hypothesis.is_active]
 
 
 # ============================================================
 # Ground-truth evaluation dataset
 # ============================================================
+
 
 def create_evaluation_hypotheses() -> List[EvaluationHypothesis]:
     """
@@ -83,55 +81,29 @@ def create_evaluation_hypotheses() -> List[EvaluationHypothesis]:
         # ----------------------------------------------------
         # Group A: Cancer / TP53
         # ----------------------------------------------------
+        EvaluationHypothesis("A1", "TP53 regulates apoptosis in cancer cells by controlling programmed cell death."),
         EvaluationHypothesis(
-            "A1",
-            "TP53 regulates apoptosis in cancer cells "
-            "by controlling programmed cell death."
+            "A2", "The TP53 gene controls programmed cell death and regulates apoptosis in cancer cells."
         ),
-
-        EvaluationHypothesis(
-            "A2",
-            "The TP53 gene controls programmed cell death "
-            "and regulates apoptosis in cancer cells."
-        ),
-
-        EvaluationHypothesis(
-            "A3",
-            "Activation of p53 promotes apoptosis "
-            "and suppresses tumor cell survival."
-        ),
-
+        EvaluationHypothesis("A3", "Activation of p53 promotes apoptosis and suppresses tumor cell survival."),
         # ----------------------------------------------------
         # Group B: Network intrusion detection
         # ----------------------------------------------------
         EvaluationHypothesis(
-            "B1",
-            "Machine learning can detect network intrusions "
-            "by analyzing abnormal traffic patterns."
+            "B1", "Machine learning can detect network intrusions by analyzing abnormal traffic patterns."
         ),
-
         EvaluationHypothesis(
-            "B2",
-            "Network intrusion detection can use machine learning "
-            "to identify unusual network traffic behavior."
+            "B2", "Network intrusion detection can use machine learning to identify unusual network traffic behavior."
         ),
-
         # ----------------------------------------------------
         # Group C: Agriculture
         # ----------------------------------------------------
-        EvaluationHypothesis(
-            "C1",
-            "Crop yield can be improved by optimizing irrigation "
-            "and soil nutrient management."
-        ),
-
+        EvaluationHypothesis("C1", "Crop yield can be improved by optimizing irrigation and soil nutrient management."),
         # ----------------------------------------------------
         # Intentionally unrelated
         # ----------------------------------------------------
         EvaluationHypothesis(
-            "C2",
-            "Deep ocean microorganisms can survive under extreme "
-            "pressure and low temperature conditions."
+            "C2", "Deep ocean microorganisms can survive under extreme pressure and low temperature conditions."
         ),
     ]
 
@@ -166,6 +138,7 @@ def normalize_pair(a: str, b: str) -> Tuple[str, str]:
 # Helper functions
 # ============================================================
 
+
 def build_score_dictionary(
     agent: ProximityAgent,
     hypotheses: List[EvaluationHypothesis],
@@ -179,7 +152,6 @@ def build_score_dictionary(
 
     for i in range(len(hypotheses)):
         for j in range(i + 1, len(hypotheses)):
-
             h1 = hypotheses[i]
             h2 = hypotheses[j]
 
@@ -203,6 +175,7 @@ def build_score_dictionary(
 # 1. Similarity separation
 # ============================================================
 
+
 def evaluate_similarity_separation(
     scores: Dict[Tuple[str, str], float],
 ):
@@ -211,54 +184,28 @@ def evaluate_similarity_separation(
     scores than known-different hypotheses.
     """
 
-    similar_scores = [
-        scores[pair]
-        for pair in SIMILAR_PAIRS
-        if pair in scores
-    ]
+    similar_scores = [scores[pair] for pair in SIMILAR_PAIRS if pair in scores]
 
-    different_scores = [
-        scores[pair]
-        for pair in DIFFERENT_PAIRS
-        if pair in scores
-    ]
+    different_scores = [scores[pair] for pair in DIFFERENT_PAIRS if pair in scores]
 
-    similar_average = (
-        statistics.mean(similar_scores)
-        if similar_scores
-        else 0.0
-    )
+    similar_average = statistics.mean(similar_scores) if similar_scores else 0.0
 
-    different_average = (
-        statistics.mean(different_scores)
-        if different_scores
-        else 0.0
-    )
+    different_average = statistics.mean(different_scores) if different_scores else 0.0
 
     separation = similar_average - different_average
 
     print("\n1. SIMILARITY SEPARATION")
     print("-" * 50)
 
-    print(
-        f"Similar pairs evaluated:       {len(similar_scores)}"
-    )
+    print(f"Similar pairs evaluated:       {len(similar_scores)}")
 
-    print(
-        f"Different pairs evaluated:     {len(different_scores)}"
-    )
+    print(f"Different pairs evaluated:     {len(different_scores)}")
 
-    print(
-        f"Average similar-pair score:    {similar_average:.3f}"
-    )
+    print(f"Average similar-pair score:    {similar_average:.3f}")
 
-    print(
-        f"Average different-pair score:  {different_average:.3f}"
-    )
+    print(f"Average different-pair score:  {different_average:.3f}")
 
-    print(
-        f"Similarity separation:         {separation:.3f}"
-    )
+    print(f"Similarity separation:         {separation:.3f}")
 
     if separation > 0:
         print("Result: PASS")
@@ -277,6 +224,7 @@ def evaluate_similarity_separation(
 # 2. Threshold correctness
 # ============================================================
 
+
 def evaluate_threshold_correctness(
     scores: Dict[Tuple[str, str], float],
     threshold: float,
@@ -293,7 +241,6 @@ def evaluate_threshold_correctness(
     different_total = 0
 
     for pair in SIMILAR_PAIRS:
-
         if pair not in scores:
             continue
 
@@ -303,7 +250,6 @@ def evaluate_threshold_correctness(
             similar_correct += 1
 
     for pair in DIFFERENT_PAIRS:
-
         if pair not in scores:
             continue
 
@@ -312,61 +258,30 @@ def evaluate_threshold_correctness(
         if scores[pair] < threshold:
             different_correct += 1
 
-    similar_accuracy = (
-        similar_correct / similar_total
-        if similar_total
-        else 0.0
-    )
+    similar_accuracy = similar_correct / similar_total if similar_total else 0.0
 
-    different_accuracy = (
-        different_correct / different_total
-        if different_total
-        else 0.0
-    )
+    different_accuracy = different_correct / different_total if different_total else 0.0
 
-    overall_total = (
-        similar_total + different_total
-    )
+    overall_total = similar_total + different_total
 
-    overall_correct = (
-        similar_correct + different_correct
-    )
+    overall_correct = similar_correct + different_correct
 
-    overall_accuracy = (
-        overall_correct / overall_total
-        if overall_total
-        else 0.0
-    )
+    overall_accuracy = overall_correct / overall_total if overall_total else 0.0
 
     print("\n2. THRESHOLD CORRECTNESS")
     print("-" * 50)
 
     print(f"Threshold:                    {threshold:.2f}")
 
-    print(
-        f"Similar pairs correctly connected: "
-        f"{similar_correct}/{similar_total}"
-    )
+    print(f"Similar pairs correctly connected: {similar_correct}/{similar_total}")
 
-    print(
-        f"Different pairs correctly separated: "
-        f"{different_correct}/{different_total}"
-    )
+    print(f"Different pairs correctly separated: {different_correct}/{different_total}")
 
-    print(
-        f"Similar-pair accuracy:         "
-        f"{similar_accuracy:.3f}"
-    )
+    print(f"Similar-pair accuracy:         {similar_accuracy:.3f}")
 
-    print(
-        f"Different-pair accuracy:       "
-        f"{different_accuracy:.3f}"
-    )
+    print(f"Different-pair accuracy:       {different_accuracy:.3f}")
 
-    print(
-        f"Overall threshold accuracy:    "
-        f"{overall_accuracy:.3f}"
-    )
+    print(f"Overall threshold accuracy:    {overall_accuracy:.3f}")
 
     if overall_accuracy >= 0.80:
         print("Result: PASS")
@@ -383,6 +298,7 @@ def evaluate_threshold_correctness(
 # ============================================================
 # 3. Diversity / cluster detection
 # ============================================================
+
 
 def evaluate_diversity_detection(
     agent: ProximityAgent,
@@ -402,7 +318,6 @@ def evaluate_diversity_detection(
     cluster_groups = {}
 
     for hypothesis_id, cluster_id in clusters.items():
-
         cluster_groups.setdefault(
             cluster_id,
             [],
@@ -411,17 +326,10 @@ def evaluate_diversity_detection(
     print("\n3. DIVERSITY / CLUSTER DETECTION")
     print("-" * 50)
 
-    print(
-        f"Number of detected clusters: {len(cluster_groups)}"
-    )
+    print(f"Number of detected clusters: {len(cluster_groups)}")
 
-    for cluster_id, members in sorted(
-        cluster_groups.items()
-    ):
-        print(
-            f"Cluster {cluster_id}: "
-            f"{', '.join(sorted(members))}"
-        )
+    for cluster_id, members in sorted(cluster_groups.items()):
+        print(f"Cluster {cluster_id}: {', '.join(sorted(members))}")
 
     # Basic diversity criterion:
     # There should be more than one cluster.
@@ -443,6 +351,7 @@ def evaluate_diversity_detection(
 # 4. Consistency
 # ============================================================
 
+
 def evaluate_consistency(
     agent: ProximityAgent,
     hypotheses: List[EvaluationHypothesis],
@@ -455,20 +364,13 @@ def evaluate_consistency(
 
     pair = ("A1", "A2")
 
-    h1 = next(
-        h for h in hypotheses
-        if h.hypothesis_id == pair[0]
-    )
+    h1 = next(h for h in hypotheses if h.hypothesis_id == pair[0])
 
-    h2 = next(
-        h for h in hypotheses
-        if h.hypothesis_id == pair[1]
-    )
+    h2 = next(h for h in hypotheses if h.hypothesis_id == pair[1])
 
     scores = []
 
     for _ in range(runs):
-
         # Clear cache to ensure the calculation is repeated.
         agent.clear_similarity_cache()
 
@@ -482,34 +384,18 @@ def evaluate_consistency(
 
     max_difference = max(scores) - min(scores)
 
-    standard_deviation = (
-        statistics.stdev(scores)
-        if len(scores) > 1
-        else 0.0
-    )
+    standard_deviation = statistics.stdev(scores) if len(scores) > 1 else 0.0
 
     print("\n4. CONSISTENCY")
     print("-" * 50)
 
     print(f"Runs:                         {runs}")
 
-    print(
-        "Scores:                       "
-        + ", ".join(
-            f"{score:.6f}"
-            for score in scores
-        )
-    )
+    print("Scores:                       " + ", ".join(f"{score:.6f}" for score in scores))
 
-    print(
-        f"Maximum score difference:     "
-        f"{max_difference:.8f}"
-    )
+    print(f"Maximum score difference:     {max_difference:.8f}")
 
-    print(
-        f"Standard deviation:           "
-        f"{standard_deviation:.8f}"
-    )
+    print(f"Standard deviation:           {standard_deviation:.8f}")
 
     # Small numerical differences are acceptable.
     passed = max_difference <= 0.0001
@@ -531,6 +417,7 @@ def evaluate_consistency(
 # 5. Performance evaluation
 # ============================================================
 
+
 def benchmark(
     function,
     repetitions: int = 3,
@@ -542,7 +429,6 @@ def benchmark(
     times = []
 
     for _ in range(repetitions):
-
         start = time.perf_counter()
 
         function()
@@ -629,36 +515,18 @@ def evaluate_performance(
     else:
         speedup = 0.0
 
-    improvement = (
-        (standard_time - optimized_time)
-        / standard_time
-        * 100
-        if standard_time > 0
-        else 0.0
-    )
+    improvement = (standard_time - optimized_time) / standard_time * 100 if standard_time > 0 else 0.0
 
     print("\n5. PERFORMANCE")
     print("-" * 50)
 
-    print(
-        f"Standard implementation:      "
-        f"{standard_time:.4f} seconds"
-    )
+    print(f"Standard implementation:      {standard_time:.4f} seconds")
 
-    print(
-        f"Optimized implementation:     "
-        f"{optimized_time:.4f} seconds"
-    )
+    print(f"Optimized implementation:     {optimized_time:.4f} seconds")
 
-    print(
-        f"Speedup:                       "
-        f"{speedup:.2f}x"
-    )
+    print(f"Speedup:                       {speedup:.2f}x")
 
-    print(
-        f"Execution-time improvement:    "
-        f"{improvement:.2f}%"
-    )
+    print(f"Execution-time improvement:    {improvement:.2f}%")
 
     if optimized_time < standard_time:
         print("Result: PASS")
@@ -677,6 +545,7 @@ def evaluate_performance(
 # 6. Pair-count correctness
 # ============================================================
 
+
 def evaluate_pair_count(
     agent: ProximityAgent,
     context: EvaluationContext,
@@ -689,9 +558,7 @@ def evaluate_pair_count(
 
     n = len(hypotheses)
 
-    expected_unique_pairs = (
-        n * (n - 1) // 2
-    )
+    expected_unique_pairs = n * (n - 1) // 2
 
     graph = agent.build_proximity_graph(
         context,
@@ -699,40 +566,22 @@ def evaluate_pair_count(
         similarity_threshold=0.0,
     )
 
-    directed_connections = len(
-        graph["edges"]
-    )
+    directed_connections = len(graph["edges"])
 
-    expected_directed_connections = (
-        expected_unique_pairs * 2
-    )
+    expected_directed_connections = expected_unique_pairs * 2
 
     print("\n6. PAIR-COUNT CORRECTNESS")
     print("-" * 50)
 
-    print(
-        f"Number of hypotheses:          {n}"
-    )
+    print(f"Number of hypotheses:          {n}")
 
-    print(
-        f"Expected unique pairs:         "
-        f"{expected_unique_pairs}"
-    )
+    print(f"Expected unique pairs:         {expected_unique_pairs}")
 
-    print(
-        f"Directed graph connections:    "
-        f"{directed_connections}"
-    )
+    print(f"Directed graph connections:    {directed_connections}")
 
-    print(
-        f"Expected directed connections: "
-        f"{expected_directed_connections}"
-    )
+    print(f"Expected directed connections: {expected_directed_connections}")
 
-    passed = (
-        directed_connections
-        == expected_directed_connections
-    )
+    passed = directed_connections == expected_directed_connections
 
     if passed:
         print("Result: PASS")
@@ -743,8 +592,7 @@ def evaluate_pair_count(
         "hypotheses": n,
         "unique_pairs": expected_unique_pairs,
         "directed_connections": directed_connections,
-        "expected_directed_connections":
-            expected_directed_connections,
+        "expected_directed_connections": expected_directed_connections,
         "pass": passed,
     }
 
@@ -752,6 +600,7 @@ def evaluate_pair_count(
 # ============================================================
 # Detailed similarity table
 # ============================================================
+
 
 def print_similarity_scores(
     scores: Dict[Tuple[str, str], float],
@@ -762,7 +611,6 @@ def print_similarity_scores(
     print("=" * 60)
 
     for pair, score in sorted(scores.items()):
-
         if pair in SIMILAR_PAIRS:
             category = "SIMILAR"
 
@@ -772,15 +620,13 @@ def print_similarity_scores(
         else:
             category = "OTHER"
 
-        print(
-            f"{pair[0]:>3} ↔ {pair[1]:<3} | "
-            f"{score:.3f} | {category}"
-        )
+        print(f"{pair[0]:>3} ↔ {pair[1]:<3} | {score:.3f} | {category}")
 
 
 # ============================================================
 # Main evaluation
 # ============================================================
+
 
 def main():
 
@@ -800,21 +646,15 @@ def main():
         jaccard_weight=0.2,
         sequence_weight=0.2,
         semantic_weight=0.6,
-        embedding_model_name=(
-            "sentence-transformers/all-MiniLM-L6-v2"
-        ),
+        embedding_model_name=("sentence-transformers/all-MiniLM-L6-v2"),
         allow_embedding_fallback=True,
     )
 
-    agent = ProximityAgent(
-        similarity_config=config
-    )
+    agent = ProximityAgent(similarity_config=config)
 
     hypotheses = create_evaluation_hypotheses()
 
-    context = EvaluationContext(
-        hypotheses
-    )
+    context = EvaluationContext(hypotheses)
 
     threshold = 0.3
 
@@ -834,48 +674,34 @@ def main():
     # Run evaluations
     # --------------------------------------------------------
 
-    similarity_result = (
-        evaluate_similarity_separation(
-            scores
-        )
+    similarity_result = evaluate_similarity_separation(scores)
+
+    threshold_result = evaluate_threshold_correctness(
+        scores,
+        threshold,
     )
 
-    threshold_result = (
-        evaluate_threshold_correctness(
-            scores,
-            threshold,
-        )
+    diversity_result = evaluate_diversity_detection(
+        agent,
+        context,
+        threshold,
     )
 
-    diversity_result = (
-        evaluate_diversity_detection(
-            agent,
-            context,
-            threshold,
-        )
+    consistency_result = evaluate_consistency(
+        agent,
+        hypotheses,
+        runs=5,
     )
 
-    consistency_result = (
-        evaluate_consistency(
-            agent,
-            hypotheses,
-            runs=5,
-        )
+    performance_result = evaluate_performance(
+        agent,
+        context,
+        repetitions=3,
     )
 
-    performance_result = (
-        evaluate_performance(
-            agent,
-            context,
-            repetitions=3,
-        )
-    )
-
-    pair_result = (
-        evaluate_pair_count(
-            agent,
-            context,
-        )
+    pair_result = evaluate_pair_count(
+        agent,
+        context,
     )
 
     # --------------------------------------------------------
@@ -887,35 +713,20 @@ def main():
     print("FINAL EVALUATION SUMMARY")
     print("=" * 60)
 
-    print(
-        f"Similarity separation: "
-        f"{'PASS' if similarity_result['pass'] else 'FAIL'}"
-    )
+    print(f"Similarity separation: {'PASS' if similarity_result['pass'] else 'FAIL'}")
 
-    print(
-        f"Threshold correctness: "
-        f"{'PASS' if threshold_result['accuracy'] >= 0.80 else 'REVIEW'}"
-    )
+    print(f"Threshold correctness: {'PASS' if threshold_result['accuracy'] >= 0.80 else 'REVIEW'}")
 
-    print(
-        f"Diversity detection: "
-        f"{'PASS' if diversity_result['pass'] else 'REVIEW'}"
-    )
+    print(f"Diversity detection: {'PASS' if diversity_result['pass'] else 'REVIEW'}")
 
-    print(
-        f"Consistency: "
-        f"{'PASS' if consistency_result['pass'] else 'REVIEW'}"
-    )
+    print(f"Consistency: {'PASS' if consistency_result['pass'] else 'REVIEW'}")
 
     print(
         f"Performance: "
         f"{'PASS' if performance_result['optimized_time'] < performance_result['standard_time'] else 'REVIEW'}"
     )
 
-    print(
-        f"Pair count: "
-        f"{'PASS' if pair_result['pass'] else 'REVIEW'}"
-    )
+    print(f"Pair count: {'PASS' if pair_result['pass'] else 'REVIEW'}")
 
     print("=" * 60)
 

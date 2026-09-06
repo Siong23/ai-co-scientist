@@ -76,7 +76,7 @@ def recommendation_after_claim_assessment(review: Dict[str, Any]) -> str:
 
 def _convert_score_to_review(score: int) -> str:
     """Convert a 1-10 numeric score to HIGH/MEDIUM/LOW review format.
-    
+
     LOW: 1-4
     MEDIUM: 5-7
     HIGH: 8-10
@@ -109,7 +109,7 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
         "evidence_quality_score",
         "expected_research_value_score",
     ]
-    
+
     scores = {}
     for field in score_fields:
         try:
@@ -161,9 +161,7 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
         # An empty allow-list means that Reflection received no verified
         # evidence.  It must therefore reject every model-produced citation;
         # treating an empty set as unrestricted would preserve hallucinated IDs.
-        review_data["references"] = [
-            ref for ref in raw_refs if isinstance(ref, str) and ref in valid_source_ids
-        ]
+        review_data["references"] = [ref for ref in raw_refs if isinstance(ref, str) and ref in valid_source_ids]
     else:
         logger.warning("Invalid references format received: %s", raw_refs)
 
@@ -187,7 +185,8 @@ def call_llm_for_reflection(
     if retrieved_sources:
         formatted_sources = "\n\n".join(
             f"Source ID: {src.get('source_id', 'Unknown')}\nTitle: {src.get('title', 'Untitled')}\nAbstract: {src.get('abstract', 'No abstract')}"
-            for src in retrieved_sources if isinstance(src, dict)
+            for src in retrieved_sources
+            if isinstance(src, dict)
         )
     else:
         formatted_sources = "No verified literature sources currently available in context memory."
@@ -270,9 +269,7 @@ def call_llm_for_reflection(
         logger.info("Parsed reflection data: %s", review_data)
         return review_data
 
-    logger.warning(
-        "Reflection review response did not validate; retrying with a format-only repair prompt."
-    )
+    logger.warning("Reflection review response did not validate; retrying with a format-only repair prompt.")
     schema_instruction = (
         "Return ONLY valid JSON with this exact schema:\n"
         "{\n"
@@ -426,9 +423,31 @@ def call_llm_for_hypothesis_revision(
         return None
     return revised[0]
 
+
 _CLAIM_STOP_WORDS = {
-    "a", "an", "and", "are", "as", "be", "by", "can", "for", "from", "in", "is", "it",
-    "of", "on", "or", "that", "the", "their", "this", "to", "will", "with",
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "be",
+    "by",
+    "can",
+    "for",
+    "from",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "will",
+    "with",
 }
 
 
@@ -507,10 +526,7 @@ def _claim_terms(claim: str) -> set[str]:
 
 
 def _evidence_text(source: dict[str, Any]) -> str:
-    return " ".join(
-        str(source.get(field, "") or "")
-        for field in ("title", "summary", "abstract", "content", "text")
-    )
+    return " ".join(str(source.get(field, "") or "") for field in ("title", "summary", "abstract", "content", "text"))
 
 
 def _rank_claim_evidence(
@@ -546,8 +562,7 @@ def _is_scholarly_or_official(source: dict[str, Any]) -> bool:
         for field in ("source_type", "source_family", "document_type", "page_type")
     )
     return any(
-        marker in descriptors
-        for marker in ("academic", "paper", "journal", "conference", "preprint", "official")
+        marker in descriptors for marker in ("academic", "paper", "journal", "conference", "preprint", "official")
     )
 
 
@@ -682,8 +697,9 @@ def resolve_claim_status(supporting_evidence: list, contradictory_evidence: list
         return "CONTRADICTED"
     if has_support:
         return "SUPPORTED"
-    
+
     return "UNVERIFIED"
+
 
 def calculate_claim_confidence(
     assessment: dict[str, Any],
@@ -773,9 +789,5 @@ def compute_overall_confidence(
     normalized_claims = (average_claim_confidence - 1.0) / 9.0
     normalized_evidence = max(1.0, min(10.0, evidence_quality_score)) / 10.0
     normalized_plausibility = max(1.0, min(10.0, plausibility_score)) / 10.0
-    raw_overall = (
-        (alpha * normalized_claims)
-        + (beta * normalized_evidence)
-        + (gamma * normalized_plausibility)
-    )
+    raw_overall = (alpha * normalized_claims) + (beta * normalized_evidence) + (gamma * normalized_plausibility)
     return round(1.0 + (9.0 * max(0.0, min(1.0, raw_overall))), 2)

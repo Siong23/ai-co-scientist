@@ -62,9 +62,7 @@ def test_ranking_final_takes_precedence_and_is_sorted_by_elo():
     run = run_fixture(
         {
             "ranking_12": {"hypotheses": [hypothesis("old", 1900)]},
-            "ranking_final": {
-                "hypotheses": [hypothesis("low", 1100), hypothesis("winner", 1300)]
-            },
+            "ranking_final": {"hypotheses": [hypothesis("low", 1100), hypothesis("winner", 1300)]},
         }
     )
 
@@ -118,11 +116,7 @@ def test_parse_run_returns_clear_summary(tmp_path):
     run_path = tmp_path / "run.json"
     goal_path = tmp_path / "goal.txt"
     run_path.write_text(
-        json.dumps(
-            run_fixture(
-                {"ranking1": {"hypotheses": [hypothesis("best", 1400, [source])]}}
-            )
-        ),
+        json.dumps(run_fixture({"ranking1": {"hypotheses": [hypothesis("best", 1400, [source])]}})),
         encoding="utf-8",
     )
     goal_path.write_text(f"  {FIXED_GOAL}\n", encoding="utf-8")

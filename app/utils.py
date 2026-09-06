@@ -126,9 +126,16 @@ def redact_secrets(text: str) -> str:
     """Remove provider credentials from logs and user-facing errors."""
     redacted = str(text)
     for variable in (
-        "LMSTUDIO_API_KEY", "ELSEVIER_API_KEY", "ELSEVIER_INST_TOKEN",
-        "SEMANTIC_SCHOLAR_API_KEY", "SPRINGER_API_KEY", "SPRINGER_OPEN_ACCESS_API_KEY",
-        "SPRINGER_META_API_KEY", "TAVILY_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY",
+        "LMSTUDIO_API_KEY",
+        "ELSEVIER_API_KEY",
+        "ELSEVIER_INST_TOKEN",
+        "SEMANTIC_SCHOLAR_API_KEY",
+        "SPRINGER_API_KEY",
+        "SPRINGER_OPEN_ACCESS_API_KEY",
+        "SPRINGER_META_API_KEY",
+        "TAVILY_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
     ):
         secret = os.getenv(variable)
         if secret:
@@ -191,6 +198,21 @@ def classify_llm_error(error_text: str) -> str:
         return "Model returned unparsable output"
     if "model not configured" in text:
         return "LLM model not configured"
+    if "literature synthesis" in text and any(
+        marker in text
+        for marker in (
+            "no complete literature-synthesis json object",
+            "after format repair",
+            "no established finding cited",
+            "expected a non-empty analytical rationale",
+            "expected a 'knowledge_gaps' array",
+        )
+    ):
+        return "Literature synthesis malformed"
+    if "evidence coverage grading failed" in text:
+        return "Evidence coverage unavailable"
+    if "generated hypothesis has no valid retrieved source ids" in text:
+        return "Hypothesis generation malformed"
     if (
         "retrieved evidence is insufficient" in text
         or "rag retrieval found no usable" in text
@@ -248,7 +270,10 @@ def call_llm(
     started_at = time.perf_counter()
     logger.info(
         "LLM call started model=%s prompt_chars=%d max_output_tokens=%s reasoning=%s",
-        selected_model, len(prompt), max_tokens or config.get("llm_default_max_tokens", 8192), reasoning,
+        selected_model,
+        len(prompt),
+        max_tokens or config.get("llm_default_max_tokens", 8192),
+        reasoning,
     )
     try:
         output_token_limit = max_tokens
@@ -307,7 +332,12 @@ def call_llm(
                     if attempt < retry_count:
                         logger.warning(
                             "LM Studio native chat returned HTTP %d; retrying (%d/%d). model=%s prompt_chars=%d details=%s",
-                            status_code, attempt + 1, retry_count, selected_model, len(prompt), details,
+                            status_code,
+                            attempt + 1,
+                            retry_count,
+                            selected_model,
+                            len(prompt),
+                            details,
                         )
                         time.sleep(
                             max(
@@ -319,7 +349,10 @@ def call_llm(
                     logger.warning(
                         "LM Studio native chat remained unavailable after %d attempt(s); "
                         "falling back to /v1/chat/completions. model=%s prompt_chars=%d details=%s",
-                        attempt + 1, selected_model, len(prompt), details,
+                        attempt + 1,
+                        selected_model,
+                        len(prompt),
+                        details,
                     )
                     break
 
@@ -417,9 +450,7 @@ class LMStudioSentenceTransformer:
     """SentenceTransformer-compatible interface backed by LM Studio /v1/embeddings API."""
 
     def __init__(self, model_name: Optional[str] = None):
-        self.model_name = model_name or config.get(
-            "sentence_transformer_model", "text-embedding-qwen3-embedding-8b"
-        )
+        self.model_name = model_name or config.get("sentence_transformer_model", "text-embedding-qwen3-embedding-8b")
 
     def encode(
         self,

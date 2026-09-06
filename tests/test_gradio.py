@@ -249,6 +249,30 @@ def test_references_do_not_search_again_when_no_source_was_used(
     assert html == ("<p>No retrieved evidence was used for generation.</p>")
 
 
+def test_references_distinguish_retrieval_from_unexecuted_generation(gradio_app_module):
+    cycle_details = {
+        "steps": {
+            "generation": {
+                "sources": [
+                    {
+                        "source_id": "arXiv:2205.15480v2",
+                        "title": "Validated 5G evidence",
+                        "abstract": "Closed-loop allocation evidence.",
+                    }
+                ],
+                "evidence_consumed": False,
+            }
+        }
+    }
+
+    html = gradio_app_module.get_references_html(cycle_details)
+
+    assert "Evidence Retrieval Completed" in html
+    assert "Validated evidence was retrieved" in html
+    assert "hypothesis generation did not execute" in html
+    assert "Validated 5G evidence" in html
+
+
 def test_references_hide_pdf_link_when_source_has_no_pdf(gradio_app_module):
     cycle_details = {
         "steps": {
@@ -373,6 +397,35 @@ def test_generation_results_explain_quality_gate_outcomes(gradio_app_module):
     assert "REJECT · 66.5/100" in html
     assert "The final hypothesis contains unsupported claims." in html
     assert "Weighted audit score is below 70/100." in html
+
+
+def test_generation_results_surface_recovery_warnings_and_stage_status(gradio_app_module):
+    warning = (
+        "Literature synthesis omitted analytical_rationale; a conservative "
+        "rationale was constructed from validated findings and gaps."
+    )
+    cycle_details = {
+        "iteration": 1,
+        "warnings": [warning],
+        "steps": {
+            "generation": {
+                "hypotheses": [],
+                "sources": [],
+                "stages": {
+                    "evidence_retrieval": {"status": "completed"},
+                    "literature_synthesis": {"status": "warning", "detail": warning},
+                    "hypothesis_generation": {"status": "completed"},
+                },
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert "Generation completed with recovery warnings" in html
+    assert "Generation stage diagnostics" in html
+    assert "Literature synthesis:</strong> warning" in html
+    assert warning in html
 
 
 @pytest.mark.parametrize(
@@ -598,9 +651,7 @@ def test_execute_cycle_uses_configured_supervisor_entrypoint(gradio_app_module, 
     assert "completed successfully" in result["status"]
 
 
-def test_execute_cycle_reports_bounded_quality_gate_without_claiming_timeout(
-    gradio_app_module, monkeypatch, tmp_path
-):
+def test_execute_cycle_reports_bounded_quality_gate_without_claiming_timeout(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
 
     monkeypatch.chdir(tmp_path)

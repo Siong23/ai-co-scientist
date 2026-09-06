@@ -147,18 +147,24 @@ def test_overall_confidence_combines_sub_claim_and_reflection_scores():
         ClaimAssessment(claim="Unsupported claim", confidence=1.0),
     ]
 
-    assert calculate_claim_confidence(
-        {
-            "status": "SUPPORTED",
-            "supporting_evidence": [{}, {}, {}],
-            "contradictory_evidence": [],
-        }
-    ) == 10.0
-    assert compute_overall_confidence(
-        claims,
-        evidence_quality_score=10,
-        plausibility_score=10,
-    ) == 6.85
+    assert (
+        calculate_claim_confidence(
+            {
+                "status": "SUPPORTED",
+                "supporting_evidence": [{}, {}, {}],
+                "contradictory_evidence": [],
+            }
+        )
+        == 10.0
+    )
+    assert (
+        compute_overall_confidence(
+            claims,
+            evidence_quality_score=10,
+            plausibility_score=10,
+        )
+        == 6.85
+    )
 
 
 def test_irrelevant_search_result_is_not_treated_as_counterevidence(monkeypatch):
@@ -196,12 +202,21 @@ def test_claim_confidence_can_downgrade_but_not_upgrade_review():
     weak_claim = {"status": "SUPPORTED", "confidence": 1.0}
     strong_claim = {"status": "SUPPORTED", "confidence": 8.0}
 
-    assert recommendation_after_claim_assessment(
-        {"recommendation": "ACCEPT", "claims": [weak_claim], "overall_confidence": 3.2}
-    ) == "REVISE"
-    assert recommendation_after_claim_assessment(
-        {"recommendation": "REVISE", "claims": [strong_claim], "overall_confidence": 8.0}
-    ) == "REVISE"
-    assert recommendation_after_claim_assessment(
-        {"recommendation": "ACCEPT", "claims": [strong_claim], "overall_confidence": 8.0}
-    ) == "ACCEPT"
+    assert (
+        recommendation_after_claim_assessment(
+            {"recommendation": "ACCEPT", "claims": [weak_claim], "overall_confidence": 3.2}
+        )
+        == "REVISE"
+    )
+    assert (
+        recommendation_after_claim_assessment(
+            {"recommendation": "REVISE", "claims": [strong_claim], "overall_confidence": 8.0}
+        )
+        == "REVISE"
+    )
+    assert (
+        recommendation_after_claim_assessment(
+            {"recommendation": "ACCEPT", "claims": [strong_claim], "overall_confidence": 8.0}
+        )
+        == "ACCEPT"
+    )
