@@ -106,6 +106,9 @@ class CodeGenerationAgent:
 
     DEFAULT_TEMPERATURE = 0.2
     DEFAULT_MAX_TOKENS = 12000
+    REPAIR_MAX_TOKENS = 8000
+    MAX_REPAIR_SOURCE_CHARS = 28000
+    MAX_REPAIR_LOG_CHARS = 8000
 
     def __init__(
         self,
@@ -498,14 +501,19 @@ IMPORTANT RULES:
 7. Treat the dataset as an offline/local dataset.
 8. Include deterministic/reproducible random seeds.
 9. Include preprocessing appropriate for tabular/network intrusion data.
+    Select the runtime device with ``torch.device("cuda" if
+    torch.cuda.is_available() else "cpu")`` and move the model and tensors
+    to that device. Never hardcode CPU when CUDA is available.
 10. Handle categorical and numerical features appropriately.
     Never use unconditional ``df.dropna()`` on the entire dataset. The
     5G-NIDD dataset contains legitimate missing network fields. Handle
     missing numeric values with training-set statistics and missing
     categorical values with an explicit sentinel such as ``"Unknown"``.
     Fit imputers, encoders, and scalers using training data only. Verify
-    that preprocessing leaves at least one sample and raise a clear error
-    if it does not.
+    that preprocessing leaves at least one sample, contains no NaN or
+    infinite values, and raise a clear error if it does not. Numeric
+    columns must be filled with each column's training-set median before
+    scaling; categorical columns must be filled before encoding.
 11. Avoid data leakage.
 12. Create separate training, validation, and test partitions.
 13. Automatically determine the number of classes from the training data
@@ -551,6 +559,12 @@ IMPORTANT RULES:
         best_model.pt
 34. Save all visualization files inside EXPERIMENT_OUTPUT_DIR
     or one of its subdirectories.
+    Save these four visualization files with these exact names:
+
+        loss_visualization.png
+        accuracy_visualization.png
+        confusion_matrix_visualization.png
+        performance_metrics_visualization.png
 35. The dataset path may be provided through the DATASET_PATH
     environment variable. Prefer DATASET_PATH when it is available.
 
@@ -609,6 +623,7 @@ explanations, analysis, or commentary.
 The generated code must:
 
 - load the specified local dataset;
+- select CUDA when available and otherwise fall back to CPU;
 - preprocess the data;
 - do not call `dropna()` on the entire dataset;
 - handle missing numeric and categorical values explicitly;
@@ -1088,6 +1103,100 @@ Dataset:
             )
 
         return result
+
+    def repair_generated_code(
+        self,
+        specification: Dict[str, Any],
+        generated_code: str,
+        execution_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Ask the LLM to repair code after a failed experiment run."""
+        if not isinstance(generated_code, str) or not generated_code.strip():
+            raise ValueError("Generated PyTorch code is required for repair.")
+
+        error_context = json.dumps(
+            {
+                "status": execution_result.get("status"),
+                "return_code": execution_result.get("return_code"),
+                "error": execution_result.get("error"),
+                "output_validation": execution_result.get(
+                    "output_validation"
+                ),
+                "stderr": execution_result.get("stderr", "")[-self.MAX_REPAIR_LOG_CHARS:],
+                "stdout": execution_result.get("stdout", "")[-self.MAX_REPAIR_LOG_CHARS:],
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+        compact_specification = {
+            "dataset": specification.get("dataset", {}),
+            "selected_hypothesis": {
+                key: specification.get("selected_hypothesis", {}).get(key)
+                for key in ("hypothesis_id", "title", "text")
+            },
+            "code_generation_requirements": specification.get(
+                "code_generation_requirements", {}
+            ),
+            "evaluation_metrics": specification.get(
+                "evaluation_metrics", []
+            ),
+        }
+        bounded_source = generated_code[-self.MAX_REPAIR_SOURCE_CHARS:]
+        repair_prompt = f"""
+Repair the following generated PyTorch experiment so it runs successfully.
+Return only complete executable Python source code. Do not return JSON,
+Markdown fences, explanations, or commentary. Preserve the selected
+hypothesis and experiment behavior; fix only the cause of the failure.
+
+The repaired source must fit within the output token limit. Keep it concise
+and self-contained. It must use training-set median imputation for numeric
+columns, handle categorical missing values, select CUDA when available with
+CPU fallback, produce finite losses and metrics, and save all required
+artifacts.
+
+EXPERIMENT SPECIFICATION
+{json.dumps(self._to_serializable(compact_specification), indent=2, ensure_ascii=False)}
+
+EXECUTION ERROR
+{error_context}
+
+CURRENT SOURCE CODE
+{bounded_source}
+""".strip()
+
+        response = _call_llm(
+            repair_prompt,
+            temperature=0.0,
+            model=self.model,
+            system_prompt=self.build_system_prompt(),
+            max_tokens=_output_token_limit(
+                "code_generation",
+                self.REPAIR_MAX_TOKENS,
+            ),
+            reasoning="off",
+        )
+        if not isinstance(response, str):
+            response = str(response)
+        if response.startswith("Error:"):
+            raise RuntimeError(response)
+
+        repaired = self.extract_python_source(response)
+        if repaired is None:
+            repaired = self.extract_json(response)
+
+        self.validate_generated_response(repaired)
+        return {
+            "success": True,
+            "model": self.model,
+            "model_recommendation": repaired.get("model_recommendation", {}),
+            "experiment_plan": repaired.get("experiment_plan", {}),
+            "assumptions": repaired.get("assumptions", []),
+            "dependencies": repaired.get("dependencies", []),
+            "pytorch_code": repaired["pytorch_code"],
+            "generation_seconds": 0.0,
+            "errors": [],
+        }
 
     # ========================================================
     # Generate From Components

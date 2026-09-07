@@ -33,6 +33,7 @@ COLLECTION. It does not generate machine-learning code itself.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -71,6 +72,24 @@ class ExperimentRunner:
         ".jpeg",
         ".svg",
         ".pdf",
+    }
+
+    REQUIRED_METRICS = {
+        "accuracy",
+        "precision_weighted",
+        "recall_weighted",
+        "f1_weighted",
+        "confusion_matrix",
+        "training_seconds",
+        "evaluation_seconds",
+        "total_execution_seconds",
+    }
+
+    REQUIRED_VISUALIZATION_STEMS = {
+        "loss_visualization",
+        "accuracy_visualization",
+        "confusion_matrix_visualization",
+        "performance_metrics_visualization",
     }
 
     def __init__(
@@ -806,6 +825,26 @@ class ExperimentRunner:
     # ============================================================
 
     @staticmethod
+    def _has_nonfinite_number(value: Any) -> bool:
+        """Return whether a decoded JSON value contains NaN or infinity."""
+        if isinstance(value, float):
+            return not math.isfinite(value)
+
+        if isinstance(value, dict):
+            return any(
+                ExperimentRunner._has_nonfinite_number(item)
+                for item in value.values()
+            )
+
+        if isinstance(value, (list, tuple)):
+            return any(
+                ExperimentRunner._has_nonfinite_number(item)
+                for item in value
+            )
+
+        return False
+
+    @staticmethod
     def validate_outputs(
         execution_result: Dict[str, Any],
         outputs: Dict[str, Any],
@@ -820,18 +859,34 @@ class ExperimentRunner:
         if execution_result.get(
             "success"
         ):
-            if outputs.get(
-                "metrics"
-            ) is None:
+            metrics = outputs.get("metrics")
+            history = outputs.get("training_history")
+
+            if metrics is None:
                 warnings.append(
                     "metrics.json was not found."
                 )
+            else:
+                missing_metrics = sorted(
+                    ExperimentRunner.REQUIRED_METRICS - set(metrics)
+                )
+                if missing_metrics:
+                    warnings.append(
+                        "metrics.json is missing required fields: "
+                        + ", ".join(missing_metrics)
+                    )
+                if ExperimentRunner._has_nonfinite_number(metrics):
+                    warnings.append(
+                        "metrics.json contains NaN or infinite values."
+                    )
 
-            if outputs.get(
-                "training_history"
-            ) is None:
+            if history is None:
                 warnings.append(
                     "training_history.json was not found."
+                )
+            elif ExperimentRunner._has_nonfinite_number(history):
+                warnings.append(
+                    "training_history.json contains NaN or infinite values."
                 )
 
             if outputs.get(
@@ -847,6 +902,20 @@ class ExperimentRunner:
                 warnings.append(
                     "No visualization files were found."
                 )
+            else:
+                visualization_stems = {
+                    Path(path).stem
+                    for path in outputs["visualizations"]
+                }
+                missing_visualizations = sorted(
+                    ExperimentRunner.REQUIRED_VISUALIZATION_STEMS
+                    - visualization_stems
+                )
+                if missing_visualizations:
+                    warnings.append(
+                        "Missing required visualizations: "
+                        + ", ".join(missing_visualizations)
+                    )
 
         return {
             "valid": (
@@ -1060,24 +1129,17 @@ class ExperimentRunner:
             # Overall status
             # ----------------------------------------------------
 
-            if execution_result.get(
-                "success",
-                False,
-            ):
-                result[
-                    "success"
-                ] = True
-
-                if output_validation.get(
-                    "warnings"
-                ):
-                    result[
-                        "status"
-                    ] = "completed_with_warnings"
-                else:
-                    result[
-                        "status"
-                    ] = "completed"
+            if execution_result.get("success", False):
+                result["success"] = bool(output_validation.get("valid"))
+                result["status"] = (
+                    "completed"
+                    if result["success"]
+                    else "invalid_outputs"
+                )
+                if not result["success"]:
+                    result["errors"].extend(
+                        output_validation.get("warnings", [])
+                    )
 
             else:
                 result[

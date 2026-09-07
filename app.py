@@ -337,6 +337,11 @@ def format_experiment_results_html(
     if not isinstance(metrics, dict):
         metrics = {}
 
+    def format_metric(value: Any) -> str:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"{value:.2f}"
+        return str(value)
+
     experiment_id = preparation.get(
         "experiment_id",
         "Unknown",
@@ -399,16 +404,16 @@ def format_experiment_results_html(
         <h3>📊 Evaluation Metrics</h3>
 
         <ul>
-            <li><strong>Accuracy:</strong> {accuracy}</li>
-            <li><strong>Weighted Precision:</strong> {precision}</li>
-            <li><strong>Weighted Recall:</strong> {recall}</li>
-            <li><strong>Weighted F1 Score:</strong> {f1_score}</li>
+            <li><strong>Accuracy:</strong> {html_lib.escape(format_metric(accuracy))}</li>
+            <li><strong>Weighted Precision:</strong> {html_lib.escape(format_metric(precision))}</li>
+            <li><strong>Weighted Recall:</strong> {html_lib.escape(format_metric(recall))}</li>
+            <li><strong>Weighted F1 Score:</strong> {html_lib.escape(format_metric(f1_score))}</li>
         </ul>
 
         <p>
             Generated code, checkpoints, metrics,
             training history, and visualizations are saved
-            in the experiment results directory.
+            in the run history.
         </p>
     </div>
     """
@@ -684,6 +689,7 @@ def persist_cycle_result(research_goal: ResearchGoal, cycle_result: Dict[str, An
         references_html=cycle_result["references_html"],
         results_html=cycle_result["results_html"],
         log_file=cycle_result["log_file"],
+        experiment_result=cycle_result["cycle_details"].get("experiment_result"),
     )
     report_path = write_report(saved_run)
     status_msg = f"{cycle_result['status']}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}"
