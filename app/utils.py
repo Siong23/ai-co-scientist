@@ -281,7 +281,9 @@ def call_llm(
             output_token_limit = int(config.get("llm_default_max_tokens", 8192))
         output_token_limit = max(1, int(output_token_limit))
 
-        if reasoning is not None:
+        native_reasoning = reasoning is not None
+
+        if native_reasoning:
             payload = {
                 "model": selected_model,
                 "input": prompt,
@@ -325,8 +327,16 @@ def call_llm(
                 except Exception as exc:
                     response = getattr(exc, "response", None)
                     status_code = getattr(response, "status_code", None)
-                    server_error = isinstance(status_code, int) and 500 <= status_code < 600
-                    if not server_error:
+                    response_text = str(getattr(response, "text", ""))
+                    if status_code == 400 and "does not expose reasoning configuration" in response_text:
+                        logger.info(
+                            "LM Studio model %s does not support native reasoning controls; "
+                            "falling back to the OpenAI-compatible API.",
+                            selected_model,
+                        )
+                        break
+                    retryable = isinstance(status_code, int) and 500 <= status_code < 600 and attempt < retry_count
+                    if not retryable:
                         raise
                     details = _format_lmstudio_error(exc, selected_model)
                     if attempt < retry_count:
