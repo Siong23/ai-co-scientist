@@ -103,6 +103,39 @@ def test_code_generation_agent_uses_dedicated_model_by_default():
     assert agent.model == "qwen/qwen3-coder-next"
 
 
+def test_code_repair_prompt_is_bounded(monkeypatch):
+    captured = {}
+
+    def fake_call_llm(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured["kwargs"] = kwargs
+        return "import torch\nprint('fixed')"
+
+    monkeypatch.setattr(
+        "app.agents_modules.code_generation_agent._call_llm",
+        fake_call_llm,
+    )
+
+    agent = CodeGenerationAgent(model="test-model")
+    result = agent.repair_generated_code(
+        specification={
+            "dataset": {"name": "5G-NIDD"},
+            "selected_hypothesis": {"text": "test hypothesis"},
+            "large_provenance": "x" * 200000,
+        },
+        generated_code="x" * 200000,
+        execution_result={
+            "status": "invalid_outputs",
+            "stderr": "error" * 10000,
+            "stdout": "output" * 10000,
+        },
+    )
+
+    assert result["success"] is True
+    assert len(captured["prompt"]) < 50000
+    assert captured["kwargs"]["max_tokens"] == agent.REPAIR_MAX_TOKENS
+
+
 def test_code_generation_agent_rejects_invalid_python():
     response = {
         "model_recommendation": {},
@@ -131,6 +164,31 @@ def test_experiment_runner_collects_standard_output_files(tmp_path):
     assert outputs["training_history"]["loss"] == [1.0, 0.5]
     assert outputs["experiment_summary"]["status"] == "ok"
     assert outputs["checkpoint_path"].endswith("best_model.pt")
+
+
+def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations():
+    execution = {"success": True}
+    outputs = {
+        "metrics": {
+            "accuracy": float("nan"),
+            "precision_weighted": 0.5,
+            "recall_weighted": 0.5,
+            "f1_weighted": 0.5,
+            "confusion_matrix": [[1]],
+            "training_seconds": 1.0,
+            "evaluation_seconds": 1.0,
+            "total_execution_seconds": 2.0,
+        },
+        "training_history": {"train_loss": [0.5]},
+        "checkpoint_path": "best_model.pt",
+        "visualizations": ["loss_visualization.png"],
+    }
+
+    validation = ExperimentRunner.validate_outputs(execution, outputs)
+
+    assert validation["valid"] is False
+    assert "NaN or infinite" in " ".join(validation["warnings"])
+    assert "Missing required visualizations" in " ".join(validation["warnings"])
 
 
 def test_experiment_orchestrator_uses_repository_dataset_by_default():
@@ -175,6 +233,70 @@ def test_experiment_orchestrator_selects_best_accepted_hypothesis():
     candidates = orchestrator.get_experiment_candidates(context)
     assert [h.hypothesis_id for h in candidates] == ["H-2", "H-1"]
     assert orchestrator.select_best_hypothesis(context).hypothesis_id == "H-2"
+
+
+def test_experiment_orchestrator_repairs_failed_execution(monkeypatch):
+    orchestrator = ExperimentOrchestrator()
+    specification = dict(VALID_SPECIFICATION)
+    preparation = {
+        "success": True,
+        "experiment_id": "H-1_test",
+        "experiment_specification": specification,
+    }
+    initial_generation = {
+        "success": True,
+        "pytorch_code": "import torch\nraise RuntimeError('broken')",
+    }
+    repaired_generation = {
+        "success": True,
+        "pytorch_code": "import torch\nprint('fixed')",
+    }
+    executions = [
+        {
+            "success": False,
+            "status": "failed",
+            "execution": {
+                "status": "failed",
+                "stderr": "RuntimeError: broken",
+            },
+            "errors": ["Generated experiment exited with return code 1."],
+        },
+        {
+            "success": True,
+            "status": "completed",
+            "output_validation": {"valid": True, "warnings": []},
+        },
+    ]
+    repair_calls = []
+
+    monkeypatch.setattr(orchestrator, "prepare_experiment", lambda **kwargs: preparation)
+    monkeypatch.setattr(orchestrator, "generate_pytorch_code", lambda specification: initial_generation)
+    monkeypatch.setattr(
+        orchestrator,
+        "run_generated_experiment",
+        lambda **kwargs: executions.pop(0),
+    )
+
+    def fake_repair_generated_code(**kwargs):
+        repair_calls.append(kwargs)
+        return repaired_generation
+
+    monkeypatch.setattr(
+        orchestrator.code_generation_agent,
+        "repair_generated_code",
+        fake_repair_generated_code,
+    )
+
+    result = orchestrator.run_experiment(
+        context=object(),
+        execute_generated_code=True,
+        max_repair_attempts=2,
+    )
+
+    assert result["success"] is True
+    assert len(repair_calls) == 1
+    assert result["repair_attempts"][0]["success"] is True
+    assert result["code_generation"] == repaired_generation
 
 
 # ============================================================

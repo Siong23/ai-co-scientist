@@ -114,11 +114,13 @@ class ExperimentOrchestrator:
         8. Collect experiment results.
     """
 
+    DEFAULT_REPAIR_ATTEMPTS = 3
+
     def __init__(
         self,
         dataset_name: str = "5G-NIDD",
         dataset_path: Optional[str] = None,
-        device: str = "cpu",
+        device: str = "cuda",
         python_executable: Optional[str] = None,
     ) -> None:
         """
@@ -1670,6 +1672,7 @@ class ExperimentOrchestrator:
         hypothesis: Optional[Any] = None,
         execute_generated_code: bool = False,
         timeout_seconds: Optional[int] = None,
+        max_repair_attempts: int = DEFAULT_REPAIR_ATTEMPTS,
     ) -> Dict[str, Any]:
         """
         Main entry point.
@@ -1724,6 +1727,7 @@ class ExperimentOrchestrator:
             "experiment_preparation": preparation,
             "code_generation": None,
             "execution": None,
+            "repair_attempts": [],
             "errors": list(
                 preparation.get(
                     "errors",
@@ -1800,80 +1804,67 @@ class ExperimentOrchestrator:
         # Optional execution
         # ----------------------------------------------------
 
-        if (
-            execute_generated_code
-            and result.get(
-                "success",
-                False,
-            )
-        ):
+        if execute_generated_code and result.get("success", False):
+            code_generation = result["code_generation"]
+            experiment_id = preparation["experiment_id"]
+            repair_limit = max(0, int(max_repair_attempts))
 
-            code_generation = (
-                result.get(
-                    "code_generation"
-                )
-            )
-
-            experiment_id = (
-                preparation[
-                    "experiment_id"
-                ]
-            )
-
-            try:
-                execution = (
-                    self.run_generated_experiment(
+            for attempt in range(repair_limit + 1):
+                try:
+                    execution = self.run_generated_experiment(
                         experiment_id=experiment_id,
                         generated_result=code_generation,
                         timeout_seconds=timeout_seconds,
                     )
-                )
+                except Exception as error:
+                    execution = {
+                        "success": False,
+                        "status": "runner_error",
+                        "errors": [str(error)],
+                        "error": str(error),
+                    }
 
-                result[
-                    "execution"
-                ] = execution
+                result["execution"] = execution
+                output_validation = execution.get("output_validation", {})
+                if execution.get("success", False) and output_validation.get("valid", True):
+                    break
 
-                if not execution.get(
-                    "success",
-                    False,
-                ):
-                    result[
-                        "errors"
-                    ].extend(
-                        execution.get(
-                            "errors",
-                            [],
+                if attempt >= repair_limit:
+                    result["success"] = False
+                    result["errors"].extend(execution.get("errors", []))
+                    if not execution.get("errors"):
+                        result["errors"].append(
+                            execution.get("status", "Experiment execution failed.")
                         )
+                    break
+
+                try:
+                    repaired_generation = self.code_generation_agent.repair_generated_code(
+                        specification=specification,
+                        generated_code=code_generation["pytorch_code"],
+                        execution_result=execution,
                     )
-
-                    if (
-                        not execution.get(
-                            "errors"
-                        )
-                    ):
-                        result[
-                            "errors"
-                        ].append(
-                            execution.get(
-                                "status",
-                                "Experiment execution failed."
-                            )
-                        )
-
-                    result[
-                        "success"
-                    ] = False
-
-            except Exception as error:
-                result[
-                    "errors"
-                ].append(
-                    f"Experiment execution failed: {error}"
-                )
-
-                result[
-                    "success"
-                ] = False
+                    result["repair_attempts"].append(
+                        {
+                            "attempt": attempt + 1,
+                            "previous_execution": execution,
+                            "success": True,
+                        }
+                    )
+                    code_generation = repaired_generation
+                    result["code_generation"] = code_generation
+                except Exception as error:
+                    result["repair_attempts"].append(
+                        {
+                            "attempt": attempt + 1,
+                            "previous_execution": execution,
+                            "success": False,
+                            "error": str(error),
+                        }
+                    )
+                    result["errors"].append(f"Code repair failed: {error}")
+                    result["success"] = False
+                    break
 
 
         # ----------------------------------------------------

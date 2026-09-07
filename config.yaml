@@ -48,6 +48,7 @@ llm_max_tokens:
   hypothesis_audit: 3072
   evolution: 2048
   supervisor_planning: 1600
+  # Leave context headroom for the generation prompt and system instructions.
   code_generation: 8000
 
 # The Evolution agent follows a rotating library of refinement strategies.

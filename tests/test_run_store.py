@@ -83,6 +83,34 @@ def test_save_run_persists_json_and_redacts_secrets(tmp_path, monkeypatch):
     assert "***REDACTED***" in serialized
 
 
+def test_save_run_persists_experiment_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
+    experiment_result = {
+        "code_generation": {"pytorch_code": "print('ok')"},
+        "execution": {
+            "outputs": {
+                "metrics": {"accuracy": 0.9999},
+                "training_history": {"loss": [1.0, 0.5]},
+                "checkpoint_path": "runs/experiment/best_model.pt",
+                "visualizations": ["runs/experiment/loss.png"],
+            }
+        },
+    }
+
+    save_run(
+        research_goal=ResearchGoal(description="Run an experiment"),
+        cycle_details={"experiment_result": experiment_result},
+        status="done",
+        references_html="",
+        results_html="",
+        experiment_result=experiment_result,
+        run_id="run-experiment",
+    )
+
+    saved = json.loads((tmp_path / "runs" / "run-experiment.json").read_text(encoding="utf-8"))
+    assert saved["experiment_result"] == experiment_result
+
+
 def test_report_escapes_user_and_model_content(tmp_path, monkeypatch):
     monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
     goal = ResearchGoal(description="<script>alert('goal')</script>")

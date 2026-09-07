@@ -95,6 +95,7 @@ def save_run(
     references_html: str,
     results_html: str,
     log_file: Optional[str] = None,
+    experiment_result: Optional[Dict[str, Any]] = None,
     run_id: Optional[str] = None,
     created_at: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
@@ -109,6 +110,7 @@ def save_run(
             "cycle_details": cycle_details,
             "references_html": references_html,
             "results_html": results_html,
+            "experiment_result": experiment_result,
         }
     )
     get_runs_dir().mkdir(parents=True, exist_ok=True)

@@ -45,6 +45,35 @@ def test_gradio_interface_constructs_without_network(gradio_app_module):
     assert len(research_process) == 1
 
 
+def test_experiment_results_format_metrics_to_two_decimals(gradio_app_module):
+    html = gradio_app_module.format_experiment_results_html(
+        {
+            "success": True,
+            "experiment_preparation": {
+                "experiment_id": "exp-1",
+                "selected_hypothesis": {"title": "Test hypothesis", "hypothesis_id": "H1"},
+            },
+            "execution": {
+                "outputs": {
+                    "metrics": {
+                        "accuracy": 0.999978,
+                        "precision_weighted": 0.995,
+                        "recall_weighted": 0.9,
+                        "f1_weighted": 0.1234,
+                    }
+                }
+            },
+        }
+    )
+
+    assert "0.999978" not in html
+    assert "0.995" not in html
+    assert "Accuracy:</strong> 1.00" in html
+    assert "Weighted Precision:</strong> 0.99" in html
+    assert "Weighted Recall:</strong> 0.90" in html
+    assert "Weighted F1 Score:</strong> 0.12" in html
+
+
 def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ResearchGoal
     from app.run_store import RUNS_DIR_ENV, save_run
