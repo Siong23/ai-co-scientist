@@ -6,13 +6,16 @@ import yaml
 from dotenv import load_dotenv
 
 
-def load_environment(dotenv_path: str | Path = ".env") -> bool:
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_environment(dotenv_path: str | Path = PROJECT_ROOT / ".env") -> bool:
     """Load local credentials without overriding explicit environment values."""
 
     return load_dotenv(dotenv_path=dotenv_path, override=False)
 
 
-def load_config(config_path: str = "config.yaml") -> Dict:
+def load_config(config_path: str | Path = PROJECT_ROOT / "config.yaml") -> Dict:
     """Loads the configuration from the specified YAML file."""
     try:
         with open(config_path, "r") as f:

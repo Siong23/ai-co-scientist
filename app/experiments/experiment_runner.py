@@ -535,6 +535,8 @@ class ExperimentRunner:
                     "Generated experiment exited "
                     f"with return code {process.returncode}."
                 )
+                if stderr.strip():
+                    result["error"] += f"\n{stderr.strip()}"
 
         except subprocess.TimeoutExpired as error:
             stdout = (

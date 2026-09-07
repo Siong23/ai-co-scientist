@@ -68,7 +68,9 @@ from .experiment_runner import ExperimentRunner
 # Configuration
 # ============================================================
 
-BASE_EXPERIMENT_DIR = Path("app/experiments")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+BASE_EXPERIMENT_DIR = PROJECT_ROOT / "app/experiments"
 
 RESULTS_DIR = BASE_EXPERIMENT_DIR / "results"
 
@@ -77,7 +79,7 @@ CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"
 METRICS_DIR = RESULTS_DIR / "metrics"
 VISUALIZATION_DIR = RESULTS_DIR / "visualizations"
 RUNS_DIR = RESULTS_DIR / "runs"
-DEFAULT_DATASET_PATH = Path("data/5g_nidd/5g_nidd.csv")
+DEFAULT_DATASET_PATH = PROJECT_ROOT / "data/5g_nidd/5g_nidd.csv"
 
 
 # ============================================================
