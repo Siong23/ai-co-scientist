@@ -6,7 +6,7 @@ arXiv API is marked `network` (run with `make test-all`).
 
 import pytest
 
-from app.tools.arxiv_search import ArxivSearchTool, get_categories_for_field
+from app.tools.arxiv_search import ArxivSearchTool, build_arxiv_query, get_categories_for_field
 
 # --- Offline: pure category-mapping logic ---
 
@@ -20,6 +20,42 @@ def test_client_page_size_matches_requested_result_limit():
     tool = ArxivSearchTool(max_results=6)
 
     assert tool.client.page_size == 6
+
+
+def test_natural_language_query_uses_fielded_and_connected_concepts():
+    query = build_arxiv_query(
+        "Develop a closed-loop multi-agent AI framework to dynamically allocate "
+        "5G slice bandwidth during traffic spikes"
+    )
+
+    assert 'all:"closed loop"' in query
+    assert 'all:"multi agent"' in query
+    assert "all:5G" in query
+    assert "all:slice" in query
+    assert " AND " in query
+    assert "framework" not in query
+
+
+def test_existing_arxiv_field_syntax_is_preserved():
+    query = '(ti:"network slicing" OR abs:"network slicing") AND cat:cs.NI'
+
+    assert build_arxiv_query(query) == query
+
+
+def test_category_filter_wraps_field_aware_query(monkeypatch):
+    tool = ArxivSearchTool(max_results=2)
+    captured = {}
+
+    class FakeSearch:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("app.tools.arxiv_search.arxiv.Search", FakeSearch)
+    monkeypatch.setattr(tool.client, "results", lambda _search: [])
+
+    tool.search_papers("network slicing latency", categories=["cs.NI", "cs.AI"])
+
+    assert captured["query"] == "(all:network AND all:slicing AND all:latency) AND (cat:cs.NI OR cat:cs.AI)"
 
 
 # --- Live arXiv API ---

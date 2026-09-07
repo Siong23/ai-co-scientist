@@ -8,7 +8,7 @@ markers = [
 
 [tool.ruff]
 line-length = 120
-extend-exclude = ["venv", ".worktree", "results", "rag_example"]
+extend-exclude = ["venv", ".worktree", "results"]
 
 [tool.ruff.lint]
 # Lenient starting baseline (see docs/loop-engineering-design.md §9 Phase -1 Step 4).

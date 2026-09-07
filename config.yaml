@@ -4,9 +4,9 @@
 # OpenRouter API Base URL
 openrouter_base_url: "https://openrouter.ai/api/v1"
 
-# lmstudio_base_url: "http://127.0.0.1:1234/v1"
-lmstudio_base_url: "http://100.117.90.5:1234/v1"
-# lmstudio_base_url: "http://100.96.215.41:1234/v1"
+# Override this per machine with LMSTUDIO_BASE_URL in .env. Keeping a private
+# network address here makes local and deployed checkouts fail unpredictably.
+lmstudio_base_url: "http://127.0.0.1:1234/v1"
 
 # LLM Model. Use a compact free default so the public Hugging Face demo can
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
@@ -25,6 +25,9 @@ num_hypotheses: 4
 # Per-provider request timeout. Keeps slow free endpoints from consuming the
 # whole Gradio cycle budget before fallback can try another model.
 llm_request_timeout_seconds: 300
+# Fail quickly when the configured LM Studio host cannot be reached while still
+# allowing long model inference reads up to llm_request_timeout_seconds.
+lmstudio_connect_timeout_seconds: 10
 
 # Absorb a transient LM Studio inference-engine 5xx without changing endpoints
 # or losing the native API's explicit reasoning control.
@@ -35,7 +38,7 @@ lmstudio_native_retry_backoff_seconds: 1.0
 # window when a prompt requests a small structured response.
 llm_default_max_tokens: 2048
 llm_max_tokens:
-  research_planning: 1200
+  research_planning: 2400
   query_rewriting: 1600
   relevance_grading: 512
   coverage_grading: 1024
@@ -58,9 +61,21 @@ evolution:
     - inspiration
     - out_of_box
   max_candidates_per_cycle: 3
+  # Independent evolution strategies are submitted together to reduce wall time.
+  max_workers: 3
   # Retry once only when a syntactically valid child fails the Evolution
   # quality gate (near-copy, multiple hypotheses, or stitched combination).
   quality_repair_attempts: 1
+  # Retry transient provider errors or empty responses before abandoning a
+  # scientific evolution strategy.
+  transport_retry_attempts: 2
+
+# Independent per-hypothesis work is safe to batch in LM Studio. Keep this
+# bounded: large local models still need KV-cache memory for every live request.
+agent_parallelism:
+  generation_grading_workers: 2
+  reflection_workers: 3
+  evolution_workers: 3
 
 # Elo K-factor
 elo_k_factor: 32
@@ -73,7 +88,53 @@ ranking_llm_model: null
 
 ranking:
   proximity_guided_matching: true
-  max_matches_per_cycle: 0
+  # Bound tournament latency: prioritize nearby Elo/proximity competitors
+  # instead of comparing every possible pair in one cycle.
+  max_matches_per_cycle: 4
+
+# Hypothesis reviews are independent and can be scheduled together instead of
+# blocking one another serially. Tune this to the local server's capacity.
+reflection:
+  max_workers: 3
+
+# Synthesize actual review/debate feedback using the selected research model.
+# Invalid or unavailable model output falls back to deterministic summaries.
+meta_review:
+  llm_enabled: true
+
+# The production UI uses the dynamic Supervisor. The heuristic planner keeps
+# orchestration deterministic and avoids an extra LLM request per workflow
+# step; set planner_mode to auto to enable LLM planning with safe fallback.
+supervisor:
+  mode: "dynamic"
+  planner_mode: "heuristic"
+  max_steps: 10
+  # A Cycle produces one requested batch. Re-running the full literature and
+  # generation pipeline inside that Cycle can multiply runtime without bound.
+  max_generation_steps_per_cycle: 1
+  convergence:
+    min_snapshots: 2
+    top_elo_delta: 2.0
+    max_ranking_batches_before_evolution: 2
+  finalization:
+    min_accepted_hypotheses: 2
+    min_completed_matches: 1
+    require_evidence: true
+    min_overall_confidence: 5.0
+    min_claim_confidence: 4.0
+    min_audit_score: 70.0
+    require_successful_evolution: true
+    min_hypothesis_clusters: 2
+
+# Keep evidence-directed autonomous research, but bound its nested loop. The
+# outer Supervisor already performs iterative reflection and evolution, so
+# four inner research loops duplicate expensive work before any result appears.
+agentic_research:
+  enabled: true
+  max_steps: 1
+  max_queries_per_step: 2
+  max_assumptions: 4
+  max_evidence_sources: 12
 
 # Top K hypotheses for evolution
 top_k_hypotheses: 2
@@ -98,7 +159,10 @@ step_temperatures:
 # Shared embedding model used by proximity analysis and RAG retrieval.
 # sentence_transformer_model: "all-MiniLM-L6-v2"
 use_lmstudio_embeddings: true
-sentence_transformer_model: "qwen/text-embedding-qwen3-embedding-8b"
+# Loading chat and embedding models concurrently can make memory-constrained
+# LM Studio servers unload one model while the other request is still active.
+serialize_lmstudio_model_calls: true
+sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
 
 rag:
   # Maximum rewritten/corrective queries per retrieval round. The planner uses
@@ -134,9 +198,8 @@ rag:
   query_fidelity_min_similarity: 0.35
   provisional_hypothesis_min_similarity: 0.30
 
-# Relevant open-access papers are downloaded only after evidence coverage is
-# confirmed. Their bounded full-text chunks are persisted locally in Chroma and
-# retrieved into the generation prompt; failures fall back to abstract-only RAG.
+# Only papers retained by abstract-level candidate filtering are downloaded.
+# Prompt size remains independently bounded by evidence passage retrieval.
 paper_library:
   enabled: true
   # Academic sources may be used for generation only after their full text is
@@ -147,15 +210,23 @@ paper_library:
   persist_directory: "chroma_db"
   pdf_directory: "app/paper"
   collection_name: "research_papers"
-  max_papers_per_run: 3
-  max_pages_per_paper: 20
-  max_chunks_per_paper: 24
+  index_schema_version: "2"
+  parser_version: "pypdf-1"
+  chunking_version: "page-boundary-2"
+  candidate_download_limit: 8
+  # Each explicit evidence requirement gets bounded candidate failover within
+  # the global per-enrichment acquisition budget.
+  per_requirement_acquisition_limit: 2
+  max_pages_per_paper: 60
+  max_chunks_per_paper: 96
   chunk_size_chars: 2400
   chunk_overlap_chars: 300
-  top_k_chunks: 6
-  max_prompt_chars: 12000
+  top_k_chunks: 12
+  max_prompt_chars: 14000
   max_pdf_bytes: 25000000
   download_timeout_seconds: 30
+  # Independent evidence queries overlap; indexing/writes remain sequential.
+  retrieval_workers: 3
   allowed_pdf_hosts:
     - "arxiv.org"
     - "www.arxiv.org"
@@ -171,6 +242,23 @@ paper_library:
     - "inss.egr.msu.edu"
     - "paper.ijcsns.org"
     - "www.tdx.cat"
+
+evidence_retrieval:
+  max_queries: 8
+  # Reuse document embeddings across corrective retrieval rounds in a session.
+  embedding_cache_size: 512
+  # Query instructions apply only on the query side; indexed passages remain
+  # unchanged. Disable for embedding models that do not use instructions.
+  query_instruction_enabled: true
+  query_instruction: >-
+    Given a scientific research question, retrieve passages that provide direct
+    experimental, methodological, quantitative, comparison, limitation, or
+    prior-art evidence.
+
+validation:
+  numeric_grounding_enabled: true
+  entailment_validation_enabled: true
+  audit_max_evidence_chars: 9000
 
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.

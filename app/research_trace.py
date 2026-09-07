@@ -177,7 +177,9 @@ def format_research_trace_html(
         )
 
     if not timeline_items:
-        timeline_items.append('<li class="trace-empty">The agent workflow will appear here after the cycle starts.</li>')
+        timeline_items.append(
+            '<li class="trace-empty">The agent workflow will appear here after the cycle starts.</li>'
+        )
 
     source_trigger = ""
     if source_count:
@@ -203,7 +205,7 @@ def format_research_trace_html(
         '<a class="source-card" '
         f'href="{html.escape(source["url"], quote=True)}" target="_blank" rel="noopener noreferrer">'
         f'<span class="source-domain">{html.escape(source["domain"])}</span>'
-        f'<strong>{html.escape(source["title"])}</strong>'
+        f"<strong>{html.escape(source['title'])}</strong>"
         '<span class="source-open">↗</span>'
         "</a>"
         for source in sources

@@ -1,5 +1,6 @@
 """Offline tests for paper-aligned hypothesis evolution strategies."""
 
+import threading
 from copy import deepcopy
 from unittest.mock import Mock, patch
 
@@ -9,7 +10,8 @@ from app.agents import (
     SupervisorAgent,
     parse_evolution_response,
 )
-from app.models import ContextMemory, Hypothesis, ResearchGoal
+from app.agents_modules.evolution_helpers import build_evolution_prompt
+from app.models import ClaimAssessment, ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 
 
 def _goal(*, top_k: int = 2) -> ResearchGoal:
@@ -45,6 +47,66 @@ def _context() -> tuple[ContextMemory, Hypothesis, Hypothesis]:
     context.add_hypothesis(first)
     context.add_hypothesis(second)
     return context, first, second
+
+
+def test_evolution_prompt_bounds_nested_review_and_evidence_documents():
+    context, first, second = _context()
+    oversized_text = "full retrieved document " * 5000
+    first.text = "Test the transport mechanism. " + oversized_text
+    first.review_comments = [oversized_text]
+    first.reflection_report = ReflectionReport(
+        alignment_score=8,
+        novelty_score=7,
+        feasibility_score=8,
+        plausibility_score=7,
+        testability_score=9,
+        evidence_quality_score=8,
+        expected_research_value_score=8,
+        strengths=[oversized_text],
+        weaknesses=[oversized_text],
+        recommendation="ACCEPT",
+        claims=[
+            ClaimAssessment(
+                claim=f"Claim {index}: {oversized_text}",
+                status="SUPPORTED",
+                confidence=8,
+                supporting_evidence=[
+                    {
+                        "source_id": f"paper:{index}",
+                        "content": oversized_text,
+                    }
+                ],
+            )
+            for index in range(8)
+        ],
+        overall_confidence=8,
+    )
+    evidence_sources = [
+        {
+            "source_id": f"paper:{index}",
+            "title": f"Evidence {index}",
+            "content": oversized_text,
+        }
+        for index in range(12)
+    ]
+    original_sources = deepcopy(evidence_sources)
+
+    prompt = build_evolution_prompt(
+        "combination",
+        [first, second],
+        _goal(),
+        evidence_sources=evidence_sources,
+    )
+
+    assert len(prompt) < 30_000
+    assert '"recommendation": "ACCEPT"' in prompt
+    assert '"supporting_source_ids": [' in prompt
+    assert '"paper:0"' in prompt
+    assert '"source_id": "paper:5"' in prompt
+    assert '"source_id": "paper:6"' not in prompt
+    assert oversized_text not in prompt
+    assert evidence_sources == original_sources
+    assert context.hypotheses["H1"] is first
 
 
 def test_parse_evolution_response_requires_a_complete_json_hypothesis():
@@ -161,6 +223,31 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
     assert "Combination" not in first.title
 
 
+def test_evolution_runs_independent_strategies_concurrently():
+    context, _, _ = _context()
+    agent = EvolutionAgent(
+        strategies=("combination", "feasibility", "out_of_box"),
+        max_candidates_per_cycle=3,
+    )
+    all_started = threading.Barrier(3, timeout=2)
+
+    def evolve(strategy, *args, **kwargs):
+        all_started.wait()
+        return {"title": f"{strategy} child", "text": f"Test the {strategy} mechanism."}
+
+    with patch(
+        "app.agents_modules.evolution.call_llm_for_evolution",
+        side_effect=evolve,
+    ):
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert [child.evolution_strategy for child in evolved] == [
+        "combination",
+        "feasibility",
+        "out_of_box",
+    ]
+
+
 def test_strategy_library_rotates_across_iterations():
     context, _, _ = _context()
     context.iteration_number = 1
@@ -196,6 +283,7 @@ def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
             "parent_ids": ["H1", "H2"],
             "status": "rejected",
             "reason": "llm_error",
+            "transport_retries": 2,
             "response_excerpt": "Error: provider unavailable",
         },
         {
@@ -203,9 +291,33 @@ def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
             "parent_ids": ["H1"],
             "status": "rejected",
             "reason": "llm_error",
+            "transport_retries": 2,
             "response_excerpt": "Error: provider unavailable",
         },
     ]
+
+
+def test_transient_evolution_transport_failure_is_retried():
+    context, _, _ = _context()
+    agent = EvolutionAgent(
+        strategies=("simplification",),
+        max_candidates_per_cycle=1,
+        transport_retry_attempts=2,
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            "Error: provider temporarily unavailable",
+            '{"title": "Recovered child", "hypothesis": "A decisive intervention tests X causally."}',
+        ],
+    ) as call_llm:
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert [hypothesis.title for hypothesis in evolved] == ["Recovered child"]
+    assert call_llm.call_count == 2
+    assert context.last_evolution_attempts[0]["status"] == "accepted"
+    assert context.last_evolution_attempts[0]["transport_retries"] == 1
 
 
 def test_supervisor_handles_nested_proximity_result():
@@ -369,4 +481,3 @@ def test_evolution_injects_meta_review_feedback():
     assert "Prior cycle meta-review feedback to address:" in prompt
     assert "Explore orthogonal mechanisms." in prompt
     assert "Use out_of_box strategy." in prompt
-

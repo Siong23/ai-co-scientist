@@ -10,6 +10,7 @@ from app.agents import (
     GenerationAgent,
     LiteratureFinding,
     LiteratureSynthesis,
+    build_evidence_queries,
     call_llm_for_evidence_coverage,
     call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
@@ -64,6 +65,9 @@ def test_production_generation_defaults_enable_audit_and_agentic_research():
 
     assert agent.audit_enabled is True
     assert agent.agentic_research_enabled is True
+    assert agent.grading_workers == 2
+    assert agent.agentic_max_steps == 1
+    assert agent.rag_retriever.corrective_retrieval_rounds == 2
     assert GenerationAgent(agentic_research_enabled=False).agentic_research_enabled is False
 
 
@@ -214,11 +218,7 @@ def _query_plan_payload(
     ][:query_count]
     queries: list[str | dict] = query_texts
     if hypothesis_guided:
-        requirement_ids = [
-            str(requirement["id"])
-            for requirement in requirements
-            if requirement.get("id")
-        ]
+        requirement_ids = [str(requirement["id"]) for requirement in requirements if requirement.get("id")]
         intents = [
             ("primary_hypothesis", "support"),
             ("alternative_hypothesis", "counterevidence"),
@@ -238,9 +238,7 @@ def _query_plan_payload(
                 "hypothesis_id": hypothesis_id,
                 "search_intent": intent,
             }
-            for index, (query, (hypothesis_id, intent)) in enumerate(
-                zip(query_texts, intents)
-            )
+            for index, (query, (hypothesis_id, intent)) in enumerate(zip(query_texts, intents))
         ]
     return json.dumps(
         {
@@ -353,9 +351,7 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["goal_scope"]
     assert [aspect.description for aspect in plan.explicit_requirements] == ["brief describe the malaysia history"]
     assert plan.exploration_directions == ("Compare alternative historical interpretations.",)
-    assert [
-        hypothesis.role for hypothesis in plan.provisional_hypotheses
-    ] == ["primary", "alternative", "null"]
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == ["primary", "alternative", "null"]
     assert mock_call.call_count == 2
     assert all(call.kwargs["temperature"] == 0.0 for call in mock_call.call_args_list)
     assert all(call.kwargs["model"] == "chosen-model" for call in mock_call.call_args_list)
@@ -373,6 +369,41 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert "Search Planner" in rewriter_system_prompt
     assert "goal_quote copied verbatim" in rewriter_system_prompt
     assert "must never become evidence gates" in " ".join(rewriter_system_prompt.split())
+    assert "Make every prior_art query specific enough to test novelty" in rewriter_system_prompt
+
+
+def test_query_rewriting_retries_truncated_research_plan_once():
+    truncated_plan = '{"research_goal": "brief describe the malaysia history", "research_type": "discovery"'
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            truncated_plan,
+            _research_plan_payload(),
+            _query_plan_payload(query_count=5, hypothesis_guided=True),
+        ],
+    ) as mock_call:
+        plan, error = call_llm_for_search_queries(
+            "brief describe the malaysia history",
+            model="chosen-model",
+        )
+
+    assert error is None
+    assert plan is not None
+    assert mock_call.call_count == 3
+    repair_call = mock_call.call_args_list[1]
+    assert "previous response was invalid" in " ".join(repair_call.args[0].split())
+    assert repair_call.kwargs["max_tokens"] == config["llm_max_tokens"]["format_repair"]
+    assert repair_call.kwargs["reasoning"] == "off"
+
+
+def test_hypothesis_auditor_prompt_uses_conservative_novelty_anchors():
+    from app.agents_modules.generation import HYPOTHESIS_AUDITOR_SYSTEM_PROMPT
+
+    normalized = " ".join(HYPOTHESIS_AUDITOR_SYSTEM_PROMPT.split())
+    assert "related-work passages" in normalized
+    assert "score 5-6 for an incremental recombination" in normalized
+    assert "reserve 8-10 for a genuinely new mechanism" in normalized
 
 
 def test_query_fidelity_failure_rewrites_once_before_search():
@@ -428,9 +459,7 @@ def test_query_rewriter_accepts_dynamic_query_count_up_to_configured_maximum():
     assert error is None
     assert plan is not None
     assert len(plan.queries) == 3
-    rewriter_system_prompt = mock_call.call_args_list[1].kwargs[
-        "system_prompt"
-    ]
+    rewriter_system_prompt = mock_call.call_args_list[1].kwargs["system_prompt"]
     assert "between 3 and 5 distinct queries" in rewriter_system_prompt
 
 
@@ -457,12 +486,13 @@ def test_corrective_query_round_prioritizes_missing_requirements_and_caps_count(
         "telecom multi-agent architecture",
         "autonomous monitoring metrics",
     )
+    tagged = agent._tag_corrective_queries(queries, missing_aspects)
+    assert [query.evidence_requirement_id for query in tagged] == ["architecture", "metrics"]
+    assert [query.sub_question for query in tagged] == list(queries)
 
 
 def test_query_rewriter_accepts_structured_query_objects():
-    rewritten = json.loads(
-        _query_plan_payload(query_count=5, hypothesis_guided=True)
-    )
+    rewritten = json.loads(_query_plan_payload(query_count=5, hypothesis_guided=True))
     hypothesis_metadata = [
         ("primary_hypothesis", "support"),
         ("alternative_hypothesis", "counterevidence"),
@@ -482,9 +512,7 @@ def test_query_rewriter_accepts_structured_query_objects():
             "hypothesis_id": hypothesis_id,
             "search_intent": intent,
         }
-        for query, (hypothesis_id, intent) in zip(
-            rewritten["queries"], hypothesis_metadata
-        )
+        for query, (hypothesis_id, intent) in zip(rewritten["queries"], hypothesis_metadata)
     ]
 
     with patch(
@@ -685,10 +713,12 @@ def test_hypothesis_auditor_runs_candidates_concurrently_and_preserves_order():
     assert audits is not None
     assert [audit["candidate_index"] for audit in audits] == [0, 1, 2, 3]
     assert [audit["passed"] for audit in audits] == [True, True, False, True]
-    assert [
-        audit["final_hypothesis"]["title"] if audit["final_hypothesis"] else None
-        for audit in audits
-    ] == ["Audited 0", "Audited 1", None, "Audited 3"]
+    assert [audit["final_hypothesis"]["title"] if audit["final_hypothesis"] else None for audit in audits] == [
+        "Audited 0",
+        "Audited 1",
+        None,
+        "Audited 3",
+    ]
     assert call_counts == {"Draft 0": 1, "Draft 1": 2, "Draft 2": 2, "Draft 3": 1}
     assert mock_call.call_count == 6
 
@@ -716,9 +746,7 @@ def test_balanced_hypothesis_auditor_keeps_numeric_target_with_warning():
     assert audits[0]["audit_report"]["scores"]["unsupported_specificity"] == 5.0
     assert audits[0]["audit_report"]["warnings"]
     assert audits[0]["audit_report"]["hard_failures"] == []
-    assert "proposed experimental targets" in " ".join(
-        audits[0]["audit_report"]["warnings"]
-    )
+    assert "proposed experimental targets" in " ".join(audits[0]["audit_report"]["warnings"])
 
 
 def test_strict_hypothesis_auditor_rejects_unsupported_numeric_target(monkeypatch):
@@ -743,9 +771,7 @@ def test_strict_hypothesis_auditor_rejects_unsupported_numeric_target(monkeypatc
     assert audits is not None
     assert audits[0]["passed"] is False
     assert audits[0]["audit_report"]["mode"] == "strict"
-    assert "unsupported numerical claims" in " ".join(
-        audits[0]["audit_report"]["hard_failures"]
-    )
+    assert "unsupported numerical claims" in " ".join(audits[0]["audit_report"]["hard_failures"])
 
 
 def test_hypothesis_auditor_treats_quality_score_and_model_verdict_as_advisory():
@@ -1356,6 +1382,109 @@ def test_literature_synthesis_keeps_only_findings_with_retrieved_sources():
     assert synthesis.established_findings[0].source_ids == ("arXiv:2205.15480v2",)
 
 
+def test_literature_synthesis_repairs_reasoning_with_inline_json_example():
+    aspects = (EvidenceAspect("core_topic", "The user-stated core topic."),)
+    reasoning_without_answer = (
+        'I should return evidence refs like {"source_id": "exact", '
+        '"chunk_id": "exact"}, then assemble the final response.'
+    )
+    repaired_payload = json.dumps(
+        {
+            "established_findings": [
+                {
+                    "claim": "Supported premise.",
+                    "source_ids": ["arXiv:2205.15480v2"],
+                }
+            ],
+            "contradictions": [],
+            "knowledge_gaps": ["A direct comparison remains unresolved."],
+            "analytical_rationale": "The premise motivates a testable comparison.",
+        }
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[reasoning_without_answer, repaired_payload],
+    ) as mock_call:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Compare two methods.",
+            aspects,
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+        )
+
+    assert synthesis_error is None
+    assert synthesis is not None
+    assert [finding.claim for finding in synthesis.established_findings] == ["Supported premise."]
+    assert mock_call.call_count == 2
+    assert all(call.kwargs["reasoning"] == "off" for call in mock_call.call_args_list)
+    assert mock_call.call_args_list[0].kwargs["max_tokens"] == config["llm_max_tokens"]["literature_synthesis"]
+    assert mock_call.call_args_list[1].kwargs["max_tokens"] == config["llm_max_tokens"]["format_repair"]
+
+
+def test_literature_synthesis_recovers_an_empty_analytical_rationale_locally():
+    aspects = (EvidenceAspect("core_topic", "The user-stated core topic."),)
+    payload = json.dumps(
+        {
+            "established_findings": [
+                {
+                    "claim": "Closed-loop allocation improves responsiveness.",
+                    "source_ids": ["arXiv:2205.15480v2"],
+                }
+            ],
+            "contradictions": [],
+            "knowledge_gaps": ["Performance during abrupt traffic spikes is unresolved."],
+            "analytical_rationale": "",
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Allocate 5G slice bandwidth during traffic spikes.",
+            aspects,
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+        )
+
+    assert synthesis_error is None
+    assert synthesis is not None
+    assert "Closed-loop allocation improves responsiveness." in synthesis.analytical_rationale
+    assert "abrupt traffic spikes" in synthesis.analytical_rationale
+    assert "established findings" in synthesis.analytical_rationale
+    assert synthesis.warnings == (
+        "Literature synthesis omitted analytical_rationale; a conservative "
+        "rationale was constructed from validated findings and gaps.",
+    )
+    assert mock_call.call_count == 1
+
+
+def test_literature_synthesis_does_not_recover_without_established_findings():
+    payload = json.dumps(
+        {
+            "established_findings": [],
+            "contradictions": [],
+            "knowledge_gaps": ["Performance during abrupt traffic spikes is unresolved."],
+            "analytical_rationale": "",
+        }
+    )
+
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        synthesis, synthesis_error = call_llm_for_literature_synthesis(
+            "Allocate 5G slice bandwidth during traffic spikes.",
+            (EvidenceAspect("core_topic", "The user-stated core topic."),),
+            (),
+            "retrieved context",
+            {"arXiv:2205.15480v2"},
+        )
+
+    assert synthesis is None
+    assert synthesis_error is not None
+    assert "No established finding cited a retrieved source" in synthesis_error
+    assert mock_call.call_count == 1
+
+
 def test_reciprocal_rank_fusion_deduplicates_versions_and_rewards_recurrence():
     recurring_v1 = _paper(
         "2001.03488v1",
@@ -1557,8 +1686,7 @@ def test_query_fidelity_rejects_semantically_drifted_query():
     retriever.provisional_hypothesis_min_similarity = 0.5
     retriever.embeddings = Mock()
     retriever.embeddings.embed_documents.side_effect = lambda texts: [
-        [0.0, 1.0] if "medieval poetry" in text else [1.0, 0.0]
-        for text in texts
+        [0.0, 1.0] if "medieval poetry" in text else [1.0, 0.0] for text in texts
     ]
     plan = SearchQueryPlan(
         queries=(
@@ -1609,11 +1737,7 @@ def test_query_fidelity_rejects_semantically_drifted_query():
 
     assert valid is False
     assert "medieval poetry manuscript provenance" in reason
-    query_reports = [
-        item
-        for item in retriever.last_query_fidelity
-        if item.get("kind") == "query"
-    ]
+    query_reports = [item for item in retriever.last_query_fidelity if item.get("kind") == "query"]
     assert [item["accepted"] for item in query_reports] == [True, False]
     retriever.embeddings.embed_documents.assert_called_once()
 
@@ -1621,9 +1745,7 @@ def test_query_fidelity_rejects_semantically_drifted_query():
 def test_query_fidelity_fails_open_when_embeddings_are_unavailable():
     retriever = ArxivRAGRetriever(query_count=1)
     retriever.embeddings = Mock()
-    retriever.embeddings.embed_documents.side_effect = RuntimeError(
-        "embedding endpoint unavailable"
-    )
+    retriever.embeddings.embed_documents.side_effect = RuntimeError("embedding endpoint unavailable")
     plan = SearchQueryPlan(
         queries=(SearchQuery(query="focused research query"),),
         required_terms=(),
@@ -1665,9 +1787,7 @@ def test_forced_web_fallback_searches_tavily_for_academic_queries():
 
     assert documents == []
     retriever.arxiv.search_papers.assert_called_once()
-    retriever.tavily.search.assert_called_once_with(
-        query="targeted academic evidence"
-    )
+    retriever.tavily.search.assert_called_once_with(query="targeted academic evidence")
 
 
 def test_web_retrieval_uses_web_schema_without_paper_identifiers():
@@ -1696,9 +1816,7 @@ def test_web_retrieval_uses_web_schema_without_paper_identifiers():
     retriever.tavily = Mock(is_configured=True, last_error_status=None)
     retriever.tavily.search.return_value = [web_result]
     retriever.tavily.extract.return_value = {
-        "https://example.org/mec-security": (
-            "Extracted lightweight monitoring evidence for constrained MEC nodes."
-        )
+        "https://example.org/mec-security": ("Extracted lightweight monitoring evidence for constrained MEC nodes.")
     }
     fake_store = Mock()
     fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
@@ -1802,12 +1920,10 @@ def test_extracted_web_chunks_are_reranked_by_sub_question_and_globally_bounded(
     retriever.tavily = Mock(is_configured=True)
     retriever.tavily.extract.return_value = {
         "https://example.org/one": (
-            "<chunk 1> background noise\n"
-            "<chunk 2> alpha mechanism directly answers the question"
+            "<chunk 1> background noise\n<chunk 2> alpha mechanism directly answers the question"
         ),
         "https://example.org/two": (
-            "<chunk 1> unrelated navigation\n"
-            "<chunk 2> alpha benchmark provides decisive evidence"
+            "<chunk 1> unrelated navigation\n<chunk 2> alpha benchmark provides decisive evidence"
         ),
     }
     selected = [
@@ -1847,10 +1963,7 @@ def test_extracted_web_chunks_are_reranked_by_sub_question_and_globally_bounded(
         def similarity_search_with_score(self, query, k):
             assert query == "Which alpha evidence answers the question?"
             return sorted(
-                (
-                    (document, 0.95 if "alpha" in document.page_content else 0.1)
-                    for document in self.documents
-                ),
+                ((document, 0.95 if "alpha" in document.page_content else 0.1) for document in self.documents),
                 key=lambda item: item[1],
                 reverse=True,
             )[:k]
@@ -1889,9 +2002,9 @@ def test_web_search_snippet_is_not_evidence_when_extract_fails():
     retriever.tavily = Mock(is_configured=True)
     retriever.tavily.extract.return_value = {}
     fake_store = Mock()
-    fake_store.similarity_search.side_effect = lambda *args, **kwargs: (
-        fake_store.add_documents.call_args.kwargs["documents"]
-    )
+    fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
+        "documents"
+    ]
 
     with patch("app.rag_retriever.InMemoryVectorStore", return_value=fake_store):
         documents = retriever._rank_documents(
@@ -1991,9 +2104,7 @@ def test_structured_queries_route_to_academic_and_news_providers():
         max_results=retriever.results_per_query,
         sort_by="relevance",
     )
-    retriever.semantic_scholar.search_papers.assert_called_once_with(
-        query="hierarchical retrieval long context paper"
-    )
+    retriever.semantic_scholar.search_papers.assert_called_once_with(query="hierarchical retrieval long context paper")
     retriever.tavily.search.assert_called_once_with(
         query="Qwen long context benchmark update",
         time_range="month",
@@ -2017,9 +2128,7 @@ def test_pdf_promotion_does_not_evict_direct_web_evidence():
     retriever = ArxivRAGRetriever(query_count=1, top_k=1, minimum_relevant_sources=1)
     retriever.minimum_downloadable_sources = 1
     retriever.tavily = Mock(is_configured=True)
-    retriever.tavily.extract.return_value = {
-        web_result["arxiv_url"]: "Extracted directly relevant web evidence."
-    }
+    retriever.tavily.extract.return_value = {web_result["arxiv_url"]: "Extracted directly relevant web evidence."}
     fake_store = Mock()
     fake_store.similarity_search.side_effect = lambda *args, **kwargs: fake_store.add_documents.call_args.kwargs[
         "documents"
@@ -2036,6 +2145,103 @@ def test_pdf_promotion_does_not_evict_direct_web_evidence():
     assert documents[0].metadata["source_type"] == "web"
 
 
+def test_requirement_lanes_preserve_narrow_evidence_before_global_top_k():
+    retriever = ArxivRAGRetriever(query_count=2, top_k=2, minimum_relevant_sources=1)
+    retriever.minimum_downloadable_sources = 0
+    plan = SearchQueryPlan(
+        queries=(
+            SearchQuery(
+                "traffic spike prediction",
+                evidence_requirement_id="spikes",
+            ),
+            SearchQuery(
+                "real-time multi-agent latency",
+                evidence_requirement_id="latency",
+            ),
+        ),
+        required_terms=(),
+        explicit_requirements=(
+            EvidenceAspect("spikes", "traffic spike prediction evidence"),
+            EvidenceAspect("latency", "real-time multi-agent latency evidence"),
+        ),
+    )
+    generic_one = _paper("2401.00001", "Generic 5G AI", "Broad 5G bandwidth and AI background.")
+    generic_two = _paper("2401.00002", "Generic network AI", "Broad network optimization background.")
+    spike_specific = _paper("2401.00003", "Traffic bursts", "Measured traffic-spike prediction evidence.")
+    spike_specific["evidence_requirement_id"] = "spikes"
+    latency_specific = _paper("2401.00004", "Real-time agents", "Measured multi-agent control latency evidence.")
+    latency_specific["evidence_requirement_id"] = "latency"
+
+    class RequirementRankingStore:
+        def __init__(self, *args, **kwargs):
+            self.documents = []
+
+        def add_documents(self, documents, ids):
+            self.documents = list(documents)
+
+        def similarity_search_with_score(self, query, k):
+            order = {
+                "broad research goal": ["arXiv:2401.00001", "arXiv:2401.00002", "arXiv:2401.00003", "arXiv:2401.00004"],
+                "traffic spike prediction evidence": [
+                    "arXiv:2401.00003",
+                    "arXiv:2401.00001",
+                    "arXiv:2401.00002",
+                    "arXiv:2401.00004",
+                ],
+                "real-time multi-agent latency evidence": [
+                    "arXiv:2401.00004",
+                    "arXiv:2401.00001",
+                    "arXiv:2401.00002",
+                    "arXiv:2401.00003",
+                ],
+            }[query]
+            by_id = {document.metadata["source_id"]: document for document in self.documents}
+            return [(by_id[source_id], 1.0 - index / 10) for index, source_id in enumerate(order[:k])]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", RequirementRankingStore):
+        documents = retriever._rank_documents(
+            "broad research goal",
+            plan,
+            [[generic_one, generic_two, spike_specific, latency_specific]],
+        )
+
+    assert [document.metadata["source_id"] for document in documents] == [
+        "arXiv:2401.00003",
+        "arXiv:2401.00004",
+    ]
+    assert [document.metadata["reserved_requirement_ids"] for document in documents] == [
+        ["spikes"],
+        ["latency"],
+    ]
+
+
+def test_corrective_merge_preserves_requirement_context_for_existing_source():
+    initial = Document(
+        page_content="Initial abstract",
+        metadata={
+            "source_id": "arXiv:2401.00001v1",
+            "query_contexts": ({"query": "broad goal", "evidence_requirement_id": None},),
+        },
+    )
+    corrective = Document(
+        page_content="Corrective abstract",
+        metadata={
+            "source_id": "arXiv:2401.00001v2",
+            "reserved_requirement_ids": ["spikes"],
+            "query_contexts": ({"query": "traffic spike measurements", "evidence_requirement_id": "spikes"},),
+        },
+    )
+
+    merged = GenerationAgent._merge_retrieved_documents([initial], [corrective])
+
+    assert len(merged) == 1
+    assert merged[0].metadata["reserved_requirement_ids"] == ["spikes"]
+    assert [item["query"] for item in merged[0].metadata["query_contexts"]] == [
+        "broad goal",
+        "traffic spike measurements",
+    ]
+
+
 def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_sources():
     indexed = Document(
         page_content="Indexed evidence",
@@ -2043,6 +2249,18 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
             "source_id": "arXiv:1111.1111",
             "source_type": "academic",
             "full_text_indexed": True,
+            "full_text_chunks_used": 1,
+            "evidence_refs": [{"evidence_type": "full_text", "text": "Indexed evidence"}],
+        },
+    )
+    indexed_without_passage = Document(
+        page_content="Abstract only despite a cached source",
+        metadata={
+            "source_id": "arXiv:3333.3333",
+            "source_type": "academic",
+            "full_text_indexed": True,
+            "full_text_chunks_used": 0,
+            "evidence_refs": [{"evidence_type": "abstract_only", "text": "Abstract only"}],
         },
     )
     web_content = Document(
@@ -2071,6 +2289,18 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
             "full_text_indexed": False,
         },
     )
+    partial = Document(
+        page_content="Truncated paper body",
+        metadata={
+            "source_id": "arXiv:4444.4444",
+            "source_type": "academic",
+            "full_text_indexed": False,
+            "full_text_chunks_used": 1,
+            "index_status": "PARTIAL",
+            "index_truncated": True,
+            "evidence_refs": [{"evidence_type": "full_text", "text": "Truncated body"}],
+        },
+    )
 
     class StrictPaperLibrary:
         enabled = True
@@ -2083,9 +2313,18 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
     agent = GenerationAgent(paper_library=StrictPaperLibrary())
 
     assert agent._prepare_candidate_documents(
-        [indexed, web_content, search_only_web, academic_abstract_only],
+        [
+            indexed,
+            indexed_without_passage,
+            web_content,
+            search_only_web,
+            academic_abstract_only,
+            partial,
+        ],
         ResearchGoal("Use downloadable evidence"),
     ) == [indexed, web_content]
+    assert partial.metadata["strict_gate_rejection_reason"] == "partial_index"
+    assert indexed_without_passage.metadata["strict_gate_rejection_reason"] == "no_retrieved_full_text_passage"
 
 
 def test_retrieval_stops_arxiv_batch_after_rate_limit():
@@ -2105,6 +2344,12 @@ def test_retrieval_stops_arxiv_batch_after_rate_limit():
         retriever.retrieve("original goal", query_plan)
 
     assert retriever.arxiv.search_papers.call_count == 1
+    arxiv_stats = next(stat for stat in retriever.last_search_stats if stat["source"] == "arXiv")
+    assert arxiv_stats["queries_completed"] == 1
+    assert arxiv_stats["queries_requested"] == 3
+    assert arxiv_stats["status"] == "rate_limited"
+    semantic_stats = next(stat for stat in retriever.last_search_stats if stat["source"] == "Semantic Scholar")
+    assert semantic_stats["status"] == "zero_yield"
 
 
 def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():
@@ -2125,6 +2370,70 @@ def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():
 
     # The remaining rewritten queries are skipped after the first rate-limit signal.
     assert retriever.semantic_scholar.search_papers.call_count == 1
+    semantic_stats = next(stat for stat in retriever.last_search_stats if stat["source"] == "Semantic Scholar")
+    assert semantic_stats["queries_completed"] == 1
+    assert semantic_stats["queries_requested"] == 3
+    assert semantic_stats["status"] == "rate_limited"
+
+
+def test_provider_http_failure_is_not_reported_as_zero_yield():
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.semantic_scholar = None
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.tavily = Mock(
+        is_configured=True,
+        last_error_status=432,
+        last_error_kind="provider_error",
+        last_error_detail="432 Client Error",
+    )
+    retriever.tavily.search.return_value = []
+
+    retriever._search_sources(
+        (SearchQuery("network evidence", source_type="web", evidence_requirement_id="scope"),),
+        include_arxiv=False,
+        force_web=True,
+    )
+
+    stats = retriever.last_search_stats[-1]
+    assert stats["status"] == "provider_error"
+    assert stats["status"] != "zero_yield"
+    assert stats["error_status"] == 432
+    assert stats["query_results"][0]["requirement_id"] == "scope"
+
+
+def test_no_progress_corrective_round_reformulates_instead_of_reusing_queries():
+    agent = GenerationAgent(corrective_retrieval_rounds=2)
+    missing = (EvidenceAspect("spikes", "Traffic spike detection evidence."),)
+    coverage = EvidenceCoverage(
+        aspect_source_ids={"spikes": ()},
+        missing_aspect_ids=("spikes",),
+        gap_queries=("traffic spike detector measurements",),
+        reason="Missing",
+    )
+
+    first = agent._bounded_missing_evidence_queries(coverage, missing)
+    second = agent._bounded_missing_evidence_queries(
+        coverage,
+        missing,
+        exclude_queries=first,
+        strategy_round=1,
+    )
+
+    assert first
+    assert second
+    assert {query.casefold() for query in first}.isdisjoint(query.casefold() for query in second)
+    tagged = agent._tag_corrective_queries(second, missing)
+    assert {query.evidence_requirement_id for query in tagged} == {"spikes"}
+
+
+def test_full_text_query_budget_represents_every_explicit_requirement():
+    requirements = tuple(EvidenceAspect(f"requirement-{index}", f"Evidence dimension {index}.") for index in range(5))
+
+    queries = build_evidence_queries("Research goal", requirements, max_queries=6)
+
+    assert queries[0] == "Research goal"
+    assert all(any(query.startswith(aspect.description) for query in queries) for aspect in requirements)
 
 
 def test_semantic_scholar_fallback_fuses_and_reranks_results():
@@ -2517,9 +2826,7 @@ def test_generation_uses_collective_coverage_and_excludes_unmapped_sources():
         "arXiv:2103.00003v1",
         "arXiv:2104.00004v3",
     ]
-    assert [
-        source["source_id"] for source in hypotheses[0].evidence_sources
-    ] == hypotheses[0].evidence_source_ids
+    assert [source["source_id"] for source in hypotheses[0].evidence_sources] == hypotheses[0].evidence_source_ids
     assert "IRRELEVANT_UNIQUE" in candidate_contexts[0]
     synthesis_prompt = mock_llm.call_args_list[1].args[0]
     generation_prompt = mock_llm.call_args_list[2].args[0]
@@ -2778,16 +3085,15 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "arXiv:2222.2222",
     ]
     assert mock_retrieve.call_count == 2
-    assert all(
-        call.kwargs["force_web"] is True
-        for call in mock_retrieve.call_args_list
-    )
+    assert all(call.kwargs["force_web"] is True for call in mock_retrieve.call_args_list)
     assert mock_retrieve.call_args_list[1].kwargs["rerank_query"] == "scientific goal"
     gap_plan = mock_retrieve.call_args_list[1].args[1]
     assert gap_plan.query_texts == (
         "scientific goal",
         "targeted requested outcome evidence",
     )
+    assert {query.evidence_requirement_id for query in gap_plan.queries} == {"requested_outcome"}
+    assert all(query.sub_question == "scientific goal" for query in gap_plan.queries)
     assert gap_plan.required_terms == ()
     assert len(context.last_retrieved_sources) == 2
     second_coverage_context = mock_coverage.call_args_list[1].args[2]

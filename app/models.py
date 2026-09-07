@@ -61,6 +61,7 @@ class Hypothesis:
         # distinguish failure from a genuine low-scoring report.
         self.reflection_report: Optional[ReflectionReport] = kwargs.get("reflection_report")
         self.evidence_source_ids: List[str] = []
+        self.evidence_refs: List[str] = []
         self.evidence_sources: List[Dict] = []
         self.audit_score: Optional[float] = None
         self.audit_verdict: Optional[str] = None
@@ -82,6 +83,7 @@ class Hypothesis:
             "parent_ids": self.parent_ids,  # Include parent IDs
             "evolution_strategy": self.evolution_strategy,
             "evidence_source_ids": self.evidence_source_ids,  # Include evidence source IDs
+            "evidence_refs": self.evidence_refs,
             "evidence_sources": self.evidence_sources,  # Include the actual source documents
             "audit_score": self.audit_score,
             "audit_verdict": self.audit_verdict,
@@ -145,12 +147,24 @@ class ContextMemory:
         self.iteration_number: int = 0
         # Sources retrieved before generation in the latest cycle.
         self.last_retrieved_sources: List[Dict] = []
+        # Stage-level status from the latest Generation pass. This keeps
+        # successful evidence retrieval distinct from later synthesis or
+        # hypothesis-generation failures in reports and progress diagnostics.
+        self.last_generation_diagnostics: Dict = {}
         # Parse status and redacted excerpts for each Evolution strategy call.
         self.last_evolution_attempts: List[Dict] = []
         # Quality-gate reports for every generated candidate, including rejects.
         self.last_hypothesis_audits: List[Dict] = []
         # Latest topology analysis shared by Ranking, Evolution, and Meta-review.
         self.proximity_analysis: Dict = {}
+        # JSON-serializable scheduling state owned by the Supervisor. Keeping
+        # this in context lets convergence signals carry across cycles.
+        self.supervisor_state: Dict = {
+            "status": "idle",
+            "pending_tasks": [],
+            "elo_snapshots": [],
+            "last_finalization": {},
+        }
 
     def add_hypothesis(self, hypothesis: Hypothesis):
         self.hypotheses[hypothesis.hypothesis_id] = hypothesis
@@ -194,6 +208,7 @@ class HypothesisResponse(BaseModel):
     references: List[Dict]
     is_active: bool
     evidence_source_ids: List[str] = []
+    evidence_refs: List[str] = []
     # parent_ids: List[str] # Add if needed in API response
 
 
@@ -230,6 +245,26 @@ class ClaimAssessment(BaseModel):
     contradictory_evidence: List[Dict] = []
 
 
+class EvidenceClaim(BaseModel):
+    """One atomic factual statement and its exact evidence provenance."""
+
+    claim_id: str
+    claim: str
+    support_status: Literal[
+        "entailed",
+        "partially_supported",
+        "unsupported",
+        "contradicted",
+    ]
+    source_id: Optional[str] = None
+    chunk_ids: List[str] = Field(default_factory=list)
+    evidence_spans: List[str] = Field(default_factory=list)
+    section: Optional[str] = None
+    page: Optional[int] = None
+    evidence_type: Optional[Literal["full_text", "abstract_only"]] = None
+    reason: str = ""
+
+
 class ReflectionReport(BaseModel):
     alignment_score: float = Field(default=0.0, ge=0.0, le=10.0)
     novelty_score: float = Field(default=0.0, ge=0.0, le=10.0)
@@ -241,7 +276,6 @@ class ReflectionReport(BaseModel):
     strengths: List[str] = []
     weaknesses: List[str] = []
     recommendation: str = "UNREVIEWED"
-
 
     claims: List[ClaimAssessment] = []
     overall_confidence: float = Field(default=1.0, ge=1.0, le=10.0)

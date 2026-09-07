@@ -42,6 +42,15 @@ def _disable_live_original_goal_search(monkeypatch):
             "All generated hypotheses were rejected by the novelty and grounding audit.",
             "Hypothesis quality gate rejected all candidates",
         ),
+        (
+            "Literature synthesis failed: Expected a non-empty analytical rationale.",
+            "Literature synthesis malformed",
+        ),
+        ("Evidence coverage grading failed: invalid response", "Evidence coverage unavailable"),
+        (
+            "Generated hypothesis has no valid retrieved source IDs: candidate",
+            "Hypothesis generation malformed",
+        ),
         ("Error: LM Studio call failed: malformed response", "LLM/API error"),
     ],
 )

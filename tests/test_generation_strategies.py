@@ -262,4 +262,3 @@ def test_generation_formats_meta_review_feedback():
     assert "Low novelty detected across hypotheses." in formatted
     assert "Prior cycle recommended next steps:" in formatted
     assert "Explore alternative mechanisms." in formatted
-

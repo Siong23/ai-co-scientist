@@ -24,10 +24,13 @@ from .agents_modules.generation_helpers import (
     _parse_generation_response,  # noqa: F401
     _resolve_retrieved_source_id,  # noqa: F401
     _resolve_retrieved_source_ids,  # noqa: F401
+    build_evidence_queries,
     call_llm_for_debate_refinement,
     call_llm_for_evidence_coverage,
     call_llm_for_focus_area_identification,
+    call_llm_for_full_text_evidence_coverage,
     call_llm_for_generation,
+    call_llm_for_grounded_hypothesis_audit,
     call_llm_for_hypothesis_audit,
     call_llm_for_literature_synthesis,
     call_llm_for_relevance_filter,
@@ -58,6 +61,7 @@ from .agents_modules.supervisor_planner import (
     assess_supervisor_state,
     build_supervisor_planning_prompt,
     decide_action_heuristically,
+    evaluate_finalization_readiness,
     parse_supervisor_decision,
 )
 from .evidence import EvidenceChunk, EvidenceDocument, EvidenceSource
@@ -117,6 +121,8 @@ __all__ = [
     "call_llm_for_evidence_coverage",
     "call_llm_for_focus_area_identification",
     "call_llm_for_evolution",
+    "call_llm_for_full_text_evidence_coverage",
+    "call_llm_for_grounded_hypothesis_audit",
     "call_llm_for_generation",
     "call_llm_for_hypothesis_audit",
     "call_llm_for_hypothesis_revision",
@@ -128,6 +134,8 @@ __all__ = [
     "build_evolution_prompt",
     "create_evolved_hypothesis",
     "decide_action_heuristically",
+    "evaluate_finalization_readiness",
+    "build_evidence_queries",
     "format_documents_for_prompt",
     "format_literature_synthesis",
     "format_references",

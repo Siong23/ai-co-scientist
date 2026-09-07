@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence
 
+from ..config import config
 from ..models import ContextMemory, ResearchGoal
 from ..utils import logger, redact_secrets
 from .generation_helpers import _call_llm
@@ -96,7 +97,7 @@ def assess_supervisor_state(
 
     tournament_hypos = set()
     for match in context.tournament_results:
-        if isinstance(match, dict):
+        if isinstance(match, dict) and match.get("outcome") in {"A", "B", "TIE"}:
             if "hypothesis_a" in match:
                 tournament_hypos.add(match["hypothesis_a"])
             if "hypothesis_b" in match:
@@ -112,6 +113,21 @@ def assess_supervisor_state(
         if isinstance(clusters, dict):
             cluster_count = len(clusters)
 
+    supervisor_state = getattr(context, "supervisor_state", {}) or {}
+    snapshots = list(supervisor_state.get("elo_snapshots", []))
+    convergence_config = config.get("supervisor", {}).get("convergence", {})
+    min_snapshots = max(2, int(convergence_config.get("min_snapshots", 2)))
+    convergence_threshold = max(0.0, float(convergence_config.get("top_elo_delta", 2.0)))
+    recent_snapshots = snapshots[-min_snapshots:]
+    top_elo_delta = None
+    ratings_converged = False
+    if len(recent_snapshots) >= min_snapshots:
+        candidate_sets = [set((snapshot.get("ratings") or {}).keys()) for snapshot in recent_snapshots]
+        if candidate_sets and all(candidate_set == candidate_sets[0] for candidate_set in candidate_sets[1:]):
+            top_scores = [float(snapshot.get("top_elo", 1200.0)) for snapshot in recent_snapshots]
+            top_elo_delta = max(top_scores) - min(top_scores)
+            ratings_converged = top_elo_delta <= convergence_threshold
+
     return {
         "total_hypotheses": len(all_hypos),
         "active_hypotheses_count": len(active_hypos),
@@ -119,7 +135,9 @@ def assess_supervisor_state(
         "revise_count": len(revise_hypos),
         "unreviewed_count": len(unreviewed_hypos),
         "unranked_accepted_count": len(unranked_accepted),
-        "tournament_comparisons": len(context.tournament_results),
+        "tournament_comparisons": sum(
+            match.get("outcome") in {"A", "B", "TIE"} for match in context.tournament_results
+        ),
         "elo_spread": round(elo_spread, 2),
         "evolution_attempts": len(getattr(context, "last_evolution_attempts", [])),
         "actions_taken": actions_taken,
@@ -129,9 +147,131 @@ def assess_supervisor_state(
         "unranked_accepted_ids": [h.hypothesis_id for h in unranked_accepted],
         "diversity_score": diversity_score,
         "cluster_count": cluster_count,
+        "ranking_snapshot_count": len(snapshots),
+        "top_elo_delta": round(top_elo_delta, 3) if top_elo_delta is not None else None,
+        "ratings_converged": ratings_converged,
         "top_hypothesis_ids": [
             h.hypothesis_id for h in sorted(accepted_hypos, key=lambda x: x.elo_score, reverse=True)[:3]
         ],
+    }
+
+
+def evaluate_finalization_readiness(
+    context: ContextMemory,
+    research_goal: ResearchGoal,
+) -> dict[str, Any]:
+    """Return an auditable quality gate for concluding a research cycle."""
+    gate_config = config.get("supervisor", {}).get("finalization", {})
+    min_accepted = max(1, int(gate_config.get("min_accepted_hypotheses", 2)))
+    min_accepted = min(min_accepted, max(1, int(research_goal.num_hypotheses)))
+    min_matches = max(0, int(gate_config.get("min_completed_matches", 1)))
+    require_evidence = bool(gate_config.get("require_evidence", True))
+    min_overall_confidence = float(gate_config.get("min_overall_confidence", 5.0))
+    min_claim_confidence = float(gate_config.get("min_claim_confidence", 4.0))
+    min_audit_score = float(gate_config.get("min_audit_score", 70.0))
+    require_successful_evolution = bool(gate_config.get("require_successful_evolution", True))
+    min_hypothesis_clusters = max(1, int(gate_config.get("min_hypothesis_clusters", 2)))
+
+    accepted = []
+    for hypothesis in context.get_active_hypotheses():
+        report = getattr(hypothesis, "reflection_report", None)
+        if str(getattr(report, "recommendation", "")).strip().upper() == "ACCEPT":
+            accepted.append(hypothesis)
+    accepted.sort(key=lambda item: (item.elo_score, item.hypothesis_id), reverse=True)
+    finalists = accepted[:min_accepted]
+
+    completed_matches = [
+        match
+        for match in context.tournament_results
+        if isinstance(match, dict) and match.get("outcome") in {"A", "B", "TIE"}
+    ]
+    ranked_ids = {
+        str(match.get(key)) for match in completed_matches for key in ("hypothesis_a", "hypothesis_b") if match.get(key)
+    }
+    missing_evidence = []
+    low_confidence_finalists = []
+    unsupported_claim_finalists = []
+    failed_audit_finalists = []
+    for hypothesis in finalists:
+        evidence_ids = {str(source_id) for source_id in getattr(hypothesis, "evidence_source_ids", [])}
+        stored_source_ids = {
+            str(source.get("source_id"))
+            for source in (getattr(hypothesis, "evidence_sources", []) or [])
+            if isinstance(source, dict) and source.get("source_id")
+        }
+        if require_evidence and (not evidence_ids or not evidence_ids.intersection(stored_source_ids)):
+            missing_evidence.append(hypothesis.hypothesis_id)
+
+        report = getattr(hypothesis, "reflection_report", None)
+        claims = list(getattr(report, "claims", []) or [])
+        overall_confidence = float(getattr(report, "overall_confidence", 1.0) or 1.0)
+        claim_confidences = [float(getattr(claim, "confidence", 1.0)) for claim in claims]
+        if (
+            overall_confidence < min_overall_confidence
+            or not claim_confidences
+            or min(claim_confidences) < min_claim_confidence
+        ):
+            low_confidence_finalists.append(hypothesis.hypothesis_id)
+        if require_evidence and any(not getattr(claim, "supporting_evidence", []) for claim in claims):
+            unsupported_claim_finalists.append(hypothesis.hypothesis_id)
+
+        audit_verdict = str(getattr(hypothesis, "audit_verdict", "") or "").upper()
+        audit_score = getattr(hypothesis, "audit_score", None)
+        if audit_verdict and audit_verdict not in {"PASS", "PASS_WITH_WARNINGS"}:
+            failed_audit_finalists.append(hypothesis.hypothesis_id)
+        elif audit_score is not None and float(audit_score) < min_audit_score:
+            failed_audit_finalists.append(hypothesis.hypothesis_id)
+    unranked_finalists = [
+        hypothesis.hypothesis_id for hypothesis in finalists if hypothesis.hypothesis_id not in ranked_ids
+    ]
+
+    reasons = []
+    if len(accepted) < min_accepted:
+        reasons.append(f"Need at least {min_accepted} accepted hypotheses; found {len(accepted)}.")
+    if len(completed_matches) < min_matches:
+        reasons.append(f"Need at least {min_matches} completed tournament match(es); found {len(completed_matches)}.")
+    if unranked_finalists:
+        reasons.append("Finalists missing completed tournament comparisons: " + ", ".join(unranked_finalists) + ".")
+    if missing_evidence:
+        reasons.append("Finalists missing verified evidence citations: " + ", ".join(missing_evidence) + ".")
+    if low_confidence_finalists:
+        reasons.append("Finalists below claim-confidence thresholds: " + ", ".join(low_confidence_finalists) + ".")
+    if unsupported_claim_finalists:
+        reasons.append(
+            "Finalists have core claims without supporting evidence: " + ", ".join(unsupported_claim_finalists) + "."
+        )
+    if failed_audit_finalists:
+        reasons.append("Finalists failed the generation quality audit: " + ", ".join(failed_audit_finalists) + ".")
+
+    evolution_attempts = list(getattr(context, "last_evolution_attempts", []) or [])
+    successful_evolution = any(
+        isinstance(attempt, dict) and attempt.get("status") == "accepted" for attempt in evolution_attempts
+    )
+    if require_successful_evolution and not successful_evolution:
+        reasons.append("Need at least one successful Evolution candidate before finalization.")
+
+    proximity = getattr(context, "proximity_analysis", {}) or {}
+    clusters = proximity.get("clusters", {}) if isinstance(proximity, dict) else {}
+    cluster_count = len(clusters) if isinstance(clusters, (dict, list)) else 0
+    if len(finalists) >= 2 and cluster_count < min_hypothesis_clusters:
+        reasons.append(f"Need at least {min_hypothesis_clusters} hypothesis clusters; found {cluster_count}.")
+
+    return {
+        "ready": not reasons,
+        "reasons": reasons,
+        "accepted_count": len(accepted),
+        "required_accepted_count": min_accepted,
+        "completed_matches": len(completed_matches),
+        "required_completed_matches": min_matches,
+        "finalist_ids": [hypothesis.hypothesis_id for hypothesis in finalists],
+        "unranked_finalist_ids": unranked_finalists,
+        "missing_evidence_ids": missing_evidence,
+        "low_confidence_finalist_ids": low_confidence_finalists,
+        "unsupported_claim_finalist_ids": unsupported_claim_finalists,
+        "failed_audit_finalist_ids": failed_audit_finalists,
+        "successful_evolution": successful_evolution,
+        "cluster_count": cluster_count,
+        "required_cluster_count": min_hypothesis_clusters,
     }
 
 
@@ -159,6 +299,8 @@ def build_supervisor_planning_prompt(
         f"- Reflection accepted: {state.get('accepted_count', 0)}, Need revision: {state.get('revise_count', 0)}, Unreviewed: {state.get('unreviewed_count', 0)}\n"
         f"- Unranked accepted candidates: {state.get('unranked_accepted_count', 0)}\n"
         f"- Tournament comparisons completed: {state.get('tournament_comparisons', 0)} (Elo spread: {state.get('elo_spread', 0)})\n"
+        f"- Ranking snapshots: {state.get('ranking_snapshot_count', 0)}; ratings converged: "
+        f"{state.get('ratings_converged', False)}; top Elo delta: {state.get('top_elo_delta')}\n"
         f"{diversity_info}"
         f"- Evolution attempts: {state.get('evolution_attempts', 0)}\n"
         f"- Actions already executed in this session: {', '.join(state.get('actions_taken', [])) or 'None'}\n"
@@ -231,9 +373,14 @@ def decide_action_heuristically(
     unreviewed_ids = list(state.get("unreviewed_ids", []))
     accepted = state.get("accepted_count", 0)
     accepted_ids = list(state.get("accepted_ids", []))
+    unranked_accepted = int(state.get("unranked_accepted_count", 0))
     actions = state.get("actions_taken", [])
     steps_left = state.get("steps_remaining", 1)
     target_count = getattr(research_goal, "num_hypotheses", 2)
+    ranking_snapshots = int(state.get("ranking_snapshot_count", 0))
+    ratings_converged = bool(state.get("ratings_converged", False))
+    convergence_config = config.get("supervisor", {}).get("convergence", {})
+    max_ranking_batches = max(1, int(convergence_config.get("max_ranking_batches_before_evolution", 2)))
 
     # 1. No hypotheses -> Generate
     if active_count == 0:
@@ -265,15 +412,27 @@ def decide_action_heuristically(
             target_hypothesis_ids=accepted_ids,
         )
 
-    # 5. If ranked and haven't evolved yet -> Evolve
+    # 5. Refine tournament scores before evolution. Once ratings plateau (or
+    # the bounded batch budget is reached), invest compute in new candidates.
     if accepted >= 2 and "EVOLVE" not in actions:
+        ranking_batches = actions.count("RANK")
+        if ranking_snapshots and ranking_batches < max_ranking_batches and not ratings_converged:
+            return SupervisorDecision(
+                action="RANK",
+                reasoning="Elo ratings have not converged; running another bounded tournament batch before evolution.",
+                target_hypothesis_ids=accepted_ids,
+            )
         return SupervisorDecision(
             action="EVOLVE",
-            reasoning="Evolving top-ranked hypotheses to explore mutations, combinations, and grounded refinements.",
+            reasoning=(
+                "Elo ratings have plateaued; evolving the leading hypotheses to escape the current quality plateau."
+                if ratings_converged
+                else "Tournament batch budget reached; evolving top-ranked hypotheses to explore grounded refinements."
+            ),
         )
 
     # 6. If evolved hypotheses were accepted and need ranking -> Rank
-    if "EVOLVE" in actions and actions.count("RANK") < 2:
+    if "EVOLVE" in actions and unranked_accepted > 0:
         return SupervisorDecision(
             action="RANK",
             reasoning="Conducting tournament matches to evaluate newly evolved hypotheses against prior champions.",

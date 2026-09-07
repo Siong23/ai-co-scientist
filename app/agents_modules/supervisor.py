@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..research_trace import merge_trace_event, normalize_trace_event
-from ..utils import logger, redact_secrets
+from ..utils import execution_cancelled, logger, redact_secrets
 from .evolution import EvolutionAgent
 from .generation import GenerationAgent
 from .meta_review import MetaReviewAgent
 from .proximity import ProximityAgent
 from .ranking import RankingAgent
 from .reflection import ReflectionAgent
-from .supervisor_planner import SupervisorPlanner
+from .supervisor_planner import SupervisorPlanner, evaluate_finalization_readiness
 
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
@@ -32,6 +34,26 @@ def _source_details(sources: List[Mapping[str, Any]]) -> List[str]:
         source_id = source.get("source_id") or source.get("id") or "unknown source"
         title = source.get("title") or source_id
         details.append(f"Evidence: {_shorten(title, 150)} ({_shorten(source_id, 80)})")
+    return details
+
+
+def _generation_stage_details(diagnostics: Mapping[str, Any]) -> List[str]:
+    """Format retrieval, synthesis, and generation as distinct run stages."""
+
+    labels = {
+        "evidence_retrieval": "Evidence retrieval",
+        "literature_synthesis": "Literature synthesis",
+        "hypothesis_generation": "Hypothesis generation",
+    }
+    details = []
+    for stage_name, label in labels.items():
+        stage = diagnostics.get(stage_name, {})
+        if not isinstance(stage, Mapping):
+            continue
+        status = str(stage.get("status") or "unknown").replace("_", " ")
+        detail = _shorten(stage.get("detail") or "", 220)
+        suffix = f" — {detail}" if detail else ""
+        details.append(f"{label}: {status}{suffix}")
     return details
 
 
@@ -73,10 +95,7 @@ def _reflection_routing(hypotheses: List[Any]) -> Dict[str, List[Any]]:
 
 def _reflection_routing_summary(routed: Mapping[str, List[Any]]) -> Dict[str, List[str]]:
     """Serialize routing decisions without duplicating full hypotheses."""
-    return {
-        name: [hypothesis.hypothesis_id for hypothesis in hypotheses]
-        for name, hypotheses in routed.items()
-    }
+    return {name: [hypothesis.hypothesis_id for hypothesis in hypotheses] for name, hypotheses in routed.items()}
 
 
 def _ranking_details(results: List[Mapping[str, Any]]) -> List[str]:
@@ -110,8 +129,15 @@ def _meta_review_details(overview: Mapping[str, Any]) -> List[str]:
 class SupervisorAgent:
     """Orchestrates the Open AI Co-Scientist workflow."""
 
-    def __init__(self, mode: str = "sequential"):
-        self.mode = mode
+    def __init__(self, mode: str | None = None):
+        supervisor_config = config.get("supervisor", {})
+        self.mode = str(mode or supervisor_config.get("mode", "sequential")).lower()
+        self.planner_mode = str(supervisor_config.get("planner_mode", "heuristic")).lower()
+        self.max_steps = max(1, int(supervisor_config.get("max_steps", 10)))
+        self.max_generation_steps_per_cycle = max(
+            1,
+            int(supervisor_config.get("max_generation_steps_per_cycle", 1)),
+        )
         self.generation_agent = GenerationAgent()
         self.reflection_agent = ReflectionAgent()
         self.ranking_agent = RankingAgent()
@@ -119,6 +145,23 @@ class SupervisorAgent:
         self.proximity_agent = ProximityAgent()
         self.meta_review_agent = MetaReviewAgent()
         self.planner = SupervisorPlanner()
+
+    def run(
+        self,
+        research_goal: ResearchGoal,
+        context: ContextMemory,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> Dict[str, Any]:
+        """Run the configured orchestration mode through one stable entry point."""
+        if self.mode == "dynamic":
+            return self.run_dynamic_cycle(
+                research_goal,
+                context,
+                progress_callback=progress_callback,
+                max_steps=self.max_steps,
+                planner_mode=self.planner_mode,
+            )
+        return self.run_cycle(research_goal, context, progress_callback=progress_callback)
 
     # -------------------------------------------------------------------------
     # Modular Step Methods
@@ -146,6 +189,23 @@ class SupervisorAgent:
 
         generation_sources = list(context.last_retrieved_sources)
         generation_audits = list(context.last_hypothesis_audits)
+        generation_diagnostics = dict(context.last_generation_diagnostics)
+        raw_generation_warnings = generation_diagnostics.get("warnings", [])
+        if not isinstance(raw_generation_warnings, (list, tuple)):
+            raw_generation_warnings = []
+        generation_warnings = [str(warning) for warning in raw_generation_warnings if str(warning).strip()]
+        evidence_pipeline = generation_diagnostics.get("evidence_pipeline", [])
+        if not isinstance(evidence_pipeline, list):
+            evidence_pipeline = []
+        evidence_funnel = generation_diagnostics.get("evidence_funnel", {})
+        if not isinstance(evidence_funnel, dict):
+            evidence_funnel = {}
+        corrective_history = generation_diagnostics.get("corrective_history", [])
+        if not isinstance(corrective_history, list):
+            corrective_history = []
+        evidence_consumed = generation_diagnostics.get("evidence_consumed")
+        if not isinstance(evidence_consumed, bool):
+            evidence_consumed = bool(new_hypotheses and generation_sources)
         query_plan = getattr(
             self.generation_agent.rag_retriever,
             "last_query_plan",
@@ -191,13 +251,41 @@ class SupervisorAgent:
             "search_stats": list(getattr(self.generation_agent.rag_retriever, "last_search_stats", [])),
             "query_plan": query_plan_details,
             "query_fidelity": list(query_fidelity),
+            "evidence_funnel": dict(evidence_funnel),
+            "evidence_pipeline": list(evidence_pipeline),
+            "corrective_history": list(corrective_history),
+            "stages": {
+                name: dict(generation_diagnostics.get(name, {}))
+                for name in (
+                    "evidence_retrieval",
+                    "literature_synthesis",
+                    "hypothesis_generation",
+                )
+            },
+            "warnings": generation_warnings,
+            "evidence_consumed": evidence_consumed,
         }
 
         audit_counts: Dict[str, int] = {}
         for audit in generation_audits:
             verdict = str(audit.get("verdict") or audit.get("status") or "unknown").upper()
             audit_counts[verdict] = audit_counts.get(verdict, 0) + 1
-        generation_details = _source_details(generation_sources)
+        generation_details = _generation_stage_details(generation_diagnostics)
+        if evidence_funnel:
+            generation_details.append(
+                "Evidence funnel: "
+                f"{evidence_funnel.get('raw_search_hits', 0)} raw hits → "
+                f"{evidence_funnel.get('unique_candidates', 0)} unique candidates → "
+                f"{evidence_funnel.get('selected_sources', 0)} selected → "
+                f"{evidence_funnel.get('committed_sources', 0)} committed → "
+                f"{evidence_funnel.get('retrieved_passages', 0)} passages → "
+                f"{evidence_funnel.get('coverage_approved_sources', 0)} coverage-approved."
+            )
+        searched_source_count = len(generation_sources)
+        raw_unique_candidates = evidence_funnel.get("unique_candidates", 0)
+        if isinstance(raw_unique_candidates, (int, float)):
+            searched_source_count = max(searched_source_count, int(raw_unique_candidates))
+        generation_details.extend(_source_details(generation_sources))
         for hypothesis in query_plan_details["provisional_hypotheses"]:
             generation_details.append(
                 f"Provisional {hypothesis['role']} retrieval hypothesis: {hypothesis['statement']}"
@@ -208,16 +296,28 @@ class SupervisorAgent:
 
         publish(
             "generation",
-            "warning" if generation_errors else "completed",
+            "warning" if generation_errors or generation_warnings else "completed",
             "Discovering evidence and generating hypotheses",
-            f"Generated {len(new_hypotheses)} candidate hypotheses from {len(generation_sources)} evidence sources.",
+            (
+                f"Generated {len(new_hypotheses)} candidate hypotheses from "
+                f"{len(generation_sources)} validated evidence sources."
+                if evidence_consumed
+                else (
+                    f"Retrieved and validated {len(generation_sources)} evidence sources; "
+                    "hypothesis generation was not executed."
+                )
+            ),
             details=generation_details,
             elapsed_seconds=time.perf_counter() - phase_started,
             sources=generation_sources,
+            source_count=searched_source_count,
         )
 
         if generation_errors:
             cycle_details["errors"] = generation_errors
+        if generation_warnings:
+            warnings = cycle_details.setdefault("warnings", [])
+            warnings.extend(warning for warning in generation_warnings if warning not in warnings)
 
         return new_hypotheses
 
@@ -255,10 +355,8 @@ class SupervisorAgent:
                 [h.hypothesis_id for h in rejected_hypos],
             )
 
-        # Attempt to revise REVISE-flagged hypotheses (QG-07).
-        revise_hypos = reflection_routing.get("revise", [])
-        if revise_hypos and hasattr(self.reflection_agent, "revise_hypotheses"):
-            self.reflection_agent.revise_hypotheses(revise_hypos, research_goal)
+        # Keep reviewed versions immutable. Evolution consumes the REVISE
+        # report and creates a child that must pass Reflection independently.
 
         cycle_details.setdefault("steps", {})[step_name] = {
             "hypotheses": [h.to_dict() for h in active_hypos],
@@ -301,8 +399,27 @@ class SupervisorAgent:
             context,
             research_goal,
             new_hypotheses=new_hypotheses or [],
+            proximity_data=getattr(context, "proximity_analysis", None),
         )
         ranking_results = context.tournament_results[start:]
+        ranked_scores = {
+            hypothesis.hypothesis_id: round(float(hypothesis.elo_score), 6) for hypothesis in rankable_hypos
+        }
+        completed_results = [r for r in ranking_results if r.get("outcome") in {"A", "B", "TIE"}]
+        if ranked_scores and completed_results:
+            supervisor_state = context.supervisor_state
+            snapshots = supervisor_state.setdefault("elo_snapshots", [])
+            snapshots.append(
+                {
+                    "iteration": context.iteration_number,
+                    "step": step_name,
+                    "ratings": ranked_scores,
+                    "top_elo": max(ranked_scores.values()),
+                    "comparison_count": len(completed_results),
+                }
+            )
+            # Long-running sessions need bounded scheduling memory.
+            del snapshots[:-20]
         cycle_details.setdefault("steps", {})[step_name] = {
             "hypotheses": [h.to_dict() for h in rankable_hypos],
             "tournament_results": ranking_results,
@@ -395,8 +512,12 @@ class SupervisorAgent:
         if not isinstance(proximity_result, dict):
             proximity_result = {}
 
-        proximity_graph = proximity_result.get("graph") if isinstance(proximity_result.get("graph"), dict) else proximity_result
-        adjacency_graph = proximity_graph.get("adjacency_graph") if isinstance(proximity_graph.get("adjacency_graph"), dict) else {}
+        proximity_graph = (
+            proximity_result.get("graph") if isinstance(proximity_result.get("graph"), dict) else proximity_result
+        )
+        adjacency_graph = (
+            proximity_graph.get("adjacency_graph") if isinstance(proximity_graph.get("adjacency_graph"), dict) else {}
+        )
         nodes = proximity_graph.get("nodes") if isinstance(proximity_graph.get("nodes"), (list, tuple)) else []
         edges = proximity_graph.get("edges") if isinstance(proximity_graph.get("edges"), (list, tuple)) else []
 
@@ -429,6 +550,7 @@ class SupervisorAgent:
         publish: Callable[..., None],
         cycle_details: Dict[str, Any],
         proximity_result: Optional[Dict[str, Any]] = None,
+        research_goal: Optional[ResearchGoal] = None,
     ) -> Dict[str, Any]:
         """Execute meta-review synthesis and feedback generation."""
         logger.info("Supervisor Step: Meta-Review")
@@ -445,7 +567,7 @@ class SupervisorAgent:
             adjacency_graph = proximity_graph.get("adjacency_graph", proximity_result.get("adjacency_graph", {}))
 
         overview = self.meta_review_agent.summarize_and_feedback(
-            context, adjacency_graph, proximity_data=proximity_result
+            context, adjacency_graph, proximity_data=proximity_result, research_goal=research_goal
         )
         cycle_details["meta_review"] = overview
         cycle_details.setdefault("steps", {})["meta_review"] = overview
@@ -489,6 +611,7 @@ class SupervisorAgent:
             details: Optional[List[str]] = None,
             elapsed_seconds: Optional[float] = None,
             sources: Optional[List[Mapping[str, Any]]] = None,
+            source_count: Optional[int] = None,
         ) -> None:
             event: Dict[str, Any] = {
                 "step": step,
@@ -497,7 +620,7 @@ class SupervisorAgent:
                 "summary": summary,
                 "details": details or [],
                 "sources": sources or [],
-                "source_count": len(sources or []),
+                "source_count": max(len(sources or []), int(source_count or 0)),
             }
             if elapsed_seconds is not None:
                 event["elapsed_seconds"] = elapsed_seconds
@@ -515,6 +638,10 @@ class SupervisorAgent:
         # 1. Generation
         new_hypotheses = self.step_generation(research_goal, context, publish, cycle_details)
 
+        if execution_cancelled():
+            cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
+            return cycle_details
+
         # 2. Reflection
         reflection_routing = self.step_reflection(
             research_goal,
@@ -525,6 +652,10 @@ class SupervisorAgent:
             step_name="reflection",
         )
         rankable_hypos = reflection_routing["accepted"]
+
+        if execution_cancelled():
+            cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
+            return cycle_details
 
         proximity_result = self.proximity_agent.get_proximity_analysis(
             context,
@@ -581,7 +712,9 @@ class SupervisorAgent:
 
         # 7. Meta-review
         proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
-        self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
+        self.step_meta_review(
+            context, publish, cycle_details, proximity_result=proximity_result, research_goal=research_goal
+        )
 
         context.iteration_number += 1
         logger.info("--- Cycle %d Complete ---", context.iteration_number)
@@ -616,6 +749,7 @@ class SupervisorAgent:
             details: Optional[List[str]] = None,
             elapsed_seconds: Optional[float] = None,
             sources: Optional[List[Mapping[str, Any]]] = None,
+            source_count: Optional[int] = None,
         ) -> None:
             event: Dict[str, Any] = {
                 "step": step,
@@ -624,7 +758,7 @@ class SupervisorAgent:
                 "summary": summary,
                 "details": details or [],
                 "sources": sources or [],
-                "source_count": len(sources or []),
+                "source_count": max(len(sources or []), int(source_count or 0)),
             }
             if elapsed_seconds is not None:
                 event["elapsed_seconds"] = elapsed_seconds
@@ -642,21 +776,92 @@ class SupervisorAgent:
         proximity_result: Optional[Dict[str, Any]] = None
         last_new_hypotheses: List[Hypothesis] = []
         last_evolved_hypotheses: List[Hypothesis] = []
+        task_queue = deque()
+        context.supervisor_state["status"] = "running"
+        context.supervisor_state["pending_tasks"] = []
 
         step_count = 0
+        generation_step_count = 0
+        stopped_reason = None
         while step_count < max_steps:
+            if execution_cancelled():
+                cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
+                publish(
+                    "execution_budget",
+                    "warning",
+                    "Stopping at the cycle time limit",
+                    "No additional agent work will be scheduled.",
+                )
+                break
             steps_remaining = max_steps - step_count
 
-            # Assess state and plan next action
-            decision = self.planner.plan_next_action(
-                context,
-                research_goal,
-                history=supervisor_decisions,
-                steps_remaining=steps_remaining,
-                planner_mode=planner_mode,
-                proximity_data=proximity_result,
-            )
+            if not task_queue:
+                planned = self.planner.plan_next_action(
+                    context,
+                    research_goal,
+                    history=supervisor_decisions,
+                    steps_remaining=steps_remaining,
+                    planner_mode=planner_mode,
+                    proximity_data=proximity_result,
+                )
+                task_queue.append(planned)
+                context.supervisor_state["pending_tasks"] = [item.to_dict() for item in task_queue]
+
+            decision = task_queue.popleft()
+            context.supervisor_state["pending_tasks"] = [item.to_dict() for item in task_queue]
+            requested_action = decision.action
+            finalization_gate = None
+            if decision.action == "FINALIZE":
+                finalization_gate = evaluate_finalization_readiness(context, research_goal)
+                if not finalization_gate["ready"]:
+                    if finalization_gate["accepted_count"] < finalization_gate["required_accepted_count"]:
+                        decision.action = "GENERATE"
+                        decision.reasoning = (
+                            "Finalization gate requires more accepted hypotheses; returning to generation."
+                        )
+                    elif finalization_gate["unranked_finalist_ids"]:
+                        decision.action = "RANK"
+                        decision.reasoning = (
+                            "Finalization gate found unranked finalists; returning them to the tournament."
+                        )
+                        decision.target_hypothesis_ids = list(finalization_gate["finalist_ids"])
+                    elif finalization_gate["missing_evidence_ids"]:
+                        decision.action = "EVOLVE"
+                        decision.reasoning = (
+                            "Finalization gate found evidence gaps; evolving finalists with grounding strategies."
+                        )
+
+            if decision.action == "GENERATE" and generation_step_count >= self.max_generation_steps_per_cycle:
+                active_hypotheses = context.get_active_hypotheses()
+                routing = _reflection_routing(active_hypotheses)
+                actions_taken = {
+                    str(item.get("action", "")).upper() for item in supervisor_decisions if isinstance(item, dict)
+                }
+                if routing["unreviewed"]:
+                    decision.action = "REFLECT"
+                    decision.reasoning = (
+                        "The bounded Generation batch is complete; reviewing its remaining candidates "
+                        "instead of repeating retrieval and generation."
+                    )
+                    decision.target_hypothesis_ids = [hypothesis.hypothesis_id for hypothesis in routing["unreviewed"]]
+                elif active_hypotheses and "EVOLVE" not in actions_taken:
+                    decision.action = "EVOLVE"
+                    decision.reasoning = (
+                        "The bounded Generation batch is complete but the acceptance gate is not met; "
+                        "using one Evolution pass to repair and diversify the strongest existing candidates."
+                    )
+                else:
+                    decision.action = "FINALIZE"
+                    decision.reasoning = (
+                        "The Cycle has exhausted its bounded Generation and Evolution opportunities; "
+                        "preserving the reviewed results for the next Cycle."
+                    )
+                    stopped_reason = "generation_budget_exhausted"
+
             decision_dict = decision.to_dict()
+            if requested_action != decision.action:
+                decision_dict["requested_action"] = requested_action
+                decision_dict["quality_gate"] = finalization_gate
             supervisor_decisions.append(decision_dict)
 
             publish(
@@ -677,7 +882,14 @@ class SupervisorAgent:
                 break
 
             elif decision.action == "GENERATE":
+                generation_step_count += 1
                 last_new_hypotheses = self.step_generation(research_goal, context, publish, cycle_details)
+                if not last_new_hypotheses and not context.get_active_hypotheses() and cycle_details.get("errors"):
+                    # Generation already exhausted its bounded retrieval/repair
+                    # attempts. Repeating the entire pipeline wastes minutes.
+                    stopped_reason = "generation_failed"
+                    logger.warning("Stopping empty research cycle after generation failed.")
+                    break
 
             elif decision.action == "REFLECT":
                 target_hypos = None
@@ -695,9 +907,7 @@ class SupervisorAgent:
                 rankable_hypos = routing["accepted"]
                 target_hypos = rankable_hypos
                 if decision.target_hypothesis_ids:
-                    filtered_targets = [
-                        h for h in rankable_hypos if h.hypothesis_id in decision.target_hypothesis_ids
-                    ]
+                    filtered_targets = [h for h in rankable_hypos if h.hypothesis_id in decision.target_hypothesis_ids]
                     if len(filtered_targets) >= 2:
                         target_hypos = filtered_targets
 
@@ -707,7 +917,7 @@ class SupervisorAgent:
                     publish,
                     cycle_details,
                     target_hypos=target_hypos,
-                    new_hypotheses=last_new_hypotheses or last_evolved_hypotheses,
+                    new_hypotheses=last_evolved_hypotheses or last_new_hypotheses,
                     step_name=f"ranking_{step_count + 1}",
                 )
 
@@ -718,15 +928,52 @@ class SupervisorAgent:
                 proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
 
             elif decision.action == "META_REVIEW":
-                self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
+                self.step_meta_review(
+                    context, publish, cycle_details, proximity_result=proximity_result, research_goal=research_goal
+                )
 
             step_count += 1
 
         # If meta-review was never run, perform a final synthesis
-        if "meta_review" not in cycle_details.get("steps", {}):
+        if not execution_cancelled() and "meta_review" not in cycle_details.get("steps", {}):
             if proximity_result is None and len(context.get_active_hypotheses()) >= 2:
                 proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
-            self.step_meta_review(context, publish, cycle_details, proximity_result=proximity_result)
+            self.step_meta_review(
+                context, publish, cycle_details, proximity_result=proximity_result, research_goal=research_goal
+            )
+
+        finalization = evaluate_finalization_readiness(context, research_goal)
+        finalization["status"] = "completed" if finalization["ready"] else (stopped_reason or "budget_exhausted")
+        cycle_details["finalization"] = finalization
+        cycle_details.setdefault("steps", {})["finalization"] = finalization
+        context.supervisor_state["status"] = "completed" if finalization["ready"] else "incomplete"
+        context.supervisor_state["pending_tasks"] = [item.to_dict() for item in task_queue]
+        context.supervisor_state["last_finalization"] = dict(finalization)
+        cycle_details["supervisor_state"] = {
+            "status": context.supervisor_state["status"],
+            "pending_tasks": list(context.supervisor_state["pending_tasks"]),
+            "elo_snapshots": list(context.supervisor_state.get("elo_snapshots", [])),
+            "last_finalization": dict(finalization),
+        }
+        publish(
+            "finalization",
+            "completed" if finalization["ready"] else "warning",
+            "Checking research-cycle readiness",
+            (
+                "Finalization quality gate passed."
+                if finalization["ready"]
+                else (
+                    "Generation could not produce verified candidates; inspect the reported evidence or model error."
+                    if stopped_reason == "generation_failed"
+                    else (
+                        "The per-Cycle Generation budget ended; start another Cycle to request a new batch."
+                        if stopped_reason == "generation_budget_exhausted"
+                        else "Compute budget ended before every finalization requirement passed."
+                    )
+                )
+            ),
+            details=list(finalization["reasons"]),
+        )
 
         context.iteration_number += 1
         logger.info("--- Cycle %d (Dynamic) Complete ---", context.iteration_number)

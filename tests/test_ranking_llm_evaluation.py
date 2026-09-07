@@ -68,6 +68,7 @@ EVALUATOR_LLM_MODEL = os.getenv(
 # Test data
 # ---------------------------------------------------------------------------
 
+
 def _reflection_report(
     novelty=7.0,
     feasibility=7.0,
@@ -92,14 +93,14 @@ def _reflection_report(
         recommendation="ACCEPT",
         overall_confidence=8.0,
         claims=[
-        ClaimAssessment(
-            claim="...",
-            status="SUPPORTED",
-            confidence=8.0,
-            supporting_source_ids=["S1"],
-            contradictory_source_ids=[],
-        )
-    ],
+            ClaimAssessment(
+                claim="...",
+                status="SUPPORTED",
+                confidence=8.0,
+                supporting_source_ids=["S1"],
+                contradictory_source_ids=[],
+            )
+        ],
     )
 
 
@@ -167,7 +168,6 @@ EVALUATION_CASES = [
             ),
         },
     },
-
     {
         "case_id": "case_02",
         "description": "Clear scientific validity advantage",
@@ -206,13 +206,11 @@ EVALUATION_CASES = [
             ),
         },
     },
-
     {
         "case_id": "case_03",
         "description": "Potential implementation risk",
         "goal": (
-            "Improve anomaly detection while maintaining a fair comparison "
-            "between baseline and proposed approaches."
+            "Improve anomaly detection while maintaining a fair comparison between baseline and proposed approaches."
         ),
         "hypothesis_a": {
             "text": (
@@ -249,14 +247,10 @@ EVALUATION_CASES = [
             ),
         },
     },
-
     {
         "case_id": "case_04",
         "description": "Strong evidence advantage",
-        "goal": (
-            "Identify a robust method for detecting malicious network "
-            "traffic."
-        ),
+        "goal": ("Identify a robust method for detecting malicious network traffic."),
         "hypothesis_a": {
             "text": (
                 "Use an established intrusion detection method supported by "
@@ -294,6 +288,7 @@ EVALUATION_CASES = [
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+
 def _format_hypothesis(hypothesis):
     """Format a hypothesis for the evaluator."""
 
@@ -317,7 +312,6 @@ Weaknesses:
 {chr(10).join(report.weaknesses) if report.weaknesses else "None"}
 """
 
-
     return f"""
 Hypothesis ID:
 {hypothesis.hypothesis_id}
@@ -333,6 +327,7 @@ Reflection Report:
 # ---------------------------------------------------------------------------
 # LLM evaluator
 # ---------------------------------------------------------------------------
+
 
 def evaluate_ranking_decision(
     research_goal,
@@ -463,10 +458,7 @@ ABSTAIN
 
     evaluation = _parse_evaluator_response(response)
 
-    evaluation["decision_agreement"] = (
-        evaluation["evaluator_decision"]
-        == ranking_decision.outcome
-    )
+    evaluation["decision_agreement"] = evaluation["evaluator_decision"] == ranking_decision.outcome
 
     return evaluation
 
@@ -474,6 +466,7 @@ ABSTAIN
 # ---------------------------------------------------------------------------
 # Response parser
 # ---------------------------------------------------------------------------
+
 
 def _parse_evaluator_response(response):
     """Extract evaluator JSON from the LLM response."""
@@ -498,9 +491,7 @@ def _parse_evaluator_response(response):
     try:
         result = json.loads(response)
     except json.JSONDecodeError as exc:
-        raise AssertionError(
-            f"Evaluator did not return valid JSON:\n{response}"
-        ) from exc
+        raise AssertionError(f"Evaluator did not return valid JSON:\n{response}") from exc
 
     required_fields = [
         "evaluator_decision",
@@ -516,9 +507,7 @@ def _parse_evaluator_response(response):
     ]
 
     for field in required_fields:
-        assert field in result, (
-            f"Evaluator response missing required field: {field}"
-        )
+        assert field in result, f"Evaluator response missing required field: {field}"
 
     assert result["evaluator_decision"] in {
         "A",
@@ -541,9 +530,7 @@ def _parse_evaluator_response(response):
     for field in score_fields:
         score = float(result[field])
 
-        assert 1 <= score <= 5, (
-            f"{field} must be between 1 and 5, got {score}"
-        )
+        assert 1 <= score <= 5, f"{field} must be between 1 and 5, got {score}"
 
     return result
 
@@ -551,6 +538,7 @@ def _parse_evaluator_response(response):
 # ---------------------------------------------------------------------------
 # Score calculation
 # ---------------------------------------------------------------------------
+
 
 def _calculate_overall_score(result):
     """Calculate the average quality score independently."""
@@ -573,6 +561,7 @@ def _calculate_overall_score(result):
 # Main LLM evaluation experiment
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 def test_ranking_agent_llm_evaluation():
     """
@@ -592,7 +581,6 @@ def test_ranking_agent_llm_evaluation():
     print(f"Evaluator model: {EVALUATOR_LLM_MODEL}")
 
     for case in EVALUATION_CASES:
-
         print("\n" + "-" * 70)
         print(f"Case: {case['case_id']}")
         print(f"Description: {case['description']}")
@@ -648,80 +636,40 @@ def test_ranking_agent_llm_evaluation():
         results.append(evaluation)
 
         print("\nIndependent LLM Evaluation:")
-        print(
-            f"  Evaluator decision: "
-            f"{evaluation['evaluator_decision']}"
-        )
+        print(f"  Evaluator decision: {evaluation['evaluator_decision']}")
 
-        print(
-            f"  Agreement: "
-            f"{evaluation['decision_agreement']}"
-        )
+        print(f"  Agreement: {evaluation['decision_agreement']}")
 
-        print(
-            f"  Overall quality: "
-            f"{calculated_score:.2f}/5.00"
-        )
+        print(f"  Overall quality: {calculated_score:.2f}/5.00")
 
-        print(
-            f"  Quality percentage: "
-            f"{(calculated_score / 5) * 100:.2f}%"
-        )
+        print(f"  Quality percentage: {(calculated_score / 5) * 100:.2f}%")
 
-        print(
-            f"  Justification: "
-            f"{evaluation['justification']}"
-        )
+        print(f"  Justification: {evaluation['justification']}")
 
     # -------------------------------------------------------------------
     # Aggregate results
     # -------------------------------------------------------------------
 
-    agreement_count = sum(
-        1
-        for result in results
-        if result["decision_agreement"]
-    )
+    agreement_count = sum(1 for result in results if result["decision_agreement"])
 
-    agreement_rate = (
-        agreement_count / len(results)
-        if results
-        else 0
-    )
+    agreement_rate = agreement_count / len(results) if results else 0
 
-    average_quality = mean(
-        result["calculated_overall_score"]
-        for result in results
-    )
+    average_quality = mean(result["calculated_overall_score"] for result in results)
 
-    quality_percentage = (
-        average_quality / 5
-    ) * 100
+    quality_percentage = (average_quality / 5) * 100
 
     print("\n")
     print("=" * 70)
     print("FINAL LLM EVALUATION RESULTS")
     print("=" * 70)
 
-    print(
-        f"Total evaluation cases: {len(results)}"
-    )
+    print(f"Total evaluation cases: {len(results)}")
 
-    print(
-        f"Evaluator agreement: "
-        f"{agreement_count}/{len(results)} "
-        f"({agreement_rate * 100:.2f}%)"
-    )
+    print(f"Evaluator agreement: {agreement_count}/{len(results)} ({agreement_rate * 100:.2f}%)")
 
-    print(
-        f"Average quality score: "
-        f"{average_quality:.2f}/5.00"
-    )
+    print(f"Average quality score: {average_quality:.2f}/5.00")
 
-    print(
-        f"Average quality percentage: "
-        f"{quality_percentage:.2f}%"
-    )
+    print(f"Average quality percentage: {quality_percentage:.2f}%")
 
     print("=" * 70)
 

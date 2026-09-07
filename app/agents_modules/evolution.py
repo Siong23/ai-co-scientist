@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
-from ..utils import logger
+from ..utils import execution_cancelled, logger
 from .evolution_helpers import (
     EVOLUTION_STRATEGIES,
     EvolutionStrategy,
@@ -24,6 +25,8 @@ class EvolutionAgent:
         strategies: tuple[EvolutionStrategy, ...] | None = None,
         max_candidates_per_cycle: int | None = None,
         quality_repair_attempts: int | None = None,
+        transport_retry_attempts: int | None = None,
+        max_workers: int | None = None,
     ):
         evolution_config = config.get("evolution", {})
         configured = tuple(evolution_config.get("strategies", EVOLUTION_STRATEGIES))
@@ -36,7 +39,22 @@ class EvolutionAgent:
             0,
             int(configured_repairs if quality_repair_attempts is None else quality_repair_attempts),
         )
+        configured_transport_retries = evolution_config.get("transport_retry_attempts", 2)
+        self.transport_retry_attempts = max(
+            0,
+            int(configured_transport_retries if transport_retry_attempts is None else transport_retry_attempts),
+        )
         self.max_tokens = int(config.get("llm_max_tokens", {}).get("evolution", 2048))
+        self.max_workers = max(
+            1,
+            int(
+                max_workers
+                if max_workers is not None
+                else evolution_config.get(
+                    "max_workers", config.get("agent_parallelism", {}).get("evolution_workers", 3)
+                )
+            ),
+        )
 
     def _strategies_for_cycle(self, context: ContextMemory, parent_count: int) -> list[EvolutionStrategy]:
         """Rotate through the strategy library while respecting parent-count requirements."""
@@ -68,8 +86,11 @@ class EvolutionAgent:
             getattr(context, "proximity_analysis", None),
         )
         strategies = self._strategies_for_cycle(context, len(top_candidates))
-        new_hypotheses = []
-        for strategy in strategies:
+
+        def evolve_one(strategy: EvolutionStrategy) -> tuple[Hypothesis | None, list[dict]]:
+            diagnostics: list[dict] = []
+            if execution_cancelled():
+                return None, diagnostics
             parents = top_candidates if strategy in {"combination", "inspiration", "out_of_box"} else top_candidates[:1]
             evidence_sources = resolve_parent_evidence(
                 parents,
@@ -81,12 +102,13 @@ class EvolutionAgent:
                 research_goal,
                 max_tokens=self.max_tokens,
                 evidence_sources=evidence_sources,
-                diagnostics=context.last_evolution_attempts,
+                diagnostics=diagnostics,
                 quality_repair_attempts=self.quality_repair_attempts,
+                transport_retry_attempts=self.transport_retry_attempts,
                 meta_review_feedback=getattr(context, "meta_review_feedback", None),
             )
             if candidate is None:
-                continue
+                return None, diagnostics
             evolved = create_evolved_hypothesis(
                 candidate,
                 parents,
@@ -99,7 +121,18 @@ class EvolutionAgent:
                 strategy,
                 evolved.parent_ids,
             )
-            new_hypotheses.append(evolved)
+            return evolved, diagnostics
+
+        max_workers = min(self.max_workers, len(strategies))
+        if max_workers <= 1:
+            results = [evolve_one(strategy) for strategy in strategies]
+        else:
+            logger.info("Evolving %d candidates with %d workers.", len(strategies), max_workers)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = list(executor.map(evolve_one, strategies))
+        for _, diagnostics in results:
+            context.last_evolution_attempts.extend(diagnostics)
+        new_hypotheses = [candidate for candidate, _ in results if candidate is not None]
 
         # A stitched fallback is not a new scientific hypothesis and can receive an
         # artificial ranking advantage from its length. Keep the parents unchanged

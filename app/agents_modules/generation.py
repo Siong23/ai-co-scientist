@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Tuple
+
+from langchain_core.documents import Document
 
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
@@ -18,13 +21,14 @@ from ..rag_retriever import (
     format_documents_for_prompt,
     serialize_documents,
 )
-from ..utils import generate_unique_id, logger, redact_secrets
+from ..utils import execution_cancelled, generate_unique_id, logger, redact_secrets
 from .generation_helpers import (
     AssumptionAssessment,
     EvidenceCoverage,
     FocusArea,
     LiteratureSynthesis,
     _resolve_retrieved_source_ids,
+    build_evidence_queries,
     call_llm_for_assumption_analysis,
     call_llm_for_debate_refinement,
     call_llm_for_evidence_coverage,
@@ -67,6 +71,10 @@ Determine:
    Keep the primary hypothesis minimal: do not add an algorithm, mechanism,
    dataset, metric, protocol, or architecture absent from the user's goal.
    Put optional mechanisms in search angles instead of assuming them here.
+
+Keep the plan compact: use at most 5 key entities, 5 constraints, 6
+sub-questions, 5 evidence requirements, and 3 ambiguities. Keep every list
+item to at most 20 words.
 
 Do not provide the final answer.
 Do not generate search queries.
@@ -174,6 +182,9 @@ For each candidate:
    hypothesis, but it must not be presented as an established fact.
 3. Identify the closest retrieved prior art when academic sources are supplied
    and determine whether the proposed contribution substantially duplicates it.
+   Inspect related-work passages inside the supplied full text, not only paper
+   titles and abstracts. A renamed combination of known prediction, learning,
+   coordination, and resource-allocation components is not a new mechanism.
 4. Judge whether the candidate synthesizes a genuine unresolved interaction
    across retrieved sources instead of merely combining keywords.
 5. Require a clear, plausible intermediate mechanism from intervention to
@@ -195,6 +206,11 @@ fractions on a 0-to-1 scale. The draft_unsupported fields record problems found
 in the original candidate. The remaining_unsupported fields must describe only
 problems still present in final_hypothesis after revision; return empty arrays
 when the final version has fixed them.
+Use conservative novelty anchors: score 0-4 when substantially the same
+intervention, control paradigm, resource target, and outcome already appear in
+the supplied prior art; score 5-6 for an incremental recombination or a new
+evaluation condition; reserve 8-10 for a genuinely new mechanism or
+experimental design with a clearly stated residual contribution.
 Do not expose private chain-of-thought; provide concise audit findings only.
 
 Return only valid JSON:
@@ -283,6 +299,8 @@ class GenerationAgent:
             1000,
             int(rag_config.get("max_grading_context_chars", 24000)),
         )
+        configured_grading_workers = config.get("agent_parallelism", {}).get("generation_grading_workers", 2)
+        self.grading_workers = max(1, min(2, int(configured_grading_workers)))
         # Novelty and grounding audit toggle
         self.audit_enabled = (
             bool(rag_config.get("hypothesis_audit_enabled", False)) if audit_enabled is None else bool(audit_enabled)
@@ -314,6 +332,7 @@ class GenerationAgent:
 
         # Vector paper library for full-text PDF caching and embeddings
         self.paper_library = paper_library or ChromaPaperLibrary(embeddings=self.rag_retriever.embeddings)
+        self.last_evidence_gate_diagnostics: list[dict] = []
 
     def _format_meta_review_feedback(self, context: ContextMemory) -> str:
         """Format prior-cycle meta-review critiques and suggestions for prompt injection."""
@@ -352,13 +371,36 @@ class GenerationAgent:
 
         return self.rag_retriever.retrieve_original_goal(research_goal.description)
 
-    def _enrich_with_full_text(self, documents, research_goal: ResearchGoal):
+    def _enrich_with_full_text(
+        self,
+        documents,
+        research_goal: ResearchGoal,
+        explicit_requirements=(),
+    ):
         """Use relevant PDF bodies when available without blocking generation."""
 
         try:
+            evidence_queries = []
+            for query in build_evidence_queries(
+                research_goal.description,
+                tuple(explicit_requirements),
+            ):
+                requirement = next(
+                    (aspect for aspect in explicit_requirements if query.startswith(aspect.description)),
+                    None,
+                )
+                evidence_queries.append(
+                    SearchQuery(
+                        query=query,
+                        sub_question=requirement.description if requirement else research_goal.description,
+                        purpose="Retrieve exact full-text evidence",
+                        source_type="academic",
+                        evidence_requirement_id=(requirement.aspect_id if requirement else None),
+                    )
+                )
             return self.paper_library.enrich_documents(
                 documents,
-                research_goal.description,
+                tuple(evidence_queries),
             )
         except Exception as exc:
             logger.warning(
@@ -380,6 +422,7 @@ class GenerationAgent:
         self,
         documents,
         research_goal: ResearchGoal,
+        explicit_requirements=(),
     ):
         """Retain only successfully indexed full text when strict mode is enabled."""
 
@@ -389,8 +432,10 @@ class GenerationAgent:
         enriched_documents = self._enrich_with_full_text(
             documents,
             research_goal,
+            explicit_requirements,
         )
         retained_documents = []
+        gate_diagnostics = []
         for document in enriched_documents:
             metadata = document.metadata
             source_id = str(metadata.get("source_id", "")).casefold()
@@ -400,15 +445,47 @@ class GenerationAgent:
                 or provider == "tavily"
                 or source_id.startswith(("web:", "tavily:"))
             )
-            if (is_web and metadata.get("content_extracted") is True) or metadata.get("full_text_indexed") is True:
-                retained_documents.append(document)
-        if not retained_documents and enriched_documents:
-            logger.warning(
-                "No full-text indexed documents available; falling back to %d abstract-only source(s).",
-                len(enriched_documents),
+            has_full_text_passage = bool(metadata.get("full_text_chunks_used")) or any(
+                isinstance(ref, dict)
+                and ref.get("evidence_type") == "full_text"
+                and isinstance(ref.get("text"), str)
+                and ref["text"].strip()
+                for ref in metadata.get("evidence_refs", ())
             )
-            return list(enriched_documents)
+            retained = False
+            if is_web and metadata.get("content_extracted") is True:
+                retained = True
+                rejection_reason = "retained_extracted_web_content"
+            elif is_web:
+                rejection_reason = "web_content_not_extracted"
+            elif metadata.get("index_status") == "PARTIAL" or metadata.get("index_truncated") is True:
+                rejection_reason = "partial_index"
+            elif metadata.get("full_text_indexed") is not True:
+                rejection_reason = "source_not_committed"
+            elif not has_full_text_passage:
+                rejection_reason = "no_retrieved_full_text_passage"
+            else:
+                retained = True
+                rejection_reason = "retained_committed_full_text_passage"
 
+            metadata["strict_gate_retained"] = retained
+            metadata["strict_gate_rejection_reason"] = rejection_reason
+            if retained:
+                retained_documents.append(document)
+            source_id_value = str(metadata.get("source_id", ""))
+            gate_diagnostics.append(
+                {
+                    "candidate_source_id": source_id_value,
+                    "strict_gate_retained": retained,
+                    "strict_gate_rejection_reason": rejection_reason,
+                    "selected_chunk_ids": list(metadata.get("selected_chunk_ids", ())),
+                    "index_status": metadata.get("index_status"),
+                }
+            )
+            record_gate = getattr(self.paper_library, "record_strict_gate", None)
+            if callable(record_gate):
+                record_gate(source_id_value, retained=retained, reason=rejection_reason)
+        self.last_evidence_gate_diagnostics = gate_diagnostics
         logger.info(
             "Evidence gate retained %d/%d source(s): web sources require "
             "extracted content; academic sources require indexed full text.",
@@ -416,6 +493,72 @@ class GenerationAgent:
             len(enriched_documents),
         )
         return retained_documents
+
+    def _persist_evidence_diagnostics(
+        self,
+        context: ContextMemory,
+        candidate_documents,
+        documents_for_grading,
+        coverage=None,
+        corrective_history=(),
+    ) -> None:
+        """Keep the evidence funnel and per-candidate loss reasons in run JSON."""
+
+        raw_library_diagnostics = getattr(self.paper_library, "last_evidence_diagnostics", [])
+        library_diagnostics = (
+            list(raw_library_diagnostics) if isinstance(raw_library_diagnostics, (list, tuple)) else []
+        )
+        if coverage is not None:
+            record_coverage = getattr(self.paper_library, "record_coverage", None)
+            if callable(record_coverage):
+                record_coverage(coverage.aspect_source_ids)
+                raw_library_diagnostics = getattr(self.paper_library, "last_evidence_diagnostics", [])
+                library_diagnostics = (
+                    list(raw_library_diagnostics) if isinstance(raw_library_diagnostics, (list, tuple)) else []
+                )
+        if not library_diagnostics:
+            library_diagnostics = list(self.last_evidence_gate_diagnostics)
+
+        raw_hits = sum(int(item.get("results", 0)) for item in self.rag_retriever.last_search_stats)
+        unique_candidates = max(
+            len(candidate_documents),
+            int(getattr(self.rag_retriever, "unique_candidate_count", 0)),
+        )
+        selected_sources = max(
+            len(candidate_documents),
+            int(getattr(self.rag_retriever, "selected_source_count", 0)),
+        )
+        acquired_sources = {
+            str(item.get("candidate_source_id", ""))
+            for item in library_diagnostics
+            if item.get("acquisition_attempted")
+        }
+        committed_sources = {
+            str(item.get("candidate_source_id", ""))
+            for item in library_diagnostics
+            if item.get("index_status") == "COMMITTED"
+        }
+        selected_chunk_ids = {
+            str(chunk_id) for item in library_diagnostics for chunk_id in item.get("selected_chunk_ids", ()) if chunk_id
+        }
+        covered_source_ids = (
+            {source_id for source_ids in coverage.aspect_source_ids.values() for source_id in source_ids}
+            if coverage is not None
+            else set()
+        )
+        context.last_generation_diagnostics["evidence_pipeline"] = library_diagnostics
+        context.last_generation_diagnostics["corrective_history"] = list(corrective_history)
+        context.last_generation_diagnostics["evidence_funnel"] = {
+            "raw_search_hits": raw_hits,
+            "unique_candidates": unique_candidates,
+            "selected_sources": selected_sources,
+            "acquisition_attempts": len(acquired_sources),
+            "committed_sources": len(committed_sources),
+            "retrieved_passages": len(selected_chunk_ids),
+            "coverage_approved_sources": len(covered_source_ids),
+            "generation_consumed_sources": 0,
+            "strict_gate_sources": len(documents_for_grading),
+        }
 
     @staticmethod
     def _build_minimal_fallback_plan(
@@ -438,10 +581,10 @@ class GenerationAgent:
 
     @staticmethod
     def _merge_retrieved_documents(*document_groups):
-        """Merge retrieval rounds while deduplicating arXiv versions."""
+        """Merge retrieval rounds without discarding requirement provenance."""
 
         merged = []
-        seen_ids: set[str] = set()
+        index_by_id: dict[str, int] = {}
 
         for documents in document_groups:
             for document in documents:
@@ -452,11 +595,53 @@ class GenerationAgent:
                     source_id,
                     flags=re.IGNORECASE,
                 )
-                if not canonical_id or canonical_id in seen_ids:
+                if not canonical_id:
+                    continue
+                if canonical_id not in index_by_id:
+                    index_by_id[canonical_id] = len(merged)
+                    merged.append(document)
                     continue
 
-                seen_ids.add(canonical_id)
-                merged.append(document)
+                existing_index = index_by_id[canonical_id]
+                existing = merged[existing_index]
+                metadata = dict(existing.metadata)
+                incoming_metadata = document.metadata
+                for key, value in incoming_metadata.items():
+                    if key not in metadata or metadata[key] in (None, "", (), []):
+                        metadata[key] = value
+
+                query_contexts = []
+                for context in (
+                    *(metadata.get("query_contexts") or ()),
+                    *(incoming_metadata.get("query_contexts") or ()),
+                ):
+                    if isinstance(context, dict) and context not in query_contexts:
+                        query_contexts.append(dict(context))
+                if query_contexts:
+                    metadata["query_contexts"] = tuple(query_contexts)
+
+                reserved_requirement_ids = []
+                for candidate in (existing, document):
+                    for requirement_id in (
+                        *(candidate.metadata.get("reserved_requirement_ids") or ()),
+                        candidate.metadata.get("evidence_requirement_id"),
+                    ):
+                        normalized = str(requirement_id or "").strip()
+                        if normalized and normalized not in reserved_requirement_ids:
+                            reserved_requirement_ids.append(normalized)
+                    for context in candidate.metadata.get("query_contexts") or ():
+                        if not isinstance(context, dict):
+                            continue
+                        normalized = str(context.get("evidence_requirement_id") or "").strip()
+                        if normalized and normalized not in reserved_requirement_ids:
+                            reserved_requirement_ids.append(normalized)
+                if reserved_requirement_ids:
+                    metadata["reserved_requirement_ids"] = reserved_requirement_ids
+
+                merged[existing_index] = Document(
+                    page_content=existing.page_content or document.page_content,
+                    metadata=metadata,
+                )
 
         return merged
 
@@ -464,17 +649,81 @@ class GenerationAgent:
         self,
         coverage,
         missing_aspects,
+        *,
+        exclude_queries=(),
+        strategy_round: int = 0,
     ) -> tuple[str, ...]:
         """Prioritize missing goal requirements and cap one retrieval round."""
 
-        return tuple(
+        excluded = {str(query).strip().casefold() for query in exclude_queries}
+        candidates = tuple(
             dict.fromkeys(
                 [
                     *(aspect.description for aspect in missing_aspects),
                     *coverage.gap_queries,
                 ]
             )
-        )[: self.rag_retriever.query_count]
+        )
+        fresh = tuple(query for query in candidates if query.strip().casefold() not in excluded)
+        if not fresh and missing_aspects:
+            suffixes = (
+                "empirical implementation evaluation",
+                "benchmark measurements limitations",
+                "field deployment case study",
+            )
+            suffix = suffixes[strategy_round % len(suffixes)]
+            fresh = tuple(
+                f"{aspect.description.rstrip('.')} {suffix}"
+                for aspect in missing_aspects
+                if f"{aspect.description.rstrip('.')} {suffix}".casefold() not in excluded
+            )
+        return fresh[: self.rag_retriever.query_count]
+
+    @staticmethod
+    def _tag_corrective_queries(
+        query_texts: tuple[str, ...],
+        missing_aspects,
+    ) -> tuple[SearchQuery, ...]:
+        """Keep missing-requirement identity attached through retrieval/ranking."""
+
+        aspects_by_description = {aspect.description.casefold(): aspect for aspect in missing_aspects}
+        sole_aspect = missing_aspects[0] if len(missing_aspects) == 1 else None
+        tagged_queries = []
+        stop_words = {"and", "for", "the", "with", "from", "into", "this", "that", "real", "time"}
+        for index, query_text in enumerate(query_texts):
+            normalized_query = query_text.casefold()
+            aspect = aspects_by_description.get(normalized_query) or next(
+                (
+                    candidate
+                    for description, candidate in aspects_by_description.items()
+                    if normalized_query.startswith(description.rstrip("."))
+                ),
+                None,
+            )
+            if aspect is None and missing_aspects:
+                query_terms = set(re.findall(r"[a-z0-9]+", normalized_query)) - stop_words
+                scored = [
+                    (
+                        len(
+                            query_terms & (set(re.findall(r"[a-z0-9]+", candidate.description.casefold())) - stop_words)
+                        ),
+                        candidate,
+                    )
+                    for candidate in missing_aspects
+                ]
+                best_score, best_aspect = max(scored, key=lambda item: item[0])
+                aspect = best_aspect if best_score else missing_aspects[index % len(missing_aspects)]
+            aspect = aspect or sole_aspect
+            tagged_queries.append(
+                SearchQuery(
+                    query=query_text,
+                    sub_question=aspect.description if aspect is not None else query_text,
+                    purpose="Fill a missing explicit evidence requirement",
+                    source_type="all",
+                    evidence_requirement_id=aspect.aspect_id if aspect is not None else None,
+                )
+            )
+        return tuple(tagged_queries)
 
     def _run_scientific_debate(
         self,
@@ -624,7 +873,7 @@ Your refined contribution:
         current_documents = list(retrieved_documents)
         current_synthesis = synthesis
 
-        if not self.agentic_research_enabled:
+        if not self.agentic_research_enabled or execution_cancelled():
             return current_documents, current_synthesis, []
 
         # Analyze initial assumptions to guide autonomous exploration
@@ -636,6 +885,9 @@ Your refined contribution:
 
         # Run multi-step agentic research loop up to agentic_max_steps
         for step in range(self.agentic_max_steps):
+            if execution_cancelled():
+                break
+
             # Step A: Ask LLM controller to select next best research action
             decision, decision_error = call_llm_for_research_action(
                 research_goal.description,
@@ -733,9 +985,13 @@ Your refined contribution:
                 )
                 break
 
+            if execution_cancelled():
+                break
+
             prepared_action_documents = self._prepare_candidate_documents(
                 action_documents,
                 research_goal,
+                query_plan.explicit_requirements,
             )
 
             if not prepared_action_documents:
@@ -755,9 +1011,7 @@ Your refined contribution:
             merged_documents = merged_documents[: self.agentic_max_sources]
 
             if len(merged_documents) <= len(current_documents):
-                logger.info(
-                    "Agentic retrieval added no new evidence after deduplication; proceeding to generation."
-                )
+                logger.info("Agentic retrieval added no new evidence after deduplication; proceeding to generation.")
                 break
 
             candidate_context = format_documents_for_prompt(merged_documents)
@@ -789,6 +1043,99 @@ Your refined contribution:
 
         return current_documents, current_synthesis, assumptions
 
+    def _grade_candidate_evidence(
+        self,
+        research_goal: ResearchGoal,
+        query_plan: SearchQueryPlan,
+        candidate_context: str,
+        candidate_source_ids: set[str],
+    ):
+        """Run independent relevance and coverage judgments concurrently."""
+
+        if not candidate_source_ids:
+            return (
+                [],
+                None,
+                EvidenceCoverage(
+                    aspect_source_ids={aspect.aspect_id: () for aspect in query_plan.explicit_requirements},
+                    missing_aspect_ids=tuple(aspect.aspect_id for aspect in query_plan.explicit_requirements),
+                    gap_queries=(research_goal.description,),
+                    reason="No eligible evidence sources are available.",
+                ),
+                None,
+            )
+
+        def grade_relevance():
+            return call_llm_for_relevance_filter(
+                research_goal.description,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
+                explicit_requirements=query_plan.explicit_requirements,
+            )
+
+        def grade_coverage():
+            return call_llm_for_evidence_coverage(
+                research_goal.description,
+                query_plan.explicit_requirements,
+                candidate_context,
+                candidate_source_ids,
+                model=research_goal.llm_model,
+                max_gap_queries=self.rag_retriever.query_count,
+            )
+
+        if self.grading_workers == 1:
+            relevant_source_ids, relevance_error = grade_relevance()
+            coverage, coverage_error = grade_coverage()
+        else:
+            with ThreadPoolExecutor(max_workers=self.grading_workers) as executor:
+                relevance_future = executor.submit(grade_relevance)
+                coverage_future = executor.submit(grade_coverage)
+                relevant_source_ids, relevance_error = relevance_future.result()
+                coverage, coverage_error = coverage_future.result()
+
+        return relevant_source_ids, relevance_error, coverage, coverage_error
+
+    def _plan_and_retrieve_initial(self, research_goal: ResearchGoal):
+        """Plan queries and run the independent original-goal search."""
+
+        def plan_queries():
+            return call_llm_for_search_queries(
+                research_goal.description,
+                model=getattr(research_goal, "query_rewrite_model", research_goal.llm_model),
+                query_count=self.rag_retriever.query_count,
+                research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
+                query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
+                query_fidelity_validator=lambda plan: self.rag_retriever.validate_query_plan_fidelity(
+                    research_goal.description,
+                    plan,
+                ),
+            )
+
+        def retrieve_original_goal():
+            try:
+                return self._retrieve_original_scientific_sources(research_goal)
+            except Exception as exc:
+                logger.warning("Original-goal retrieval failed: %s", redact_secrets(str(exc)))
+                return []
+
+        # A local LM Studio server may unload the chat model while loading the
+        # embedding model (or vice versa). Avoid that cross-model race unless
+        # the operator explicitly opts into concurrent model calls.
+        serialize_lmstudio_calls = bool(config.get("use_lmstudio_embeddings", False)) and bool(
+            config.get("serialize_lmstudio_model_calls", True)
+        )
+        if serialize_lmstudio_calls:
+            query_plan, rewrite_error = plan_queries()
+            candidate_documents = retrieve_original_goal()
+            return query_plan, rewrite_error, candidate_documents
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            retrieval = executor.submit(retrieve_original_goal)
+            query_plan, rewrite_error = plan_queries()
+            candidate_documents = retrieval.result()
+        return query_plan, rewrite_error, candidate_documents
+
     def generate_new_hypotheses(
         self,
         research_goal: ResearchGoal,
@@ -799,45 +1146,39 @@ Your refined contribution:
         num_to_generate = research_goal.num_hypotheses
         gen_temp = research_goal.generation_temperature
         self.rag_retriever.reset_search_stats()
+        begin_library_run = getattr(self.paper_library, "begin_run", None)
+        if callable(begin_library_run):
+            begin_library_run()
+        self.last_evidence_gate_diagnostics = []
+        context.last_retrieved_sources = []
+        context.last_generation_diagnostics = {
+            "evidence_retrieval": {
+                "status": "running",
+                "source_count": 0,
+            },
+            "literature_synthesis": {"status": "not_started"},
+            "hypothesis_generation": {"status": "not_started"},
+            "warnings": [],
+            "evidence_consumed": False,
+        }
 
-        # ==================================================================
-        # Step 1: Two-stage search query planning
-        # First calls Research Planner (goal analysis & provisional hypotheses),
-        # then calls Query Rewriter (routed search queries & explicit requirements).
-        # ==================================================================
-        query_plan, rewrite_error = call_llm_for_search_queries(
-            research_goal.description,
-            model=getattr(
-                research_goal,
-                "query_rewrite_model",
-                getattr(research_goal, "llm_model", None),
-            ),
-            query_count=self.rag_retriever.query_count,
-            research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
-            query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
-            query_fidelity_validator=lambda plan: self.rag_retriever.validate_query_plan_fidelity(
-                research_goal.description,
-                plan,
-            ),
-        )
+        if execution_cancelled():
+            return [], ["Cycle cancelled before hypothesis generation started."]
 
-        # ==================================================================
-        # Step 2: Initial retrieval with user's unmodified research goal
-        # ==================================================================
-        try:
-            candidate_documents = self._retrieve_original_scientific_sources(research_goal)
-        except Exception as exc:
-            logger.error(
-                "Original-goal retrieval failed: %s",
-                exc,
-                exc_info=True,
-            )
-            candidate_documents = []
+        # Planning and original-goal retrieval are independent. Overlap their
+        # latency while retaining the original goal as the retrieval anchor.
+        query_plan, rewrite_error, candidate_documents = self._plan_and_retrieve_initial(research_goal)
+        if execution_cancelled():
+            return [], ["Cycle cancelled during search planning."]
 
         # If both query planning and initial retrieval fail, abort early
         if (rewrite_error or query_plan is None) and not candidate_documents:
-            context.last_retrieved_sources = []
             error = rewrite_error or "Query rewriting failed."
+            context.last_generation_diagnostics["evidence_retrieval"] = {
+                "status": "failed",
+                "source_count": 0,
+                "detail": error,
+            }
             logger.error(error)
             return [], [error]
 
@@ -878,13 +1219,25 @@ Your refined contribution:
                     exc,
                     exc_info=True,
                 )
-                return [], [f"Expanded RAG retrieval failed: {exc}"]
+                error = f"Expanded RAG retrieval failed: {exc}"
+                context.last_generation_diagnostics["evidence_retrieval"] = {
+                    "status": "failed",
+                    "source_count": 0,
+                    "detail": redact_secrets(error),
+                }
+                return [], [error]
 
         retrieved_documents = []
         coverage = None
         graded_documents = []
         corrective_round = 0
         fallback_attempted = False
+        executed_corrective_queries: set[str] = set()
+        seen_corrective_source_ids: set[str] = {
+            str(document.metadata.get("source_id", "")) for document in candidate_documents
+        }
+        corrective_history: list[dict] = []
+        pending_corrective: dict | None = None
 
         # ==================================================================
         # Step 3: Deterministic/Corrective RAG evidence gate loop
@@ -892,10 +1245,14 @@ Your refined contribution:
         # If coverage is insufficient, issues corrective queries or fallbacks.
         # ==================================================================
         while True:
+            if execution_cancelled():
+                return [], ["Cycle cancelled during evidence evaluation."]
+
             # Filter documents according to full-text indexing requirements
             documents_for_grading = self._prepare_candidate_documents(
                 candidate_documents,
                 research_goal,
+                query_plan.explicit_requirements,
             )
 
             # Format documents into a budget-capped context string for LLM grading
@@ -915,12 +1272,53 @@ Your refined contribution:
             candidate_source_ids = {str(document.metadata["source_id"]) for document in documents_for_grading}
 
             # 3A: Relevance filtering (advisory candidate selection)
-            relevant_source_ids, relevance_error = call_llm_for_relevance_filter(
-                research_goal.description,
+            relevant_source_ids, relevance_error, coverage, coverage_error = self._grade_candidate_evidence(
+                research_goal,
+                query_plan,
                 candidate_context,
                 candidate_source_ids,
-                model=research_goal.llm_model,
-                explicit_requirements=query_plan.explicit_requirements,
+            )
+
+            if coverage is not None and pending_corrective is not None:
+                raw_library_diagnostics = getattr(self.paper_library, "last_evidence_diagnostics", [])
+                library_diagnostics = (
+                    raw_library_diagnostics if isinstance(raw_library_diagnostics, (list, tuple)) else ()
+                )
+                current_committed = {
+                    str(item.get("candidate_source_id", ""))
+                    for item in library_diagnostics
+                    if item.get("index_status") == "COMMITTED"
+                }
+                current_passages = {
+                    str(ref.get("chunk_id", ""))
+                    for document in documents_for_grading
+                    for ref in document.metadata.get("evidence_refs", ())
+                    if isinstance(ref, dict) and ref.get("evidence_type") == "full_text"
+                }
+                current_covered = {
+                    aspect_id for aspect_id, source_ids in coverage.aspect_source_ids.items() if source_ids
+                }
+                pending_corrective.update(
+                    {
+                        "new_committed_sources": sorted(
+                            current_committed - pending_corrective.pop("_before_committed")
+                        ),
+                        "new_usable_passages": sorted(current_passages - pending_corrective.pop("_before_passages")),
+                        "coverage_delta": sorted(current_covered - pending_corrective.pop("_before_covered")),
+                    }
+                )
+                pending_corrective["made_progress"] = bool(
+                    pending_corrective["new_usable_passages"] or pending_corrective["coverage_delta"]
+                )
+                corrective_history.append(pending_corrective)
+                pending_corrective = None
+
+            self._persist_evidence_diagnostics(
+                context,
+                candidate_documents,
+                documents_for_grading,
+                coverage,
+                corrective_history,
             )
 
             if relevance_error or relevant_source_ids is None:
@@ -938,36 +1336,15 @@ Your refined contribution:
                 )
 
             # 3B: Explicit requirement coverage grading
-            coverage, coverage_error = call_llm_for_evidence_coverage(
-                research_goal.description,
-                query_plan.explicit_requirements,
-                candidate_context,
-                candidate_source_ids,
-                model=research_goal.llm_model,
-                max_gap_queries=self.rag_retriever.query_count,
-            )
-
             if coverage_error or coverage is None:
-                if documents_for_grading:
-                    logger.warning(
-                        "Evidence coverage grading was unavailable (%s); falling back to provisional coverage for %d retrieved source(s).",
-                        coverage_error or "no coverage result",
-                        len(documents_for_grading),
-                    )
-                    aspect_source_ids = {
-                        aspect.aspect_id: tuple(candidate_source_ids) for aspect in query_plan.explicit_requirements
-                    }
-                    coverage = EvidenceCoverage(
-                        aspect_source_ids=aspect_source_ids,
-                        missing_aspect_ids=(),
-                        gap_queries=(),
-                        reason="Provisional coverage fallback due to LLM coverage grading unavailability.",
-                    )
-                else:
-                    context.last_retrieved_sources = []
-                    error = coverage_error or "Evidence coverage grading failed."
-                    logger.error(error)
-                    return [], [error]
+                error = redact_secrets(coverage_error or "Evidence coverage grading failed.")
+                context.last_generation_diagnostics["evidence_retrieval"] = {
+                    "status": "failed",
+                    "source_count": 0,
+                    "detail": error,
+                }
+                logger.error("Coverage is unverified; hypothesis generation stopped: %s", error)
+                return [], [error]
 
             # If all requirements are satisfied by current evidence, exit gate loop
             if coverage.sufficient:
@@ -1012,10 +1389,16 @@ Your refined contribution:
                     fallback_queries = self._bounded_missing_evidence_queries(
                         coverage,
                         missing_aspects,
+                        exclude_queries=executed_corrective_queries,
+                        strategy_round=corrective_round,
+                    )
+                    tagged_fallback_queries = self._tag_corrective_queries(
+                        fallback_queries,
+                        missing_aspects,
                     )
 
                     fallback_plan = SearchQueryPlan(
-                        queries=(fallback_queries or query_plan.queries[: self.rag_retriever.query_count]),
+                        queries=(tagged_fallback_queries or query_plan.queries[: self.rag_retriever.query_count]),
                         required_terms=(),
                         explicit_requirements=(query_plan.explicit_requirements),
                         exploration_directions=(query_plan.exploration_directions),
@@ -1057,7 +1440,11 @@ Your refined contribution:
                 )
 
                 logger.error(error)
-                context.last_retrieved_sources = []
+                context.last_generation_diagnostics["evidence_retrieval"] = {
+                    "status": "failed",
+                    "source_count": 0,
+                    "detail": error,
+                }
                 return [], [error]
 
             # 3C: Perform corrective retrieval round for missing requirements
@@ -1068,10 +1455,16 @@ Your refined contribution:
             corrective_queries = self._bounded_missing_evidence_queries(
                 coverage,
                 missing_aspects,
+                exclude_queries=executed_corrective_queries,
+                strategy_round=corrective_round,
+            )
+            tagged_corrective_queries = self._tag_corrective_queries(
+                corrective_queries,
+                missing_aspects,
             )
 
             gap_plan = SearchQueryPlan(
-                queries=corrective_queries,
+                queries=tagged_corrective_queries,
                 required_terms=(),
                 explicit_requirements=(query_plan.explicit_requirements),
                 exploration_directions=(query_plan.exploration_directions),
@@ -1086,6 +1479,27 @@ Your refined contribution:
                 coverage.missing_aspect_ids,
                 corrective_queries,
             )
+
+            executed_corrective_queries.update(query.casefold() for query in corrective_queries)
+            before_committed = {
+                str(item.get("candidate_source_id", ""))
+                for item in (
+                    getattr(self.paper_library, "last_evidence_diagnostics", [])
+                    if isinstance(
+                        getattr(self.paper_library, "last_evidence_diagnostics", []),
+                        (list, tuple),
+                    )
+                    else ()
+                )
+                if item.get("index_status") == "COMMITTED"
+            }
+            before_passages = {
+                str(ref.get("chunk_id", ""))
+                for document in documents_for_grading
+                for ref in document.metadata.get("evidence_refs", ())
+                if isinstance(ref, dict) and ref.get("evidence_type") == "full_text"
+            }
+            before_covered = {aspect_id for aspect_id, source_ids in coverage.aspect_source_ids.items() if source_ids}
 
             try:
                 gap_documents = self._retrieve_scientific_sources(
@@ -1105,6 +1519,17 @@ Your refined contribution:
                 return [], [f"Corrective RAG retrieval failed: {exc}"]
 
             corrective_round += 1
+            returned_source_ids = {str(document.metadata.get("source_id", "")) for document in gap_documents}
+            pending_corrective = {
+                "round": corrective_round,
+                "queries": list(corrective_queries),
+                "source_ids_already_seen": sorted(returned_source_ids & seen_corrective_source_ids),
+                "new_candidate_source_ids": sorted(returned_source_ids - seen_corrective_source_ids),
+                "_before_committed": before_committed,
+                "_before_passages": before_passages,
+                "_before_covered": before_covered,
+            }
+            seen_corrective_source_ids.update(returned_source_ids)
             candidate_documents = self._merge_retrieved_documents(
                 candidate_documents,
                 gap_documents,
@@ -1124,22 +1549,6 @@ Your refined contribution:
 
         minimum_sources = self.rag_retriever.minimum_relevant_sources
 
-        # Retain top candidate sources if count is below minimum required threshold
-        if len(retrieved_documents) < minimum_sources and graded_documents:
-            logger.info(
-                "Coverage matched %d source(s); retaining top candidate source(s) from %d graded document(s).",
-                len(retrieved_documents),
-                len(graded_documents),
-            )
-            retained_ids = {str(doc.metadata["source_id"]) for doc in retrieved_documents}
-            for doc in graded_documents:
-                doc_id = str(doc.metadata["source_id"])
-                if doc_id not in retained_ids:
-                    retrieved_documents.append(doc)
-                    retained_ids.add(doc_id)
-                    if len(retrieved_documents) >= max(minimum_sources, self.rag_retriever.top_k):
-                        break
-
         if len(retrieved_documents) < minimum_sources:
             error = (
                 f"RAG coverage auditing confirmed {len(retrieved_documents)} "
@@ -1148,15 +1557,36 @@ Your refined contribution:
                 "was not executed."
             )
             logger.error(error)
-            context.last_retrieved_sources = []
+            context.last_generation_diagnostics["evidence_retrieval"] = {
+                "status": "failed",
+                "source_count": 0,
+                "detail": error,
+            }
             return [], [error]
+
+        if execution_cancelled():
+            return [], ["Cycle cancelled before literature synthesis."]
 
         # Enrich retained documents with full text when available
         if not self._requires_indexed_sources():
             retrieved_documents = self._enrich_with_full_text(
                 retrieved_documents,
                 research_goal,
+                query_plan.explicit_requirements,
             )
+
+        # Preserve the validated retrieval result before synthesis. If a later
+        # structured-output stage fails, diagnostics and the UI must not claim
+        # that no evidence was retrieved.
+        context.last_retrieved_sources = serialize_documents(retrieved_documents)
+        context.last_generation_diagnostics["evidence_retrieval"] = {
+            "status": "completed",
+            "source_count": len(context.last_retrieved_sources),
+            "detail": "Validated evidence passed relevance, coverage, and source-eligibility gates.",
+        }
+        context.last_generation_diagnostics["literature_synthesis"] = {
+            "status": "running",
+        }
 
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
@@ -1175,10 +1605,27 @@ Your refined contribution:
         )
 
         if synthesis_error or synthesis is None:
-            context.last_retrieved_sources = []
             error = synthesis_error or "Literature synthesis failed."
+            context.last_generation_diagnostics["literature_synthesis"] = {
+                "status": "failed",
+                "detail": redact_secrets(error),
+            }
+            context.last_generation_diagnostics["hypothesis_generation"] = {
+                "status": "not_executed",
+                "detail": "Literature synthesis did not produce a validated input.",
+            }
             logger.error(error)
             return [], [error]
+
+        synthesis_warnings = list(synthesis.warnings)
+        context.last_generation_diagnostics["warnings"] = synthesis_warnings
+        context.last_generation_diagnostics["literature_synthesis"] = {
+            "status": "warning" if synthesis_warnings else "completed",
+            "detail": synthesis_warnings[0] if synthesis_warnings else "Validated literature synthesis completed.",
+        }
+
+        if execution_cancelled():
+            return [], ["Cycle cancelled after literature synthesis."]
 
         # ==================================================================
         # Step 5: Bounded Agentic Research Extension Loop
@@ -1196,10 +1643,21 @@ Your refined contribution:
             synthesis,
         )
 
+        if execution_cancelled():
+            return [], ["Cycle cancelled during evidence-directed research."]
+
         # Refresh final evidence state after agentic research
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
+        for warning in synthesis.warnings:
+            if warning not in context.last_generation_diagnostics["warnings"]:
+                context.last_generation_diagnostics["warnings"].append(warning)
+        if synthesis.warnings:
+            context.last_generation_diagnostics["literature_synthesis"] = {
+                "status": "warning",
+                "detail": synthesis.warnings[0],
+            }
 
         synthesis_text = format_literature_synthesis(synthesis)
         assumption_text = format_assumption_assessments(assumptions)
@@ -1317,6 +1775,13 @@ Your refined contribution:
         # ==================================================================
         # Step 7: Call LLM to generate initial candidate hypotheses
         # ==================================================================
+        context.last_generation_diagnostics["hypothesis_generation"] = {
+            "status": "running",
+        }
+        context.last_generation_diagnostics["evidence_consumed"] = True
+        evidence_funnel = context.last_generation_diagnostics.get("evidence_funnel", {})
+        if isinstance(evidence_funnel, dict):
+            evidence_funnel["generation_consumed_sources"] = len(retrieved_documents)
         raw_output = call_llm_for_generation(
             prompt,
             num_hypotheses=num_to_generate,
@@ -1354,6 +1819,10 @@ Your refined contribution:
             if audit_error or audits is None:
                 context.last_hypothesis_audits = []
                 error = audit_error or "Hypothesis audit failed."
+                context.last_generation_diagnostics["hypothesis_generation"] = {
+                    "status": "failed",
+                    "detail": redact_secrets(error),
+                }
                 logger.error(error)
                 return [], [error]
 
@@ -1379,6 +1848,10 @@ Your refined contribution:
             ]
 
             if not raw_output:
+                context.last_generation_diagnostics["hypothesis_generation"] = {
+                    "status": "failed",
+                    "detail": "All candidates were rejected by the novelty and grounding audit.",
+                }
                 return [], ["All generated hypotheses were rejected by the novelty and grounding audit."]
 
         # ==================================================================
@@ -1471,4 +1944,13 @@ Your refined contribution:
             )
             new_hypos.append(hypothesis)
 
+        context.last_generation_diagnostics["hypothesis_generation"] = {
+            "status": "completed" if new_hypos else "failed",
+            "candidate_count": len(new_hypos),
+            "detail": (
+                f"Constructed {len(new_hypos)} validated hypothesis candidate(s)."
+                if new_hypos
+                else (errors[0] if errors else "No validated hypothesis candidates were constructed.")
+            ),
+        }
         return new_hypos, errors

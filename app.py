@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import threading
 import time
 from copy import deepcopy
@@ -28,8 +29,10 @@ from app.run_store import (
     save_run,
     write_report,
 )
+from app.runtime_logging import configure_runtime_logging
 from app.utils import (
     classify_llm_error,
+    execution_budget,
     fetch_lmstudio_models,
     get_lmstudio_base_url,
     get_lmstudio_model,
@@ -50,6 +53,7 @@ EXPERIMENT_DATASET_PATH = os.getenv("EXPERIMENT_DATASET_PATH", "")
 EXPERIMENT_DEVICE = os.getenv("EXPERIMENT_DEVICE", "cpu",)
 EXPERIMENT_TIMEOUT_SECONDS = int(os.getenv("EXPERIMENT_TIMEOUT_SECONDS", "3600",))
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
+_cycle_run_lock = threading.Lock()
 
 # Configure logging for Gradio
 logging.basicConfig(level=logging.INFO)
@@ -454,7 +458,7 @@ def execute_cycle(
         logger.info(f"Running cycle {iteration}")
 
         # Run the cycle
-        cycle_details = cycle_supervisor.run_cycle(
+        cycle_details = cycle_supervisor.run(
             research_goal,
             context,
             progress_callback=capture_progress,
@@ -606,6 +610,7 @@ def execute_cycle(
         # of reporting success over an empty result (issue llnl#36).
         errors = cycle_details.get("errors", [])
         produced_any = bool(cycle_details.get("steps", {}).get("generation", {}).get("hypotheses"))
+        finalization = cycle_details.get("finalization", {})
         if errors:
             categories = sorted({classify_llm_error(e) for e in errors})
             cause = "; ".join(categories)
@@ -616,6 +621,19 @@ def execute_cycle(
                     f"⚠️ Cycle {iteration} could not generate hypotheses — {cause}.\n\n{to_bold('Execution Time:')} {formatted_time}.\n"
                     f"See the results panel for details. {to_bold('Log:')} {log_file}"
                 )
+        elif finalization and not finalization.get("ready", False):
+            unmet = "; ".join(finalization.get("reasons", [])) or "final quality requirements were not met"
+            finalization_status = str(finalization.get("status", ""))
+            if finalization_status == "generation_budget_exhausted":
+                headline = (
+                    f"⚠️ Cycle {iteration} completed its bounded Generation/Evolution work "
+                    "but did not pass the final quality gate"
+                )
+            else:
+                headline = f"⚠️ Cycle {iteration} reached its compute budget before finalization"
+            status_msg = (
+                f"{headline} ({unmet}).\n\n{to_bold('Execution Time:')} {formatted_time}\n{to_bold('Log:')} {log_file}"
+            )
         else:
             status_msg = (
                 f"✅ Cycle {iteration} completed successfully!\n\n"
@@ -742,7 +760,16 @@ def format_evidence_sources_html(
         )
 
     rendered_sources = ", ".join(links) if links else "None recorded"
-    return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>"
+    evidence_refs = hypothesis.get("evidence_refs", [])
+    if not isinstance(evidence_refs, list):
+        evidence_refs = []
+    rendered_refs = ", ".join(
+        f"<code>{html_lib.escape(str(chunk_id))}</code>"
+        for chunk_id in dict.fromkeys(evidence_refs)
+        if isinstance(chunk_id, str) and chunk_id
+    )
+    provenance = f"<p><strong>Evidence chunks:</strong> {rendered_refs}</p>" if rendered_refs else ""
+    return f"<p><strong>Evidence Sources:</strong> {rendered_sources}</p>{provenance}"
 
 
 def format_ranking_confidence(value: Any) -> str:
@@ -767,6 +794,19 @@ def format_ranking_confidence(value: Any) -> str:
     return f"{score:g}/10 ({score * 10:.0f}%)"
 
 
+def _ordered_ranking_step_names(steps: Dict[str, Any]) -> List[str]:
+    """Return fixed and dynamically numbered ranking steps newest first."""
+
+    ranked = []
+    for index, step_name in enumerate(steps):
+        match = re.fullmatch(r"ranking(?:_?(\d+)|_final)?", step_name)
+        if not match:
+            continue
+        priority = float("inf") if step_name == "ranking_final" else int(match.group(1) or 0)
+        ranked.append((priority, index, step_name))
+    return [step_name for _, _, step_name in sorted(ranked, reverse=True)]
+
+
 def run_cycle_with_progress(
     timeout_seconds: int = CYCLE_TIMEOUT_SECONDS,
     poll_seconds: float = CYCLE_PROGRESS_INTERVAL_SECONDS,
@@ -778,6 +818,16 @@ def run_cycle_with_progress(
         yield (
             "❌ Error: No research goal set. Please set a research goal first.",
             "",
+            "",
+            format_research_trace_html([]),
+        )
+        return
+
+    if not _cycle_run_lock.acquire(blocking=False):
+        busy_status = "⚠️ A previous cycle is still stopping. Wait for it to release the model before starting again."
+        yield (
+            busy_status,
+            "<p>A previous cycle is still stopping.</p>",
             "",
             format_research_trace_html([]),
         )
@@ -798,60 +848,75 @@ def run_cycle_with_progress(
                 return
             merge_trace_event(live_trace, event)
 
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    cancel_event = threading.Event()
+    deadline_timer = threading.Timer(timeout_seconds, cancel_event.set)
+    deadline_timer.daemon = True
+
     def worker():
-        result["value"] = execute_cycle(
-            run_goal,
-            run_context,
-            run_supervisor,
-            progress_callback=progress_events.put,
-        )
+        try:
+            with execution_budget(deadline, cancel_event):
+                result["value"] = execute_cycle(
+                    run_goal,
+                    run_context,
+                    run_supervisor,
+                    progress_callback=progress_events.put,
+                )
+        finally:
+            deadline_timer.cancel()
+            _cycle_run_lock.release()
 
     thread = threading.Thread(target=worker, daemon=True)
+    deadline_timer.start()
     thread.start()
-    started = time.monotonic()
     iteration = global_context.iteration_number + 1
+
+    def timeout_update(elapsed: float):
+        timeout_duration = format_timeout_duration(timeout_seconds)
+        timeout_status = (
+            f"⚠️ Cycle {iteration} timed out after {timeout_duration}. "
+            "The app cancelled remaining agent work before accepting another run."
+        )
+        timeout_html = timeout_results_html(timeout_seconds)
+        merge_trace_event(
+            live_trace,
+            {
+                "step": "timeout",
+                "status": "error",
+                "title": "Cycle time limit reached",
+                "summary": timeout_status,
+                "details": [],
+                "elapsed_seconds": elapsed,
+            },
+        )
+        saved_run = save_run(
+            research_goal=run_goal,
+            cycle_details={
+                "iteration": iteration,
+                "steps": {},
+                "errors": [timeout_status],
+                "research_trace": live_trace,
+            },
+            status=timeout_status,
+            references_html="",
+            results_html=timeout_html,
+            log_file="",
+        )
+        report_path = write_report(saved_run)
+        return (
+            f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
+            timeout_html,
+            "",
+            format_research_trace_html(live_trace, elapsed_seconds=elapsed),
+        )
 
     while thread.is_alive():
         drain_progress_events()
         elapsed = time.monotonic() - started
         if elapsed >= timeout_seconds:
-            timeout_duration = format_timeout_duration(timeout_seconds)
-            timeout_status = (
-                f"⚠️ Cycle {iteration} timed out after {timeout_duration}. "
-                "The app stopped waiting for the model provider instead of leaving the run spinning."
-            )
-            timeout_html = timeout_results_html(timeout_seconds)
-            merge_trace_event(
-                live_trace,
-                {
-                    "step": "timeout",
-                    "status": "error",
-                    "title": "Cycle time limit reached",
-                    "summary": timeout_status,
-                    "details": [],
-                    "elapsed_seconds": elapsed,
-                },
-            )
-            saved_run = save_run(
-                research_goal=run_goal,
-                cycle_details={
-                    "iteration": iteration,
-                    "steps": {},
-                    "errors": [timeout_status],
-                    "research_trace": live_trace,
-                },
-                status=timeout_status,
-                references_html="",
-                results_html=timeout_html,
-                log_file="",
-            )
-            report_path = write_report(saved_run)
-            yield (
-                f"{timeout_status}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}",
-                timeout_html,
-                "",
-                format_research_trace_html(live_trace, elapsed_seconds=elapsed),
-            )
+            cancel_event.set()
+            yield timeout_update(elapsed)
             return
 
         active_event = next(
@@ -878,6 +943,11 @@ def run_cycle_with_progress(
         thread.join(timeout=min(poll_seconds, max(timeout_seconds - elapsed, 0.1)))
 
     drain_progress_events()
+    elapsed = time.monotonic() - started
+    if cancel_event.is_set() and elapsed >= timeout_seconds:
+        yield timeout_update(elapsed)
+        return
+
     cycle_result = result.get("value")
     if not cycle_result:
         merge_trace_event(
@@ -925,10 +995,23 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         html += f"""
         <div style="margin: 20px 0; padding: 15px; border: 2px solid #e74c3c; border-radius: 8px; background-color: #fff5f5;">
             <h3>⚠️ Generation could not complete</h3>
-            <p>The model/API reported the following, so some or all hypotheses were not generated:</p>
+            <p>The Generation pipeline reported the following, so some or all hypotheses were not generated:</p>
             <ul style="color: #c0392b;">{items}</ul>
         </div>
         """
+
+    warnings = cycle_details.get("warnings", [])
+    if isinstance(warnings, list) and warnings:
+        warning_items = "".join(
+            f"<li>{html_lib.escape(str(warning))}</li>" for warning in warnings if str(warning).strip()
+        )
+        if warning_items:
+            html += f"""
+            <div style="margin: 20px 0; padding: 15px; border: 2px solid #e67e22; border-radius: 8px; background-color: #fffaf2;">
+                <h3>⚠️ Generation completed with recovery warnings</h3>
+                <ul style="color: #a65f00;">{warning_items}</ul>
+            </div>
+            """
 
     # Process steps in order
     steps = cycle_details.get("steps", {})
@@ -959,7 +1042,30 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
         # Step-specific content
         if step_name == "generation":
             hypotheses = step_data.get("hypotheses", [])
+            generation_stages = step_data.get("stages", {})
+            if isinstance(generation_stages, dict) and generation_stages:
+                stage_labels = {
+                    "evidence_retrieval": "Evidence retrieval",
+                    "literature_synthesis": "Literature synthesis",
+                    "hypothesis_generation": "Hypothesis generation",
+                }
+                html += "<p><strong>Generation stage diagnostics:</strong></p><ul>"
+                for stage_name, stage_label in stage_labels.items():
+                    stage = generation_stages.get(stage_name, {})
+                    if not isinstance(stage, dict):
+                        continue
+                    status = html_lib.escape(str(stage.get("status") or "unknown").replace("_", " "))
+                    detail = html_lib.escape(str(stage.get("detail") or ""))
+                    suffix = f" — {detail}" if detail else ""
+                    html += f"<li><strong>{stage_label}:</strong> {status}{suffix}</li>"
+                html += "</ul>"
             search_stats = step_data.get("search_stats", [])
+            evidence_funnel = step_data.get("evidence_funnel", {})
+            if not isinstance(evidence_funnel, dict):
+                evidence_funnel = {}
+            evidence_pipeline = step_data.get("evidence_pipeline", [])
+            if not isinstance(evidence_pipeline, list):
+                evidence_pipeline = []
             query_plan = step_data.get("query_plan", {})
             if not isinstance(query_plan, dict):
                 query_plan = {}
@@ -976,6 +1082,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     provisional_hypotheses,
                     planned_queries,
                     query_fidelity,
+                    evidence_pipeline,
                 )
             )
             if has_search_details:
@@ -1023,6 +1130,33 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         f"{int(stat.get('elapsed_ms', 0))} ms ({status})</li>"
                     )
                 if isinstance(search_stats, list) and search_stats:
+                    html += "</ul>"
+                if evidence_funnel:
+                    html += (
+                        "<p><strong>Evidence funnel:</strong> "
+                        f"{int(evidence_funnel.get('raw_search_hits', 0))} raw search hits → "
+                        f"{int(evidence_funnel.get('unique_candidates', 0))} unique candidates → "
+                        f"{int(evidence_funnel.get('selected_sources', 0))} selected sources → "
+                        f"{int(evidence_funnel.get('acquisition_attempts', 0))} acquisition attempts → "
+                        f"{int(evidence_funnel.get('committed_sources', 0))} COMMITTED sources → "
+                        f"{int(evidence_funnel.get('retrieved_passages', 0))} passages → "
+                        f"{int(evidence_funnel.get('coverage_approved_sources', 0))} coverage-approved → "
+                        f"{int(evidence_funnel.get('generation_consumed_sources', 0))} generation-consumed.</p>"
+                    )
+                if evidence_pipeline:
+                    html += "<p><strong>Evidence loss diagnostics:</strong></p><ul>"
+                    for item in evidence_pipeline:
+                        if not isinstance(item, dict):
+                            continue
+                        source_id = html_lib.escape(str(item.get("candidate_source_id") or "unknown"))
+                        requirement_id = html_lib.escape(str(item.get("requirement_id") or "unscoped"))
+                        acquisition = html_lib.escape(str(item.get("acquisition_result") or "not_attempted"))
+                        gate_reason = html_lib.escape(str(item.get("strict_gate_rejection_reason") or "not_evaluated"))
+                        html += (
+                            f"<li>{requirement_id}: {source_id} — acquisition={acquisition}, "
+                            f"index={html_lib.escape(str(item.get('index_status') or 'MISSING'))}, "
+                            f"passages={len(item.get('selected_chunk_ids') or [])}, gate={gate_reason}</li>"
+                        )
                     html += "</ul>"
                 html += "</details>"
             html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
@@ -1170,10 +1304,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         "Fewer than two eligible hypotheses were available, or no new hypothesis "
                         "required another comparison."
                     )
-                html += (
-                    "<p><strong>No tournament debates were run.</strong> "
-                    f"{explanation}</p>"
-                )
+                html += f"<p><strong>No tournament debates were run.</strong> {explanation}</p>"
 
         elif step_name == "evolution":
             hypotheses = step_data.get("hypotheses", [])
@@ -1284,7 +1415,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
     # Prefer ranking steps, else fallback to step with most hypotheses
     final_hypotheses = []
     final_step = None
-    step_order = ["ranking_final", "ranking2", "ranking", "ranking1"]
+    step_order = _ordered_ranking_step_names(steps)
     for step_name in step_order:
         if step_name in steps and steps[step_name].get("hypotheses"):
             final_hypotheses = steps[step_name]["hypotheses"]
@@ -1302,7 +1433,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                 max_count = len(hypos)
 
     # Assertions: final list should not be empty and no duplicate IDs (only for ranking steps)
-    ranking_steps = ["ranking_final", "ranking2", "ranking", "ranking1"]
+    ranking_steps = set(step_order)
     if final_hypotheses:
         ids = [h.get("id") for h in final_hypotheses]
         if final_step in ranking_steps:
@@ -1376,14 +1507,22 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
 
 
 def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoal] = None) -> str:
-    """Render the exact sources supplied to the Generation Agent."""
+    """Render validated sources and whether Generation consumed them."""
     import html as html_lib
 
-    sources = cycle_details.get("steps", {}).get("generation", {}).get("sources", [])
+    generation_step = cycle_details.get("steps", {}).get("generation", {})
+    sources = generation_step.get("sources", [])
     if not isinstance(sources, list) or not sources:
         return "<p>No retrieved evidence was used for generation.</p>"
 
-    html = "<h3>📚 Retrieved Evidence Used for Generation</h3>"
+    evidence_consumed = generation_step.get("evidence_consumed")
+    if evidence_consumed is False:
+        html = (
+            "<h3>📚 Evidence Retrieval Completed</h3>"
+            "<p>Validated evidence was retrieved, but hypothesis generation did not execute.</p>"
+        )
+    else:
+        html = "<h3>📚 Retrieved Evidence Used for Generation</h3>"
     for source in sources:
         if not isinstance(source, dict):
             continue
@@ -1404,15 +1543,36 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
         if raw_pdf_url.startswith(("https://", "http://")):
             pdf_url = html_lib.escape(raw_pdf_url, quote=True)
             pdf_link = f' | <a href="{pdf_url}" target="_blank">📁 Download PDF</a>'
+        evidence_status = str(source.get("evidence_status") or "abstract_only")
         if source_type == "web" and not source.get("full_text_indexed"):
             library_status = "Retrieved web content used directly"
         elif source.get("full_text_indexed"):
             chunks_used = int(source.get("full_text_chunks_used") or 0)
             library_status = f"Indexed in local ChromaDB; {chunks_used} relevant full-text chunk(s) used"
+        elif evidence_status == "full_text_failed":
+            library_status = "Full-text acquisition failed; abstract-only evidence used"
         else:
             library_status = "Abstract-only evidence"
         content_label = "Web content" if source_type == "web" else "Abstract"
         author_line = f"<p><strong>Authors:</strong> {authors}</p>" if authors else ""
+        evidence_refs = source.get("evidence_refs", [])
+        full_text_refs = (
+            [ref for ref in evidence_refs if isinstance(ref, dict) and ref.get("evidence_type") == "full_text"]
+            if isinstance(evidence_refs, list)
+            else []
+        )
+        sections = ", ".join(dict.fromkeys(str(ref.get("section") or "Unknown") for ref in full_text_refs))
+        pages = ", ".join(dict.fromkeys(str(ref.get("page")) for ref in full_text_refs if ref.get("page") is not None))
+        chunk_ids = ", ".join(
+            f"<code>{html_lib.escape(str(ref.get('chunk_id')))}</code>" for ref in full_text_refs if ref.get("chunk_id")
+        )
+        provenance_html = ""
+        if full_text_refs:
+            provenance_html = (
+                f"<p><strong>Sections:</strong> {html_lib.escape(sections)} | "
+                f"<strong>Pages:</strong> {html_lib.escape(pages)}</p>"
+                f"<p><strong>Evidence chunks:</strong> {chunk_ids}</p>"
+            )
         html += f"""
         <div style="border: 1px solid #e0e0e0; padding: 15px; margin: 10px 0; border-radius: 8px; background-color: #fafafa;">
             <h4>{title}</h4>
@@ -1423,6 +1583,7 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
                <strong>Published:</strong> {published}</p>
             <p><strong>{content_label}:</strong> {summary}...</p>
             <p><strong>Evidence storage:</strong> {library_status}</p>
+            {provenance_html}
             <p>
                 <a href="{source_url}" target="_blank">📄 View source</a>{pdf_link}
             </p>
@@ -1880,6 +2041,8 @@ def create_gradio_interface():
 
 
 if __name__ == "__main__":
+    runtime_log = configure_runtime_logging()
+    logger.info("Runtime diagnostics are saved to %s", runtime_log)
     # Create and launch the Gradio app
     logger.info("Using LM Studio API at %s", get_lmstudio_base_url())
     demo = create_gradio_interface()

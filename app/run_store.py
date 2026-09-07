@@ -237,13 +237,62 @@ def render_report(run: Dict[str, Any]) -> str:
     #     if step_name == "meta_review":
     #         html_parts.append(f"<pre>{_escape(json.dumps(step_data, indent=2, sort_keys=True))}</pre>")
     for step_name, step_data in steps.items():
-        hypotheses = (
-            step_data.get("hypotheses", [])
-            if isinstance(step_data, dict)
-            else []
-        )
+        hypotheses = step_data.get("hypotheses", []) if isinstance(step_data, dict) else []
         html_parts.append(f"<h3>{_escape(step_name)}</h3>")
         html_parts.append(f"<p>{len(hypotheses)} hypotheses</p>")
+
+        if step_name == "generation":
+            funnel = step_data.get("evidence_funnel", {})
+            if isinstance(funnel, dict) and funnel:
+                labels = (
+                    ("raw_search_hits", "Raw search hits"),
+                    ("unique_candidates", "Unique candidates"),
+                    ("selected_sources", "Selected sources"),
+                    ("acquisition_attempts", "Acquisition attempts"),
+                    ("committed_sources", "COMMITTED sources"),
+                    ("retrieved_passages", "Retrieved passages"),
+                    ("coverage_approved_sources", "Coverage-approved sources"),
+                    ("generation_consumed_sources", "Generation-consumed sources"),
+                )
+                html_parts.append("<h4>Evidence funnel</h4><table><tbody>")
+                for key, label in labels:
+                    html_parts.append(f"<tr><th>{_escape(label)}</th><td>{_escape(funnel.get(key, 0))}</td></tr>")
+                html_parts.append("</tbody></table>")
+
+            pipeline = step_data.get("evidence_pipeline", [])
+            if isinstance(pipeline, list) and pipeline:
+                html_parts.append(
+                    "<h4>Evidence path diagnostics</h4><table><thead><tr>"
+                    "<th>Requirement</th><th>Query</th><th>Provider</th><th>Raw results</th>"
+                    "<th>Source</th><th>Rank</th><th>Reserved</th><th>PDF eligible</th>"
+                    "<th>Attempted</th><th>Acquisition</th><th>Index</th><th>Indexed chunks</th>"
+                    "<th>Selected chunk IDs</th><th>Strict gate</th><th>Coverage</th>"
+                    "</tr></thead><tbody>"
+                )
+                for item in pipeline:
+                    if not isinstance(item, dict):
+                        continue
+                    selected_chunk_ids = ", ".join(str(value) for value in item.get("selected_chunk_ids") or [])
+                    html_parts.append(
+                        "<tr>"
+                        f"<td>{_escape(item.get('requirement_id') or 'unscoped')}</td>"
+                        f"<td>{_escape(item.get('query') or '')}</td>"
+                        f"<td>{_escape(item.get('provider') or 'unknown')}</td>"
+                        f"<td>{_escape(item.get('raw_result_count') or 0)}</td>"
+                        f"<td>{_escape(item.get('candidate_source_id') or 'unknown')}</td>"
+                        f"<td>{_escape(item.get('candidate_rank') or '')}</td>"
+                        f"<td>{_escape(bool(item.get('reserved_for_requirement')))}</td>"
+                        f"<td>{_escape(bool(item.get('pdf_eligible')))}</td>"
+                        f"<td>{_escape(bool(item.get('acquisition_attempted')))}</td>"
+                        f"<td>{_escape(item.get('acquisition_result') or 'not_attempted')}</td>"
+                        f"<td>{_escape(item.get('index_status') or 'MISSING')}</td>"
+                        f"<td>{_escape(item.get('full_text_chunk_count') or 0)}</td>"
+                        f"<td>{_escape(selected_chunk_ids)}</td>"
+                        f"<td>{_escape(item.get('strict_gate_rejection_reason') or 'not_evaluated')}</td>"
+                        f"<td>{_escape(bool(item.get('coverage_contribution')))}</td>"
+                        "</tr>"
+                    )
+                html_parts.append("</tbody></table>")
 
         # ----------------------------
         # Ranking results
@@ -267,18 +316,9 @@ def render_report(run: Dict[str, Any]) -> str:
                 for result in tournament:
                     confidence = f"{result.get('confidence', 1)}/10"
                     criteria = ", ".join(result.get("criteria", []))
-                    title_lookup = {
-                        h["id"]: h["title"]
-                        for h in hypotheses
-                    }
-                    title_a = title_lookup.get(
-                        result.get("hypothesis_a"),
-                        result.get("hypothesis_a")
-                    )
-                    title_b = title_lookup.get(
-                        result.get("hypothesis_b"),
-                        result.get("hypothesis_b")
-                    )
+                    title_lookup = {h["id"]: h["title"] for h in hypotheses}
+                    title_a = title_lookup.get(result.get("hypothesis_a"), result.get("hypothesis_a"))
+                    title_b = title_lookup.get(result.get("hypothesis_b"), result.get("hypothesis_b"))
                     html_parts.append(f"""
                     <tr>
                         <td>
@@ -300,7 +340,7 @@ def render_report(run: Dict[str, Any]) -> str:
                         </td>
 
                         <td>
-                            {_escape(result.get("reasoning",""))}
+                            {_escape(result.get("reasoning", ""))}
                         </td>
                     </tr>
                     """)
@@ -373,7 +413,14 @@ def _settings_table(goal: Dict[str, Any]) -> str:
 
 
 def _final_hypotheses(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
-    for step_name in ("ranking_final", "ranking2", "ranking", "ranking1"):
+    ranking_steps = []
+    for index, step_name in enumerate(steps):
+        match = re.fullmatch(r"ranking(?:_?(\d+)|_final)?", step_name)
+        if not match:
+            continue
+        priority = float("inf") if step_name == "ranking_final" else int(match.group(1) or 0)
+        ranking_steps.append((priority, index, step_name))
+    for _, _, step_name in sorted(ranking_steps, reverse=True):
         hypotheses = steps.get(step_name, {}).get("hypotheses", [])
         if hypotheses:
             return sorted(hypotheses, key=lambda item: item.get("elo_score", 0), reverse=True)
@@ -404,7 +451,7 @@ def _hypothesis_block(index: int, hypothesis: Dict[str, Any]) -> str:
     return (
         '<div class="hypothesis">'
         f"<h3>Rank #{index}</h3>"
-        f"<p><strong>Title:</strong> {_escape(hypothesis.get('title'),'Untitled')}</p>"
+        f"<p><strong>Title:</strong> {_escape(hypothesis.get('title'), 'Untitled')}</p>"
         f"<p><strong>ID:</strong> {_escape(hypothesis.get('id'))}</p>"
         f"<p><strong>Elo Score:</strong> {_escape(hypothesis.get('elo_score'))}</p>"
         f"<p><strong>Novelty:</strong> {_escape(hypothesis.get('novelty_review'))}</p>"

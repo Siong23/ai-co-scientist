@@ -7,7 +7,7 @@ no network calls.
 import importlib.util
 import os
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -95,9 +95,7 @@ def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, 
     assert any("Existing saved run" in str(choice) for choice in sidebar_history[0]["props"]["choices"])
     assert sidebar_history[0]["props"]["buttons"][0]["value"] == "Delete"
     assert sidebar_history[0]["props"]["buttons"][0]["variant"] == "stop"
-    assert (
-        "#research-history-sidebar {\n            background: var(--block-background-fill) !important;" in demo.css
-    )
+    assert "#research-history-sidebar {\n            background: var(--block-background-fill) !important;" in demo.css
     assert "#sidebar-run-list {\n            background: var(--block-background-fill) !important;" in demo.css
     assert "background: #ffffff !important;" not in demo.css
     assert "var(--body-text-color) 6%, transparent" in demo.css
@@ -134,9 +132,7 @@ def test_sidebar_delete_refreshes_history_table_and_choices(gradio_app_module, m
         run_id="run-sidebar-delete",
     )
 
-    status, history, delete_dropdown, sidebar_history = gradio_app_module.delete_history_run(
-        "run-sidebar-delete"
-    )
+    status, history, delete_dropdown, sidebar_history = gradio_app_module.delete_history_run("run-sidebar-delete")
 
     assert status == "Deleted saved run run-sidebar-delete."
     assert "Delete from sidebar" not in history
@@ -253,6 +249,30 @@ def test_references_do_not_search_again_when_no_source_was_used(
     assert html == ("<p>No retrieved evidence was used for generation.</p>")
 
 
+def test_references_distinguish_retrieval_from_unexecuted_generation(gradio_app_module):
+    cycle_details = {
+        "steps": {
+            "generation": {
+                "sources": [
+                    {
+                        "source_id": "arXiv:2205.15480v2",
+                        "title": "Validated 5G evidence",
+                        "abstract": "Closed-loop allocation evidence.",
+                    }
+                ],
+                "evidence_consumed": False,
+            }
+        }
+    }
+
+    html = gradio_app_module.get_references_html(cycle_details)
+
+    assert "Evidence Retrieval Completed" in html
+    assert "Validated evidence was retrieved" in html
+    assert "hypothesis generation did not execute" in html
+    assert "Validated 5G evidence" in html
+
+
 def test_references_hide_pdf_link_when_source_has_no_pdf(gradio_app_module):
     cycle_details = {
         "steps": {
@@ -363,12 +383,8 @@ def test_generation_results_explain_quality_gate_outcomes(gradio_app_module):
                     {
                         "verdict": "REJECT",
                         "weighted_score": 66.5,
-                        "hard_failures": [
-                            "The final hypothesis contains unsupported claims."
-                        ],
-                        "warnings": [
-                            "Weighted audit score is below 70/100."
-                        ],
+                        "hard_failures": ["The final hypothesis contains unsupported claims."],
+                        "warnings": ["Weighted audit score is below 70/100."],
                     }
                 ],
             }
@@ -381,6 +397,35 @@ def test_generation_results_explain_quality_gate_outcomes(gradio_app_module):
     assert "REJECT · 66.5/100" in html
     assert "The final hypothesis contains unsupported claims." in html
     assert "Weighted audit score is below 70/100." in html
+
+
+def test_generation_results_surface_recovery_warnings_and_stage_status(gradio_app_module):
+    warning = (
+        "Literature synthesis omitted analytical_rationale; a conservative "
+        "rationale was constructed from validated findings and gaps."
+    )
+    cycle_details = {
+        "iteration": 1,
+        "warnings": [warning],
+        "steps": {
+            "generation": {
+                "hypotheses": [],
+                "sources": [],
+                "stages": {
+                    "evidence_retrieval": {"status": "completed"},
+                    "literature_synthesis": {"status": "warning", "detail": warning},
+                    "hypothesis_generation": {"status": "completed"},
+                },
+            }
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+
+    assert "Generation completed with recovery warnings" in html
+    assert "Generation stage diagnostics" in html
+    assert "Literature synthesis:</strong> warning" in html
+    assert warning in html
 
 
 @pytest.mark.parametrize(
@@ -430,9 +475,7 @@ def test_ranking_two_explains_when_no_tournament_matches_are_eligible(
         "iteration": 1,
         "steps": {
             "ranking2": {
-                "hypotheses": [
-                    {"id": "H1", "title": "Only accepted hypothesis", "elo_score": 1200}
-                ],
+                "hypotheses": [{"id": "H1", "title": "Only accepted hypothesis", "elo_score": 1200}],
                 "tournament_results": [],
             }
         },
@@ -474,6 +517,29 @@ def test_ranking_result_displays_fallback_when_winner_reason_is_empty(
     assert "Why it won" in html
     assert "No reason was provided by the ranking judge." in html
     assert '<details open style="' in html
+
+
+def test_dynamic_ranking_steps_use_latest_round_for_final_rankings(gradio_app_module):
+    cycle_details = {
+        "iteration": 1,
+        "steps": {
+            "ranking_3": {
+                "hypotheses": [{"id": "H1", "title": "Round three leader", "elo_score": 1250}],
+                "tournament_results": [],
+            },
+            "ranking_4": {
+                "hypotheses": [{"id": "H2", "title": "Round four leader", "elo_score": 1290}],
+                "tournament_results": [],
+            },
+        },
+    }
+
+    html = gradio_app_module.format_cycle_results(cycle_details)
+    final_section = html.split("Final Rankings - Top Hypotheses", 1)[1]
+
+    assert "Round four leader" in final_section
+    assert "Round three leader" not in final_section
+    assert "No ranking step found" not in final_section
 
 
 def test_hypothesis_evidence_sources_are_clickable_and_validated(
@@ -562,6 +628,52 @@ def test_advanced_settings_exposes_available_model_choices(gradio_app_module):
     assert len(model_dropdowns) == 1
     assert "local/alternative-model" in str(model_dropdowns[0]["props"]["choices"])
     assert model_dropdowns[0]["props"]["interactive"] is True
+
+
+def test_execute_cycle_uses_configured_supervisor_entrypoint(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.chdir(tmp_path)
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Supervisor dispatch test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    cycle_supervisor.run.assert_called_once()
+    assert "completed successfully" in result["status"]
+
+
+def test_execute_cycle_reports_bounded_quality_gate_without_claiming_timeout(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.chdir(tmp_path)
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {
+            "ready": False,
+            "status": "generation_budget_exhausted",
+            "reasons": ["Need another accepted hypothesis."],
+        },
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Bounded quality gate test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    assert "completed its bounded Generation/Evolution work" in result["status"]
+    assert "reached its compute budget" not in result["status"]
 
 
 def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkeypatch, tmp_path):

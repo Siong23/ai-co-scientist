@@ -9,12 +9,14 @@ from app.agents import (
     Hypothesis,
     ResearchGoal,
     SupervisorAgent,
+    SupervisorDecision,
     SupervisorPlanner,
     assess_supervisor_state,
     decide_action_heuristically,
+    evaluate_finalization_readiness,
     parse_supervisor_decision,
 )
-from app.models import ReflectionReport
+from app.models import ClaimAssessment, ReflectionReport
 
 
 def _sample_hypothesis(hypothesis_id: str, rec: str | None = None, elo: float = 1200.0) -> Hypothesis:
@@ -30,6 +32,15 @@ def _sample_hypothesis(hypothesis_id: str, rec: str | None = None, elo: float = 
             evidence_quality_score=8,
             expected_research_value_score=8,
             recommendation=rec,
+            claims=[
+                ClaimAssessment(
+                    claim=f"Supported claim for {hypothesis_id}",
+                    status="SUPPORTED",
+                    confidence=8.0,
+                    supporting_evidence=[{"source_id": f"source:{hypothesis_id}"}],
+                )
+            ],
+            overall_confidence=8.0,
         )
     return h
 
@@ -113,6 +124,7 @@ def test_decide_action_heuristically():
     assert d4.action == "EVOLVE"
 
     # After evolution -> PROXIMITY
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
     state = assess_supervisor_state(
         context,
         goal,
@@ -231,7 +243,120 @@ def test_supervisor_run_dynamic_cycle():
     assert len(details["supervisor_decisions"]) > 0
     assert details["iteration"] == 1
     assert "meta_review" in details["steps"]
+    assert details["finalization"]["ready"] is False
+    assert details["supervisor_state"]["status"] == "incomplete"
+    assert context.supervisor_state["pending_tasks"] == []
     assert any(event.get("step") == "supervisor_planning" for event in details["research_trace"])
+
+
+def test_generation_trace_counts_unique_search_candidates_when_gate_retains_none():
+    supervisor = SupervisorAgent()
+    supervisor.generation_agent = Mock()
+
+    def fail_after_search(_goal, context):
+        context.last_retrieved_sources = []
+        context.last_hypothesis_audits = []
+        context.last_generation_diagnostics = {
+            "evidence_funnel": {
+                "raw_search_hits": 180,
+                "unique_candidates": 77,
+                "selected_sources": 10,
+                "committed_sources": 0,
+                "retrieved_passages": 0,
+                "coverage_approved_sources": 0,
+            },
+            "evidence_consumed": False,
+        }
+        return [], ["Strict evidence coverage failed."]
+
+    supervisor.generation_agent.generate_new_hypotheses.side_effect = fail_after_search
+    supervisor.generation_agent.rag_retriever.last_query_plan = None
+    supervisor.generation_agent.rag_retriever.last_query_fidelity = []
+    supervisor.generation_agent.rag_retriever.last_search_stats = []
+    published = []
+
+    supervisor.step_generation(
+        ResearchGoal(description="Test goal", num_hypotheses=1),
+        ContextMemory(),
+        lambda *args, **kwargs: published.append((args, kwargs)),
+        {},
+    )
+
+    assert published[-1][1]["source_count"] == 77
+
+
+def test_dynamic_cycle_does_not_repeat_full_generation_pipeline():
+    supervisor = SupervisorAgent()
+    supervisor.planner.plan_next_action = Mock(
+        side_effect=lambda *_args, **_kwargs: SupervisorDecision(
+            action="GENERATE",
+            reasoning="Accepted count is below target.",
+        )
+    )
+    generated = _sample_hypothesis("H1", "ACCEPT")
+
+    def generate_once(_goal, context, _publish, _details):
+        context.add_hypothesis(generated)
+        return [generated]
+
+    supervisor.step_generation = Mock(side_effect=generate_once)
+    supervisor.step_evolution = Mock(return_value=[])
+    supervisor.step_meta_review = Mock()
+    supervisor.step_proximity = Mock(return_value={})
+    context = ContextMemory()
+
+    details = supervisor.run_dynamic_cycle(
+        ResearchGoal(description="Test bounded generation", num_hypotheses=4),
+        context,
+        max_steps=10,
+        planner_mode="heuristic",
+    )
+
+    assert supervisor.step_generation.call_count == 1
+    assert [item["action"] for item in details["supervisor_decisions"]] == [
+        "GENERATE",
+        "EVOLVE",
+        "FINALIZE",
+    ]
+    assert supervisor.step_evolution.call_count == 1
+    assert details["supervisor_decisions"][-1]["requested_action"] == "GENERATE"
+    assert details["finalization"]["status"] == "generation_budget_exhausted"
+
+
+def test_generation_cap_routes_unreviewed_candidates_to_reflection():
+    supervisor = SupervisorAgent()
+    supervisor.planner.plan_next_action = Mock(
+        side_effect=lambda *_args, **_kwargs: SupervisorDecision(
+            action="GENERATE", reasoning="Generate more candidates."
+        )
+    )
+    generated = _sample_hypothesis("H1")
+
+    def generate_once(_goal, context, _publish, _details):
+        context.add_hypothesis(generated)
+        return [generated]
+
+    def reflect_once(_goal, context, _publish, _details, **_kwargs):
+        context.hypotheses["H1"].reflection_report = _sample_hypothesis("review", "ACCEPT").reflection_report
+
+    supervisor.step_generation = Mock(side_effect=generate_once)
+    supervisor.step_reflection = Mock(side_effect=reflect_once)
+    supervisor.step_evolution = Mock(return_value=[])
+    supervisor.step_meta_review = Mock()
+    supervisor.step_proximity = Mock(return_value={})
+
+    details = supervisor.run_dynamic_cycle(
+        ResearchGoal(description="Review before evolution", num_hypotheses=4),
+        ContextMemory(),
+        max_steps=10,
+        planner_mode="heuristic",
+    )
+
+    actions = [item["action"] for item in details["supervisor_decisions"]]
+    assert actions == ["GENERATE", "REFLECT", "EVOLVE", "FINALIZE"]
+    assert supervisor.step_generation.call_count == 1
+    assert supervisor.step_reflection.call_count == 1
+    assert supervisor.step_evolution.call_count == 1
 
 
 def test_assess_supervisor_state_with_proximity_data():
@@ -252,6 +377,132 @@ def test_assess_supervisor_state_with_proximity_data():
     assert state["cluster_count"] == 2
     assert state["unranked_accepted_count"] == 2
     assert state["unranked_accepted_ids"] == ["H1", "H2"]
+
+
+def test_supervisor_detects_elo_plateau_and_routes_to_evolution():
+    context = ContextMemory()
+    context.add_hypothesis(_sample_hypothesis("H1", "ACCEPT", elo=1301.0))
+    context.add_hypothesis(_sample_hypothesis("H2", "ACCEPT", elo=1199.0))
+    context.supervisor_state["elo_snapshots"] = [
+        {"top_elo": 1300.0, "ratings": {"H1": 1300.0, "H2": 1200.0}},
+        {"top_elo": 1301.0, "ratings": {"H1": 1301.0, "H2": 1199.0}},
+    ]
+    goal = ResearchGoal(description="Test plateau", num_hypotheses=2)
+    history = [{"action": "GENERATE"}, {"action": "REFLECT"}, {"action": "RANK"}]
+
+    state = assess_supervisor_state(context, goal, history=history)
+    decision = decide_action_heuristically(state, goal)
+
+    assert state["ratings_converged"] is True
+    assert state["top_elo_delta"] == 1.0
+    assert decision.action == "EVOLVE"
+    assert "plateaued" in decision.reasoning
+
+
+def test_supervisor_does_not_compare_plateau_across_different_candidate_sets():
+    context = ContextMemory()
+    context.add_hypothesis(_sample_hypothesis("H1", "ACCEPT", elo=1300.0))
+    context.add_hypothesis(_sample_hypothesis("H2", "ACCEPT", elo=1200.0))
+    context.supervisor_state["elo_snapshots"] = [
+        {"top_elo": 1300.0, "ratings": {"H1": 1300.0, "H2": 1200.0}},
+        {"top_elo": 1300.0, "ratings": {"H1": 1300.0, "H3": 1200.0}},
+    ]
+
+    state = assess_supervisor_state(context, ResearchGoal(description="Candidate-set test"))
+
+    assert state["ratings_converged"] is False
+    assert state["top_elo_delta"] is None
+
+
+def test_supervisor_ranks_unranked_evolved_candidates():
+    context = ContextMemory()
+    context.add_hypothesis(_sample_hypothesis("H1", "ACCEPT"))
+    context.add_hypothesis(_sample_hypothesis("H2", "ACCEPT"))
+    context.add_hypothesis(_sample_hypothesis("E1", "ACCEPT"))
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
+    goal = ResearchGoal(description="Evolved ranking", num_hypotheses=2)
+    history = [
+        {"action": "GENERATE"},
+        {"action": "REFLECT"},
+        {"action": "RANK"},
+        {"action": "RANK"},
+        {"action": "EVOLVE"},
+        {"action": "REFLECT"},
+    ]
+
+    state = assess_supervisor_state(context, goal, history=history)
+    decision = decide_action_heuristically(state, goal)
+
+    assert state["unranked_accepted_ids"] == ["E1"]
+    assert decision.action == "RANK"
+
+
+def test_finalization_gate_requires_review_ranking_and_evidence():
+    context = ContextMemory()
+    h1 = _sample_hypothesis("H1", "ACCEPT", elo=1210.0)
+    h2 = _sample_hypothesis("H2", "ACCEPT", elo=1190.0)
+    context.add_hypothesis(h1)
+    context.add_hypothesis(h2)
+    goal = ResearchGoal(description="Test finalization", num_hypotheses=2)
+
+    blocked = evaluate_finalization_readiness(context, goal)
+    assert blocked["ready"] is False
+    assert blocked["unranked_finalist_ids"] == ["H1", "H2"]
+    assert blocked["missing_evidence_ids"] == ["H1", "H2"]
+
+    h1.evidence_source_ids = ["source:1"]
+    h2.evidence_source_ids = ["source:2"]
+    h1.evidence_sources = [{"source_id": "source:1"}]
+    h2.evidence_sources = [{"source_id": "source:2"}]
+    context.last_evolution_attempts = [{"strategy": "grounding", "status": "accepted"}]
+    context.proximity_analysis = {"clusters": {0: ["H1"], 1: ["H2"]}}
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
+
+    ready = evaluate_finalization_readiness(context, goal)
+    assert ready["ready"] is True
+    assert ready["reasons"] == []
+
+
+def test_finalization_gate_blocks_failed_evolution_and_single_mechanism_cluster():
+    context = ContextMemory()
+    h1 = _sample_hypothesis("H1", "ACCEPT", elo=1210.0)
+    h2 = _sample_hypothesis("H2", "ACCEPT", elo=1190.0)
+    for index, hypothesis in enumerate((h1, h2), start=1):
+        hypothesis.evidence_source_ids = [f"source:{index}"]
+        hypothesis.evidence_sources = [{"source_id": f"source:{index}"}]
+        context.add_hypothesis(hypothesis)
+    context.tournament_results.append({"hypothesis_a": "H1", "hypothesis_b": "H2", "outcome": "A"})
+    context.last_evolution_attempts = [{"strategy": "grounding", "status": "rejected", "reason": "llm_error"}]
+    context.proximity_analysis = {"clusters": {0: ["H1", "H2"]}}
+
+    result = evaluate_finalization_readiness(context, ResearchGoal(description="Quality gate", num_hypotheses=2))
+
+    assert result["ready"] is False
+    assert result["successful_evolution"] is False
+    assert result["cluster_count"] == 1
+    assert any("successful Evolution" in reason for reason in result["reasons"])
+    assert any("hypothesis clusters" in reason for reason in result["reasons"])
+
+
+def test_supervisor_run_dispatches_configured_mode():
+    supervisor = SupervisorAgent(mode="dynamic")
+    supervisor.run_dynamic_cycle = Mock(return_value={"mode": "dynamic"})
+    supervisor.run_cycle = Mock(return_value={"mode": "sequential"})
+    context = ContextMemory()
+    goal = ResearchGoal(description="Dispatch test")
+
+    result = supervisor.run(goal, context)
+
+    assert result == {"mode": "dynamic"}
+    supervisor.run_dynamic_cycle.assert_called_once()
+    supervisor.run_cycle.assert_not_called()
+
+
+def test_supervisor_defaults_to_dynamic_production_mode():
+    supervisor = SupervisorAgent()
+
+    assert supervisor.mode == "dynamic"
+    assert supervisor.planner_mode == "heuristic"
 
 
 def test_supervisor_dynamic_cycle_safe_rank_filtering():

@@ -1,7 +1,16 @@
 import json
 
 from app.models import ResearchGoal
-from app.run_store import delete_run, history_html, list_runs, render_report, report_file_url, save_run, write_report
+from app.run_store import (
+    _final_hypotheses,
+    delete_run,
+    history_html,
+    list_runs,
+    render_report,
+    report_file_url,
+    save_run,
+    write_report,
+)
 
 FAKE_KEY = "LMSTUDIO-THIS-FAKE-KEY-MUST-NOT-PERSIST"
 
@@ -39,6 +48,15 @@ def _cycle_details():
             },
         },
     }
+
+
+def test_final_hypotheses_uses_latest_dynamic_ranking_round():
+    steps = {
+        "ranking_3": {"hypotheses": [{"id": "H3", "elo_score": 1300}]},
+        "ranking_4": {"hypotheses": [{"id": "H4", "elo_score": 1260}]},
+    }
+
+    assert _final_hypotheses(steps) == [{"id": "H4", "elo_score": 1260}]
 
 
 def test_save_run_persists_json_and_redacts_secrets(tmp_path, monkeypatch):
@@ -87,6 +105,62 @@ def test_report_escapes_user_and_model_content(tmp_path, monkeypatch):
     assert "<script>alert('trace')</script>" not in report
     assert "&lt;script&gt;alert" in report
     assert "Research Process" in report
+
+
+def test_report_persists_and_renders_evidence_funnel_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
+    details = _cycle_details()
+    details["steps"]["generation"] = {
+        "hypotheses": [],
+        "evidence_funnel": {
+            "raw_search_hits": 129,
+            "unique_candidates": 37,
+            "selected_sources": 10,
+            "acquisition_attempts": 4,
+            "committed_sources": 2,
+            "retrieved_passages": 2,
+            "coverage_approved_sources": 1,
+            "generation_consumed_sources": 0,
+        },
+        "evidence_pipeline": [
+            {
+                "requirement_id": "spikes",
+                "query": "traffic spike measurements",
+                "candidate_source_id": "arXiv:1234.5678",
+                "provider": "arxiv",
+                "raw_result_count": 80,
+                "candidate_rank": 2,
+                "reserved_for_requirement": True,
+                "pdf_eligible": True,
+                "acquisition_attempted": True,
+                "acquisition_result": "committed",
+                "index_status": "COMMITTED",
+                "full_text_chunk_count": 12,
+                "selected_chunk_ids": ["chunk-1"],
+                "strict_gate_rejection_reason": "retained_committed_full_text_passage",
+                "coverage_contribution": True,
+            }
+        ],
+    }
+    save_run(
+        research_goal=ResearchGoal("Diagnose evidence loss"),
+        cycle_details=details,
+        status="failed",
+        references_html="",
+        results_html="",
+        run_id="run-evidence-funnel",
+    )
+
+    saved = json.loads((tmp_path / "runs" / "run-evidence-funnel.json").read_text(encoding="utf-8"))
+    generation = saved["cycle_details"]["steps"]["generation"]
+    assert generation["evidence_funnel"]["raw_search_hits"] == 129
+    assert generation["evidence_pipeline"][0]["requirement_id"] == "spikes"
+    report = render_report(saved)
+    assert "Evidence funnel" in report
+    assert "Evidence path diagnostics" in report
+    assert "arXiv:1234.5678" in report
+    assert "traffic spike measurements" in report
+    assert "chunk-1" in report
 
 
 def test_history_lists_runs_and_creates_report(tmp_path, monkeypatch):

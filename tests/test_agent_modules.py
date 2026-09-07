@@ -39,6 +39,7 @@ def test_agents_are_reexported_from_individual_modules():
         assert facade_class is modular_class
         assert facade_class.__module__.startswith("app.agents_modules.")
 
+
 def test_agent_helpers_are_implemented_outside_the_compatibility_facade():
     helper_functions = (
         call_llm_for_generation,

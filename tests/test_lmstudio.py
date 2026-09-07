@@ -1,5 +1,7 @@
 """Offline tests for the LM Studio integration boundary."""
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -71,12 +73,13 @@ def test_call_llm_uses_local_openai_compatible_api(monkeypatch):
         result = call_llm("prompt", temperature=0.2, model="selected-model")
 
     assert result == "LOCAL RESPONSE"
-    mock_openai.assert_called_once_with(
-        base_url="http://localhost:1234/v1",
-        api_key="secret",
-        max_retries=0,
-        timeout=utils.config.get("llm_request_timeout_seconds", 180),
-    )
+    mock_openai.assert_called_once()
+    client_args = mock_openai.call_args.kwargs
+    assert client_args["base_url"] == "http://localhost:1234/v1"
+    assert client_args["api_key"] == "secret"
+    assert client_args["max_retries"] == 0
+    assert client_args["timeout"].connect == utils.config.get("lmstudio_connect_timeout_seconds", 10)
+    assert client_args["timeout"].read == utils.config.get("llm_request_timeout_seconds", 180)
     mock_openai.return_value.chat.completions.create.assert_called_once_with(
         model="selected-model",
         messages=[{"role": "user", "content": "prompt"}],

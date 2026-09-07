@@ -1,6 +1,7 @@
 """Offline tests of the LLM boundary: parsing and error propagation."""
 
 import json
+import threading
 from unittest.mock import MagicMock, patch
 
 import app.utils as utils
@@ -200,11 +201,7 @@ def test_generation_retries_when_model_reports_incomplete_candidate_response():
         "source_ids": ["arXiv:1111.1111"],
     }
     incomplete_error = json.dumps(
-        {
-            "error": (
-                "Incomplete candidate response: missing closing brackets and remaining fields."
-            )
-        }
+        {"error": ("Incomplete candidate response: missing closing brackets and remaining fields.")}
     )
 
     with patch(
@@ -225,9 +222,7 @@ def test_generation_recovers_when_format_repair_reports_missing_candidate_conten
         "feasibility": "Complete feasibility.",
         "source_ids": ["arXiv:1111.1111"],
     }
-    incomplete_error = json.dumps(
-        {"error": "Incomplete candidate response: missing remaining fields."}
-    )
+    incomplete_error = json.dumps({"error": "Incomplete candidate response: missing remaining fields."})
 
     with patch(
         "app.agents.call_llm",
@@ -291,10 +286,10 @@ def test_reflection_error_returns_not_reviewed():
     hypothesis = Hypothesis(text="some hypothesis", hypothesis_id="test-id-1")
     research_goal = ResearchGoal(description="test goal", constraints="")
     context = ContextMemory()
-    
+
     with patch("app.agents.call_llm", return_value="Error: API call failed"):
         review = call_llm_for_reflection(hypothesis, research_goal, context)
-    
+
     assert review["novelty_review"] == "UNREVIEWED"
     assert review["feasibility_review"] == "UNREVIEWED"
     assert review["references"] == []
@@ -405,37 +400,82 @@ def test_reflection_three_tier_recommendations():
     from app.agents_modules.reflection_helpers import _recommendation_from_scores
 
     # All >= 5 -> ACCEPT
-    assert _recommendation_from_scores({
-        "alignment_score": 5, "novelty_score": 6, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "ACCEPT"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 5,
+                "novelty_score": 6,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "ACCEPT"
+    )
 
     # Any in [3, 4] and none < 3 -> REVISE
-    assert _recommendation_from_scores({
-        "alignment_score": 5, "novelty_score": 4, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "REVISE"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 5,
+                "novelty_score": 4,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "REVISE"
+    )
 
-    assert _recommendation_from_scores({
-        "alignment_score": 3, "novelty_score": 6, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "REVISE"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 3,
+                "novelty_score": 6,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "REVISE"
+    )
 
     # Any < 3 -> REJECT
-    assert _recommendation_from_scores({
-        "alignment_score": 2, "novelty_score": 6, "feasibility_score": 7,
-        "plausibility_score": 8, "testability_score": 5, "evidence_quality_score": 9,
-        "expected_research_value_score": 10,
-    }) == "REJECT"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 2,
+                "novelty_score": 6,
+                "feasibility_score": 7,
+                "plausibility_score": 8,
+                "testability_score": 5,
+                "evidence_quality_score": 9,
+                "expected_research_value_score": 10,
+            }
+        )
+        == "REJECT"
+    )
 
-    assert _recommendation_from_scores({
-        "alignment_score": 1, "novelty_score": 1, "feasibility_score": 1,
-        "plausibility_score": 1, "testability_score": 1, "evidence_quality_score": 1,
-        "expected_research_value_score": 1,
-    }) == "REJECT"
+    assert (
+        _recommendation_from_scores(
+            {
+                "alignment_score": 1,
+                "novelty_score": 1,
+                "feasibility_score": 1,
+                "plausibility_score": 1,
+                "testability_score": 1,
+                "evidence_quality_score": 1,
+                "expected_research_value_score": 1,
+            }
+        )
+        == "REJECT"
+    )
 
 
 def test_reflection_rejects_model_references_when_no_verified_sources_exist():
@@ -589,6 +629,51 @@ def test_reflection_agent_stores_sub_claim_assessments_on_report():
     assert hypothesis.reflection_report.claims[0].claim == "The method improves recall."
     assert hypothesis.reflection_report.claims[0].confidence == 8.0
     assert hypothesis.reflection_report.overall_confidence == 8.0
+
+
+def test_reflection_agent_reviews_independent_hypotheses_concurrently():
+    hypotheses = [Hypothesis(text=f"hypothesis {index}", hypothesis_id=f"H{index}") for index in range(3)]
+    all_started = threading.Barrier(3, timeout=2)
+
+    def review(hypothesis, **kwargs):
+        all_started.wait()
+        return {
+            "novelty_review": "HIGH",
+            "feasibility_review": "HIGH",
+            "alignment_score": 8,
+            "novelty_score": 8,
+            "feasibility_score": 8,
+            "plausibility_score": 8,
+            "testability_score": 8,
+            "evidence_quality_score": 8,
+            "expected_research_value_score": 8,
+            "strengths": [],
+            "weaknesses": [],
+            "recommendation": "ACCEPT",
+            "comment": f"Reviewed {hypothesis.hypothesis_id}.",
+            "references": [],
+            "sub_claims": [hypothesis.text],
+        }
+
+    with (
+        patch("app.agents_modules.reflection.call_llm_for_reflection", side_effect=review),
+        patch(
+            "app.agents_modules.reflection.evaluate_claims",
+            return_value={"claims": [], "overall_confidence": 8.0},
+        ) as evaluate,
+        patch.dict("app.agents_modules.reflection.config", {"reflection": {"max_workers": 3}}),
+    ):
+        ReflectionAgent().review_hypotheses(
+            hypotheses,
+            ContextMemory(),
+            ResearchGoal(description="test goal", constraints=""),
+        )
+
+    assert evaluate.call_count == 3
+    assert {call.kwargs["claims"][0] for call in evaluate.call_args_list} == {
+        hypothesis.text for hypothesis in hypotheses
+    }
+    assert all(hypothesis.reflection_report is not None for hypothesis in hypotheses)
 
 
 def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():

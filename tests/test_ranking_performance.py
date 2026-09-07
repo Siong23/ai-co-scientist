@@ -69,6 +69,7 @@ from app.models import ContextMemory, Hypothesis, PairwiseDecision, ReflectionRe
 # Test helpers
 # ---------------------------------------------------------------------------
 
+
 def _reflection_report(
     novelty=7.0,
     feasibility=7.0,
@@ -89,6 +90,7 @@ def _reflection_report(
         recommendation="ACCEPT",
         overall_confidence=8.0,
     )
+
 
 def _hypothesis(hypothesis_id: str, elo_score: float = 1200.0, reflection_report=None) -> Hypothesis:
     """Create a minimal hypothesis for testing."""
@@ -192,9 +194,7 @@ Confidence:
 8
 """
 
-    assert parse_short_justification(response) == (
-        "Hypothesis A has stronger experimental evidence."
-    )
+    assert parse_short_justification(response) == ("Hypothesis A has stronger experimental evidence.")
 
 
 def test_pairwise_justification_parser_accepts_unlabelled_decision_explanation():
@@ -207,9 +207,7 @@ Decisive Criteria:
 Confidence: 7
 """
 
-    assert parse_short_justification(response) == (
-        "Hypothesis B presents a more feasible validation plan."
-    )
+    assert parse_short_justification(response) == ("Hypothesis B presents a more feasible validation plan.")
 
 
 def test_formatted_reflection_report_omits_obsolete_contradictions():
@@ -221,6 +219,7 @@ def test_formatted_reflection_report_omits_obsolete_contradictions():
 # ---------------------------------------------------------------------------
 # 1. LLM CALL EFFICIENCY
 # ---------------------------------------------------------------------------
+
 
 def test_pairwise_ranking_uses_one_llm_call():
     """Improved ranking should use one LLM adjudication per pair."""
@@ -236,7 +235,6 @@ def test_pairwise_ranking_uses_one_llm_call():
         "app.agents_modules.ranking_helpers._call_llm",
         return_value=response,
     ) as call_llm:
-
         decision = run_pairwise_debate(
             _hypothesis("A"),
             _hypothesis("B"),
@@ -257,6 +255,7 @@ def test_pairwise_ranking_uses_one_llm_call():
 # 2. EXECUTION TIME
 # ---------------------------------------------------------------------------
 
+
 def test_pairwise_ranking_execution_time():
     """Measure the runtime of a single pairwise ranking decision."""
 
@@ -271,7 +270,6 @@ def test_pairwise_ranking_execution_time():
         "app.agents_modules.ranking_helpers._call_llm",
         return_value=response,
     ):
-
         start = perf_counter()
 
         decision = run_pairwise_debate(
@@ -326,15 +324,9 @@ def test_full_tournament_real_execution_time():
 
     elapsed = perf_counter() - start
 
-    print(
-        f"\nFull improved tournament execution time: "
-        f"{elapsed:.6f} seconds"
-    )
+    print(f"\nFull improved tournament execution time: {elapsed:.6f} seconds")
 
-    print(
-        f"Total tournament results: "
-        f"{len(context.tournament_results)}"
-    )
+    print(f"Total tournament results: {len(context.tournament_results)}")
 
     assert elapsed >= 0
 
@@ -342,6 +334,7 @@ def test_full_tournament_real_execution_time():
 # ---------------------------------------------------------------------------
 # 3. NUMBER OF PAIRWISE COMPARISONS
 # ---------------------------------------------------------------------------
+
 
 def test_tournament_comparison_count_with_new_hypothesis():
     """
@@ -373,7 +366,6 @@ def test_tournament_comparison_count_with_new_hypothesis():
         "app.agents_modules.ranking.run_pairwise_debate",
         side_effect=fake_debate,
     ) as debate:
-
         RankingAgent().run_tournament(
             hypotheses,
             context,
@@ -410,9 +402,46 @@ def test_tournament_comparison_count_with_new_hypothesis():
     assert compared_pairs == expected_pairs
 
 
+def test_tournament_caps_matches_without_requiring_proximity_data():
+    hypotheses = [_hypothesis(f"H{index}") for index in range(5)]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    with (
+        patch(
+            "app.agents_modules.ranking.run_pairwise_debate",
+            side_effect=lambda h_a, h_b, goal: _decision(h_a, h_b),
+        ) as debate,
+        patch.dict(config["ranking"], {"max_matches_per_cycle": 2}),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    assert debate.call_count == 2
+    assert len(context.tournament_results) == 2
+
+
+def test_tournament_does_not_repeat_completed_pairs():
+    hypotheses = [_hypothesis("A"), _hypothesis("B"), _hypothesis("C")]
+    context = ContextMemory()
+    context.tournament_results.append({"hypothesis_a": "A", "hypothesis_b": "B", "outcome": "A"})
+    goal = ResearchGoal(description="Test research goal")
+
+    with patch(
+        "app.agents_modules.ranking.run_pairwise_debate",
+        side_effect=lambda h_a, h_b, goal: _decision(h_a, h_b),
+    ) as debate:
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    compared_pairs = {
+        frozenset((call.args[0].hypothesis_id, call.args[1].hypothesis_id)) for call in debate.call_args_list
+    }
+    assert frozenset(("A", "B")) not in compared_pairs
+
+
 # ---------------------------------------------------------------------------
 # 4. RANKING CONSISTENCY
 # ---------------------------------------------------------------------------
+
 
 def test_ranking_consistency():
     """
@@ -439,9 +468,7 @@ def test_ranking_consistency():
 
     def deterministic_debate(h_a, h_b, research_goal):
 
-        outcome = outcomes[frozenset(
-            (h_a.hypothesis_id, h_b.hypothesis_id)
-        )]
+        outcome = outcomes[frozenset((h_a.hypothesis_id, h_b.hypothesis_id))]
 
         # Convert the predetermined winner into the current A/B orientation.
         if outcome == h_a.hypothesis_id:
@@ -463,7 +490,6 @@ def test_ranking_consistency():
             "app.agents_modules.ranking.run_pairwise_debate",
             side_effect=deterministic_debate,
         ):
-
             RankingAgent().run_tournament(
                 hypotheses,
                 context,
@@ -494,6 +520,7 @@ def test_ranking_consistency():
 # 5. A/B ORDER CONSISTENCY
 # ---------------------------------------------------------------------------
 
+
 def test_ab_order_consistency():
     """
     Reversing A/B order should not change the actual winning hypothesis.
@@ -518,7 +545,6 @@ def test_ab_order_consistency():
             response_ba,
         ],
     ):
-
         decision_ab = run_pairwise_debate(
             hypo_a,
             hypo_b,
@@ -533,17 +559,9 @@ def test_ab_order_consistency():
 
     # Convert both decisions back to the same original hypothesis orientation.
 
-    winner_ab = (
-        hypo_a.hypothesis_id
-        if decision_ab.outcome == "A"
-        else hypo_b.hypothesis_id
-    )
+    winner_ab = hypo_a.hypothesis_id if decision_ab.outcome == "A" else hypo_b.hypothesis_id
 
-    winner_ba = (
-        hypo_b.hypothesis_id
-        if decision_ba.outcome == "A"
-        else hypo_a.hypothesis_id
-    )
+    winner_ba = hypo_b.hypothesis_id if decision_ba.outcome == "A" else hypo_a.hypothesis_id
 
     print(f"\nWinner A/B ordering: {winner_ab}")
     print(f"Winner B/A ordering: {winner_ba}")
@@ -555,6 +573,7 @@ def test_ab_order_consistency():
 # ---------------------------------------------------------------------------
 # 6. ELO CONSISTENCY
 # ---------------------------------------------------------------------------
+
 
 def test_elo_results_are_reproducible():
     """
@@ -577,7 +596,6 @@ def test_elo_results_are_reproducible():
         }
 
         for winner_id, loser_id, outcome in matches:
-
             winner = hypotheses[winner_id]
             loser = hypotheses[loser_id]
 
@@ -587,10 +605,7 @@ def test_elo_results_are_reproducible():
                 k_factor=32,
             )
 
-        return {
-            hypothesis_id: hypothesis.elo_score
-            for hypothesis_id, hypothesis in hypotheses.items()
-        }
+        return {hypothesis_id: hypothesis.elo_score for hypothesis_id, hypothesis in hypotheses.items()}
 
     ratings_1 = run_matches()
     ratings_2 = run_matches()
@@ -607,6 +622,7 @@ def test_elo_results_are_reproducible():
 # 7. TIE AND ABSTAIN HANDLING
 # ---------------------------------------------------------------------------
 
+
 def test_tie_and_abstain_are_handled_correctly():
     """
     TIE should be parsed as TIE and ABSTAIN should be parsed as ABSTAIN.
@@ -614,13 +630,9 @@ def test_tie_and_abstain_are_handled_correctly():
     These outcomes should not be confused with A/B decisions.
     """
 
-    assert parse_pairwise_result(
-        _ranking_response("TIE")
-    ) == "TIE"
+    assert parse_pairwise_result(_ranking_response("TIE")) == "TIE"
 
-    assert parse_pairwise_result(
-        _ranking_response("ABSTAIN")
-    ) == "ABSTAIN"
+    assert parse_pairwise_result(_ranking_response("ABSTAIN")) == "ABSTAIN"
 
 
 def test_tie_updates_elo_but_abstain_does_not():
@@ -689,6 +701,7 @@ def test_tie_updates_elo_but_abstain_does_not():
 # 8. INACTIVE HYPOTHESES
 # ---------------------------------------------------------------------------
 
+
 def test_inactive_hypotheses_are_not_ranked():
     """
     Inactive hypotheses should not participate in tournament comparisons.
@@ -722,7 +735,6 @@ def test_inactive_hypotheses_are_not_ranked():
         "app.agents_modules.ranking.run_pairwise_debate",
         side_effect=fake_debate,
     ) as debate:
-
         RankingAgent().run_tournament(
             hypotheses,
             context,
@@ -744,14 +756,13 @@ def test_inactive_hypotheses_are_not_ranked():
     # The inactive hypothesis must not participate.
     assert "C" not in compared_pair
 
-    print(
-        f"\nActive hypotheses compared: {debate.call_count}"
-    )
+    print(f"\nActive hypotheses compared: {debate.call_count}")
 
 
 # ---------------------------------------------------------------------------
 # 9. TOURNAMENT RESULT RECORDING
 # ---------------------------------------------------------------------------
+
 
 def test_tournament_records_results_in_context():
     """
@@ -788,7 +799,6 @@ def test_tournament_records_results_in_context():
         "app.agents_modules.ranking.run_pairwise_debate",
         side_effect=fake_debate,
     ):
-
         RankingAgent().run_tournament(
             hypotheses,
             context,
@@ -847,6 +857,7 @@ def test_tournament_records_results_in_context():
     print("\nTournament result:")
     print(f"  {result}")
 
+
 def test_ranking_abstains_without_reflection_report():
     goal = ResearchGoal(
         description="Test research goal",
@@ -887,4 +898,3 @@ def test_ranking_model_resolution_from_config():
 
     with patch("app.config.config", {"llm_model": "default/model"}):
         assert _get_ranking_model() == "default/model"
-

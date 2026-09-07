@@ -35,19 +35,18 @@ LM Studio server). The autonomous-development process is specified in
   `.env.example`). Never write a key into code, tests, `config.yaml`, or logs;
   error text and log lines must pass through `redact_secrets` if they could
   contain one.
-- Never commit: secrets, `.env`, `results/`, `venv`, `.worktree/`, `.audit/`.
+- Never commit: secrets, `.env`, `results/`, `venv`, `.audit/`.
 - **Never add AI attribution to commits or PRs** — no `Co-Authored-By`, no
   session links, no "Generated with ..." footers.
 - Match existing code style; keep diffs minimal and scoped to the task.
 - New or changed behavior needs a test in the offline suite (mock the LLM
   boundary at `app.utils.OpenAI` or `app.agents.call_llm`).
 
-## Worktree protocol (local sessions)
+## Local checkout protocol
 
-When working on issue N locally: work inside the worktree `.worktree/N` on
-branch `loop/issue-N` (create with `make wt ISSUE=N`); never work directly on
-`main`'s checkout; never modify files outside your own worktree; remove the
-worktree after the PR merges (`make wt-clean ISSUE=N`).
+Work directly in the user's current checkout, including `main` when it is the
+active branch. Preserve unrelated user changes and keep edits scoped to the
+requested task.
 
 ## Pull request follow-up
 

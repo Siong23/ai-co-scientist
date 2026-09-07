@@ -7,15 +7,11 @@ def test_recognizes_direct_pdf_and_query_pdf_endpoints():
     assert normalize_pdf_url("https://example.org/papers/study.pdf?download=1") == (
         "https://example.org/papers/study.pdf?download=1"
     )
-    assert normalize_pdf_url("https://openreview.net/pdf?id=paper-id") == (
-        "https://openreview.net/pdf?id=paper-id"
-    )
+    assert normalize_pdf_url("https://openreview.net/pdf?id=paper-id") == ("https://openreview.net/pdf?id=paper-id")
 
 
 def test_converts_arxiv_abstract_url_to_pdf_url():
-    assert normalize_pdf_url("https://arxiv.org/abs/2501.01234v2") == (
-        "https://arxiv.org/pdf/2501.01234v2"
-    )
+    assert normalize_pdf_url("https://arxiv.org/abs/2501.01234v2") == ("https://arxiv.org/pdf/2501.01234v2")
 
 
 def test_finds_pdf_in_nested_provider_links():
