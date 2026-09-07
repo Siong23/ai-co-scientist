@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from app.agents_modules.code_generation_agent import CodeGenerationAgent
 from app.experiments.experiment_orchestrator import ExperimentOrchestrator
 from app.experiments.experiment_runner import ExperimentRunner
+from app.config import load_config
 from app.utils import call_llm
 
 
@@ -194,7 +195,33 @@ def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations(
 def test_experiment_orchestrator_uses_repository_dataset_by_default():
     orchestrator = ExperimentOrchestrator()
 
-    assert orchestrator.dataset_path == Path("data/5g_nidd/5g_nidd.csv")
+    assert orchestrator.dataset_path == (
+        Path(__file__).resolve().parents[1]
+        / "data/5g_nidd/5g_nidd.csv"
+    )
+
+
+def test_config_loads_from_repository_when_cwd_is_elsewhere(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    config = load_config()
+
+    assert config["logging_level"] is not None
+
+
+def test_experiment_runner_includes_stderr_in_nonzero_exit_error(tmp_path):
+    runner = ExperimentRunner(output_directory=tmp_path / "runs", timeout_seconds=10)
+    run_directory = runner.create_run_directory("stderr_details")
+    code_path = runner.prepare_generated_code(
+        "raise RuntimeError('external server failure')",
+        run_directory,
+    )
+
+    result = runner.execute(code_path, run_directory)
+
+    assert result["success"] is False
+    assert result["return_code"] == 1
+    assert "external server failure" in result["error"]
 
 
 def test_experiment_runner_executes_relative_code_path_from_run_directory(tmp_path):
