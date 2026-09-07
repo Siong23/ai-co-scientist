@@ -111,6 +111,35 @@ def test_save_run_persists_experiment_result(tmp_path, monkeypatch):
     assert saved["experiment_result"] == experiment_result
 
 
+def test_report_renders_experiment_visualizations(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
+    visualization_path = tmp_path / "experiment" / "loss_visualization.png"
+    visualization_path.parent.mkdir()
+    visualization_path.write_bytes(b"image")
+    experiment_result = {
+        "success": True,
+        "execution": {"outputs": {"metrics": {"accuracy": 0.95}, "visualizations": [str(visualization_path)]}},
+    }
+
+    run = save_run(
+        research_goal=ResearchGoal(description="Render experiment output"),
+        cycle_details={},
+        status="done",
+        references_html="",
+        results_html="",
+        experiment_result=experiment_result,
+        run_id="run-visualization",
+    )
+
+    report = render_report(run)
+    visualization_url = report_file_url(visualization_path)
+    assert "Automated Experiment" in report
+    assert "Evaluation Metrics" in report
+    assert "0.95" in report
+    assert f'<img src="{visualization_url}"' in report
+    assert "loss_visualization.png" in report
+
+
 def test_report_escapes_user_and_model_content(tmp_path, monkeypatch):
     monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
     goal = ResearchGoal(description="<script>alert('goal')</script>")

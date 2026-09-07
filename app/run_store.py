@@ -220,6 +220,9 @@ def render_report(run: Dict[str, Any]) -> str:
         html_parts.append("<p>No final hypotheses were available for this run.</p>")
 
     html_parts.append("</section>")
+    experiment_result = run.get("experiment_result")
+    if isinstance(experiment_result, dict) and experiment_result:
+        html_parts.append(_experiment_report_section(experiment_result))
     if research_trace:
         html_parts.extend(
             [
@@ -360,6 +363,60 @@ def render_report(run: Dict[str, Any]) -> str:
         ]
     )
     return "\n".join(html_parts)
+
+
+def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
+    execution = experiment_result.get("execution", {})
+    outputs = execution.get("outputs", {}) if isinstance(execution, dict) else {}
+    if not isinstance(outputs, dict):
+        outputs = {}
+
+    metrics = outputs.get("metrics", {})
+    errors = experiment_result.get("errors", [])
+    visualizations = outputs.get("visualizations", [])
+    if not isinstance(metrics, dict):
+        metrics = {}
+    if not isinstance(errors, list):
+        errors = [errors]
+    if not isinstance(visualizations, list):
+        visualizations = [visualizations]
+
+    parts = [
+        '<section><h2>Automated Experiment</h2>',
+        f"<p><strong>Status:</strong> {_escape('Completed' if experiment_result.get('success') else 'Failed')}</p>",
+    ]
+
+    if metrics:
+        parts.append("<h3>Evaluation Metrics</h3><table><tbody>")
+        for name, value in metrics.items():
+            parts.append(f"<tr><th>{_escape(name)}</th><td>{_escape(value)}</td></tr>")
+        parts.append("</tbody></table>")
+
+    if errors:
+        parts.append("<h3>Errors</h3><ul>")
+        parts.extend(f"<li>{_escape(error)}</li>" for error in errors)
+        parts.append("</ul>")
+
+    if visualizations:
+        parts.append("<h3>Visualizations</h3><div>")
+        for visualization in visualizations:
+            visualization_path = Path(str(visualization))
+            visualization_url = report_file_url(visualization_path)
+            label = _escape(visualization_path.name or visualization)
+            if visualization_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".svg"}:
+                parts.append(
+                    f'<figure><a href="{_escape(visualization_url)}" target="_blank">'
+                    f'<img src="{_escape(visualization_url)}" alt="{label}" style="max-width:100%;height:auto"></a>'
+                    f"<figcaption>{label}</figcaption></figure>"
+                )
+            else:
+                parts.append(f'<p><a href="{_escape(visualization_url)}" target="_blank">{label}</a></p>')
+        parts.append("</div>")
+    else:
+        parts.append("<p>No visualizations were produced.</p>")
+
+    parts.append("</section>")
+    return "\n".join(parts)
 
 
 def write_report(run: Dict[str, Any]) -> Path:
