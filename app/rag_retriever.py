@@ -43,6 +43,12 @@ class EvidenceAspect:
     description: str
     goal_quote: str = ""
 
+    @property
+    def coverage_description(self) -> str:
+        """Gate on user-stated scope, not a model's suggested search mechanism."""
+
+        return self.goal_quote.strip() or self.description
+
 
 HypothesisRole = Literal["primary", "alternative", "null"]
 SearchIntent = Literal["goal", "support", "counterevidence", "prior_art"]

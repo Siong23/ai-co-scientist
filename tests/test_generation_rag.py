@@ -20,6 +20,7 @@ from app.agents import (
 )
 from app.agents_modules.generation_helpers import (
     ResearchActionDecision,
+    call_llm_for_full_text_evidence_coverage,
     call_llm_for_research_action,
 )
 from app.config import config
@@ -1051,6 +1052,48 @@ def test_query_rewriting_retries_a_composite_requirement_as_atomic_quotes():
     assert "Atomize long or composite goal quotes" in second_prompt
 
 
+@pytest.mark.parametrize("requirement_id", ["5g_slice_api_spec", "3d_imaging", "6g_networks"])
+def test_query_rewriting_preserves_digit_leading_requirement_references(requirement_id):
+    goal = (
+        "Create a machine learning orchestrator that injects post-quantum cryptographic keys "
+        "into active 5G network slices without increasing latency"
+    )
+    payload = json.dumps(
+        {
+            "queries": [
+                {
+                    "query": "post-quantum cryptography 5G network slice key exchange benchmark",
+                    "evidence_requirement_id": requirement_id,
+                },
+                {
+                    "query": "machine learning orchestration 5G network slicing key distribution",
+                    "evidence_requirement_id": requirement_id,
+                },
+            ],
+            "required_terms": ["5G"],
+            "explicit_requirements": [
+                {
+                    "id": requirement_id,
+                    "goal_quote": "active 5G network slices",
+                    "evidence_need": "5G slice management protocols and key distribution constraints.",
+                }
+            ],
+            "exploration_directions": [],
+        }
+    )
+    validate_fidelity = Mock(return_value=(True, ""))
+    with patch("app.agents.call_llm", return_value=payload) as mock_llm:
+        plan, error = call_llm_for_search_queries(goal, query_fidelity_validator=validate_fidelity)
+
+    assert error is None
+    assert plan is not None
+    assert plan.explicit_requirements[0].aspect_id == requirement_id
+    assert all(query.evidence_requirement_id == requirement_id for query in plan.queries)
+    assert len(plan.queries) == 2
+    mock_llm.assert_called_once()
+    validate_fidelity.assert_called_once_with(plan)
+
+
 def test_query_rewriting_failure_stops_when_original_retrieval_is_empty():
     agent = GenerationAgent(
         minimum_relevant_sources=1,
@@ -1105,6 +1148,7 @@ def test_query_rewriting_failure_uses_original_candidates():
         ]
     )
 
+    context = ContextMemory()
     with (
         patch.object(
             GenerationAgent,
@@ -1125,7 +1169,7 @@ def test_query_rewriting_failure_uses_original_candidates():
     ):
         hypotheses, errors = agent.generate_new_hypotheses(
             ResearchGoal("Improve scientific creativity", num_hypotheses=1),
-            ContextMemory(),
+            context,
         )
 
     assert errors == []
@@ -1133,7 +1177,8 @@ def test_query_rewriting_failure_uses_original_candidates():
     assert hypotheses[0].evidence_source_ids == ["arXiv:1234.5678"]
     mock_retrieve.assert_not_called()
     coverage_prompt = mock_llm.call_args_list[2].args[0]
-    assert "goal_scope: Improve scientific creativity" in coverage_prompt
+    assert "coverage_requirement_1: Improve scientific creativity" in coverage_prompt
+    assert any("planner unavailable" in warning for warning in context.last_generation_diagnostics["warnings"])
 
 
 def test_rag_defaults_keep_more_candidate_evidence():
@@ -1308,6 +1353,86 @@ def test_source_id_resolution_accepts_exact_semantic_scholar_id():
 
     assert error is None
     assert selected_ids == ["s2:paper-id"]
+
+
+@pytest.mark.parametrize(
+    "goal_quote",
+    ["without increasing latency", "using hardware acceleration without increasing latency"],
+)
+def test_coverage_uses_user_scope_instead_of_model_added_requirements(goal_quote):
+    aspect = EvidenceAspect(
+        "pqc_hardware_acceleration",
+        "Hardware acceleration capabilities for PQC algorithms in 5G edge infrastructure.",
+        goal_quote,
+    )
+
+    def grade(prompt, **kwargs):
+        requirements = prompt.split("Explicit requirements:\n", 1)[1].split("\n\nRetrieved sources:", 1)[0]
+        assert requirements == f"- coverage_requirement_1: {goal_quote}"
+        assert "pqc_hardware_acceleration" not in prompt
+        assert aspect.description not in requirements
+        # An explicitly requested mechanism must remain a gate. The same
+        # mechanism added only by the query planner must not become one.
+        supported = "using hardware acceleration" not in requirements
+        return json.dumps(
+            {
+                "aspect_coverage": [
+                    {"aspect_id": "coverage_requirement_1", "source_ids": ["arXiv:2507.17074v1"] if supported else []}
+                ],
+                "gap_queries": [] if supported else ["PQC hardware acceleration benchmarks"],
+                "reason": "Latency benchmarks are available; hardware acceleration is not covered.",
+            }
+        )
+
+    with patch("app.agents.call_llm", side_effect=grade):
+        coverage, error = call_llm_for_evidence_coverage(
+            "Inject post-quantum keys into 5G slices " + goal_quote,
+            (aspect,),
+            "Source ID: arXiv:2507.17074v1\nFull-text excerpt: PQC key exchange latency benchmarks.",
+            {"arXiv:2507.17074v1"},
+        )
+
+    assert error is None
+    assert coverage.sufficient is ("using hardware acceleration" not in goal_quote)
+    # Search expansion still retains the optional technique.
+    assert any(aspect.description in query for query in build_evidence_queries("5G PQC", (aspect,)))
+
+
+@pytest.mark.parametrize("full_text", [False, True])
+def test_coverage_merges_duplicate_user_spans_and_restores_requirement_ids(full_text):
+    aspects = (
+        EvidenceAspect("latency_benchmark", "Latency benchmarks", "without increasing latency"),
+        EvidenceAspect("hardware_acceleration", "Hardware mechanisms", "without increasing latency"),
+        EvidenceAspect("slicing", "Network slices", "active 5G network slices"),
+    )
+    source_id = "arXiv:2507.17074v1"
+    ref = {"source_id": source_id, "chunk_id": "chunk-1", "text": "Measured latency."}
+    row = {"aspect_id": "coverage_requirement_1"}
+    row.update({"evidence_refs": [ref]} if full_text else {"source_ids": [source_id, "invented"]})
+    payload = json.dumps(
+        {"aspect_coverage": [row], "gap_queries": ["5G slicing"], "reason": "Domain evidence missing."}
+    )
+    with patch("app.agents.call_llm", return_value=payload) as mock_llm:
+        if full_text:
+            coverage, error = call_llm_for_full_text_evidence_coverage(
+                "Manage active 5G network slices without increasing latency", aspects, "Evidence", {"chunk-1": ref}
+            )
+        else:
+            coverage, error = call_llm_for_evidence_coverage(
+                "Manage active 5G network slices without increasing latency", aspects, "Evidence", {source_id}
+            )
+    assert error is None
+    assert coverage.aspect_source_ids["latency_benchmark"] == (source_id,)
+    assert coverage.aspect_source_ids["hardware_acceleration"] == (source_id,)
+    assert coverage.missing_aspect_ids == ("slicing",)
+    assert not coverage.sufficient
+    prompt = mock_llm.call_args.args[0]
+    assert "hardware_acceleration" not in prompt
+    requirements = prompt.split("Explicit requirements:\n", 1)[1].split("\n\nRetrieved", 1)[0]
+    assert requirements.count("without increasing latency") == 1
+    if full_text:
+        assert coverage.aspect_evidence_refs["latency_benchmark"] == (ref,)
+        assert coverage.aspect_evidence_refs["hardware_acceleration"] == (ref,)
 
 
 def test_coverage_grader_ignores_unknown_sources_and_finds_missing_aspects():
