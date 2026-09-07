@@ -659,7 +659,7 @@ class GenerationAgent:
         candidates = tuple(
             dict.fromkeys(
                 [
-                    *(aspect.description for aspect in missing_aspects),
+                    *(aspect.coverage_description for aspect in missing_aspects),
                     *coverage.gap_queries,
                 ]
             )
@@ -673,9 +673,9 @@ class GenerationAgent:
             )
             suffix = suffixes[strategy_round % len(suffixes)]
             fresh = tuple(
-                f"{aspect.description.rstrip('.')} {suffix}"
+                f"{aspect.coverage_description.rstrip('.')} {suffix}"
                 for aspect in missing_aspects
-                if f"{aspect.description.rstrip('.')} {suffix}".casefold() not in excluded
+                if f"{aspect.coverage_description.rstrip('.')} {suffix}".casefold() not in excluded
             )
         return fresh[: self.rag_retriever.query_count]
 
@@ -686,7 +686,7 @@ class GenerationAgent:
     ) -> tuple[SearchQuery, ...]:
         """Keep missing-requirement identity attached through retrieval/ranking."""
 
-        aspects_by_description = {aspect.description.casefold(): aspect for aspect in missing_aspects}
+        aspects_by_description = {aspect.coverage_description.casefold(): aspect for aspect in missing_aspects}
         sole_aspect = missing_aspects[0] if len(missing_aspects) == 1 else None
         tagged_queries = []
         stop_words = {"and", "for", "the", "with", "from", "into", "this", "that", "real", "time"}
@@ -717,7 +717,7 @@ class GenerationAgent:
             tagged_queries.append(
                 SearchQuery(
                     query=query_text,
-                    sub_question=aspect.description if aspect is not None else query_text,
+                    sub_question=aspect.coverage_description if aspect is not None else query_text,
                     purpose="Fill a missing explicit evidence requirement",
                     source_type="all",
                     evidence_requirement_id=aspect.aspect_id if aspect is not None else None,
@@ -1184,6 +1184,10 @@ Your refined contribution:
 
         # If query planning failed but original retrieval succeeded, use fallback plan
         if rewrite_error or query_plan is None:
+            context.last_generation_diagnostics["warnings"].append(
+                redact_secrets(rewrite_error or "Query rewriting failed.")
+                + " Continuing with original-goal evidence and a minimal fallback search plan."
+            )
             logger.warning(
                 "%s Continuing with %d original-goal candidate(s) and a minimal fallback plan.",
                 rewrite_error or "Query rewriting failed.",
@@ -1425,7 +1429,7 @@ Your refined contribution:
 
                 # Evidence still insufficient after all corrective rounds and fallbacks
                 missing_descriptions = [
-                    aspect.description.rstrip(".")
+                    aspect.coverage_description.rstrip(".")
                     for aspect in query_plan.explicit_requirements
                     if aspect.aspect_id in coverage.missing_aspect_ids
                 ]
@@ -1618,7 +1622,7 @@ Your refined contribution:
             return [], [error]
 
         synthesis_warnings = list(synthesis.warnings)
-        context.last_generation_diagnostics["warnings"] = synthesis_warnings
+        context.last_generation_diagnostics["warnings"].extend(synthesis_warnings)
         context.last_generation_diagnostics["literature_synthesis"] = {
             "status": "warning" if synthesis_warnings else "completed",
             "detail": synthesis_warnings[0] if synthesis_warnings else "Validated literature synthesis completed.",
@@ -1663,7 +1667,7 @@ Your refined contribution:
         assumption_text = format_assumption_assessments(assumptions)
 
         coverage_map = "\n".join(
-            (f"- {aspect.description}: " + ", ".join(coverage.aspect_source_ids[aspect.aspect_id]))
+            (f"- {aspect.coverage_description}: " + ", ".join(coverage.aspect_source_ids[aspect.aspect_id]))
             for aspect in query_plan.explicit_requirements
         )
 
