@@ -585,157 +585,236 @@ IMPORTANT RULES:
 
 30. Never use test data for model selection or hyperparameter tuning.
 
+31. Identify the target variable explicitly before preprocessing.
+
+32. Do not use the target variable itself as an input feature.
+
+33. Inspect feature names and experiment metadata for variables that may
+    directly encode, derive from, or reveal the target.
+
+34. Features such as attack labels, attack categories, attack tools,
+    outcome indicators, or post-event annotations may contain target
+    information.
+
+35. If a feature is clearly derived from the target or would not be
+    available at prediction time in a real-world intrusion-detection
+    setting, exclude it from the predictive feature set.
+
+36. Do not remove potentially informative features merely because they are
+    correlated with the target. Exclude a feature when there is a clear
+    methodological, temporal, or target-leakage reason.
+
+37. Record excluded target-related features and the reason for excluding
+    them in the experiment summary.
+
+38. Ensure that the final feature set represents information that would
+    realistically be available to the intrusion-detection model at
+    prediction time.
+
+39. Check for duplicated or near-duplicated records when appropriate,
+    particularly when unusually high validation or test performance occurs.
+
+40. Extremely high or perfect validation/test performance must not
+    automatically be interpreted as evidence of a successful model.
+    Consider possible target leakage, duplicated records, or other
+    methodological issues.
+
+41. Preserve the scientific intent of the hypothesis while preventing
+    methodological data leakage.
+
 ============================================================
 5. REPRODUCIBILITY
 ============================================================
 
-31. Set deterministic random seeds for Python, NumPy, and PyTorch where
+42. Set deterministic random seeds for Python, NumPy, and PyTorch where
     appropriate.
 
-32. When CUDA is available, configure PyTorch reproducibility appropriately.
+43. When CUDA is available, configure PyTorch reproducibility appropriately.
 
-33. Do not unnecessarily sacrifice performance for reproducibility.
+44. Do not unnecessarily sacrifice performance for reproducibility.
 
-34. Record the random seed in the final experiment summary.
+45. Record the random seed in the final experiment summary.
 
 ============================================================
 6. PYTORCH MODEL
 ============================================================
 
-35. Use PyTorch for the deep-learning experiment.
+46. Use PyTorch for the deep-learning experiment.
 
-36. Implement the architecture specified by the selected hypothesis.
+47. Implement the architecture specified by the selected hypothesis.
 
-37. Use torch.nn.Module appropriately.
+48. Use torch.nn.Module appropriately.
 
-38. Use an appropriate loss function.
+49. Use an appropriate loss function.
 
-39. Use an appropriate optimizer.
+50. Use an appropriate optimizer.
 
-40. Use model.train() during training.
+51. Use model.train() during training.
 
-41. Use model.eval() during validation and testing.
+52. Use model.eval() during validation and testing.
 
-42. Use torch.no_grad() during validation and testing when gradients are
+53. Use torch.no_grad() during validation and testing when gradients are
     not required.
 
-43. Save the best-performing model checkpoint according to validation
+54. Save the best-performing model checkpoint according to validation
     performance when appropriate.
 
-44. Reload the best checkpoint before final test evaluation when appropriate.
+55. Reload the best checkpoint before final test evaluation when appropriate.
 
 ============================================================
 7. GPU AND DEVICE HANDLING
 ============================================================
 
-45. Automatically detect whether CUDA is available.
+56. Automatically detect whether CUDA is available.
 
-46. Use:
+57. Use:
 
     torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-47. Fall back to CPU automatically when CUDA is unavailable.
+58. Fall back to CPU automatically when CUDA is unavailable.
 
-48. Never assume that a GPU is available.
+59. Never assume that a GPU is available.
 
-49. Print the selected device.
+60. Print the selected device.
 
-50. When CUDA is available, print the GPU name.
+61. When CUDA is available, print the GPU name.
 
-51. Move the model to the selected device.
+62. Move the model to the selected device.
 
-52. Move training, validation, and test tensors to the selected device
+63. Move training, validation, and test tensors to the selected device
     efficiently.
 
-53. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
+64. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
 
-54. Do not repeatedly transfer the same tensors between CPU and GPU inside
+65. Do not repeatedly transfer the same tensors between CPU and GPU inside
     performance-critical loops.
 
-55. When CUDA is available, consider using pin_memory=True in DataLoader.
+66. When CUDA is available, consider using pin_memory=True in DataLoader.
 
-56. When appropriate, use non_blocking=True for tensor transfers.
+67. When appropriate, use non_blocking=True for tensor transfers.
 
-57. The experiment must remain executable on CPU when CUDA is unavailable.
+68. The experiment must remain executable on CPU when CUDA is unavailable.
 
 ============================================================
 8. COMPUTATIONAL EFFICIENCY
 ============================================================
 
-58. The generated experiment must be suitable for automated execution on
+69. The generated experiment must be suitable for automated execution on
     a shared CPU/GPU server.
 
-59. Choose a reasonable batch size based on the dataset and model size.
+70. Choose a batch size appropriate for the dataset size, model complexity,
+    and available hardware.
 
-60. Do not intentionally use an unnecessarily small batch size.
+71. For large tabular datasets with relatively small neural networks,
+    prefer a moderately large batch size when GPU memory permits.
 
-61. Do not automatically use an extremely large batch size.
+72. Do not default to unnecessarily small batch sizes such as 32, 64, or
+    128 for very large tabular datasets unless the experiment specifically
+    requires them.
 
-62. Do not create unnecessarily large models.
+73. When appropriate, consider batch sizes such as 512, 1024, 2048, or
+    another hardware-appropriate value.
 
-63. Do not use unnecessarily many layers, hidden units, or parameters unless
+74. The selected batch size must remain safe for available GPU memory.
+    If necessary, use a smaller batch size to avoid out-of-memory errors.
+
+75. Do not automatically use an extremely large batch size.
+
+76. Do not create unnecessarily large models.
+
+77. Do not use unnecessarily many layers, hidden units, or parameters unless
     required by the hypothesis.
 
-64. Do not use an unnecessarily large number of training epochs.
+78. Do not use an unnecessarily large number of training epochs.
 
-65. Use a reasonable maximum epoch limit.
+79. Use a reasonable maximum epoch limit.
 
-66. Use early stopping based on validation performance when scientifically
+80. Use early stopping based on validation performance when scientifically
     appropriate and when it does not conflict with the experiment
     specification.
 
-67. Avoid repeated dataset loading.
+81. Early stopping should stop training when validation performance has
+    converged and has not meaningfully improved for a reasonable patience
+    period.
 
-68. Avoid repeated preprocessing.
+82. Do not continue training for many additional epochs after validation
+    performance has clearly converged.
 
-69. Avoid redundant model evaluation.
+83. Use a reasonable early-stopping patience value rather than an
+    excessively large patience value.
 
-70. Avoid unnecessary computations inside the training loop.
+84. Avoid repeated dataset loading.
 
-71. Avoid unnecessarily expensive visualizations.
+85. Avoid repeated preprocessing.
 
-72. Do not optimize for speed by changing the scientific objective.
+86. Avoid redundant model evaluation.
+
+87. Avoid unnecessary computations inside the training loop.
+
+88. When the dataset is already loaded into memory, configure the DataLoader
+    efficiently.
+
+89. When CUDA is available, consider pin_memory=True when it provides a
+    benefit.
+
+90. When appropriate, use non_blocking=True for CPU-to-GPU tensor transfers.
+
+91. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
+
+92. Do not use unnecessarily expensive visualizations.
+
+93. Do not optimize for speed by changing the scientific objective.
+
+94. If the hypothesis does not specify an exact batch size or number of
+    epochs, choose values that provide a reasonable balance between
+    scientific validity and computational efficiency.
+
+95. Do not artificially increase model size, batch size, or training
+    duration merely to increase GPU utilization.
+
+96. Computational-efficiency improvements must not change the research
+    objective, target variable, dataset, or proposed model architecture.
 
 ============================================================
 9. OPTIONAL MIXED PRECISION
 ============================================================
 
-73. Mixed-precision training may be used when appropriate for the selected
+97. Mixed-precision training may be used when appropriate for the selected
     model and CUDA hardware.
 
-74. If mixed precision is used, it must safely fall back to normal precision
+98. If mixed precision is used, it must safely fall back to normal precision
     when CUDA is unavailable.
 
-75. Do not use mixed precision solely for the purpose of using GPU features
+99. Do not use mixed precision solely for the purpose of using GPU features
     if it is unlikely to provide a meaningful benefit.
 
 ============================================================
 10. TRAINING
 ============================================================
 
-76. Implement a complete training loop.
+100. Implement a complete training loop.
 
-77. Validate the model after each epoch when appropriate.
+101. Validate the model after each epoch when appropriate.
 
-78. Record training loss and validation metrics.
+102. Record training loss and validation metrics.
 
-79. Save the best model checkpoint.
+103. Save the best model checkpoint.
 
-80. Print concise training progress.
+104. Print concise training progress.
 
-81. Do not produce unnecessarily large console output.
+105. Do not produce unnecessarily large console output.
 
-82. Training must have a bounded maximum number of epochs.
+106. Training must have a bounded maximum number of epochs.
 
-83. Never create an infinite training loop.
+107. Never create an infinite training loop.
 
 ============================================================
 11. EVALUATION
 ============================================================
 
-84. Evaluate the final model on the held-out test set.
+108. Evaluate the final model on the held-out test set.
 
-85. For classification experiments, calculate:
+109. For classification experiments, calculate:
 
     - Accuracy
     - Weighted Precision
@@ -743,29 +822,29 @@ IMPORTANT RULES:
     - Weighted F1-score
     - Confusion Matrix
 
-86. Use additional metrics when required by the experiment specification.
+110. Use additional metrics when required by the experiment specification.
 
-87. Do not use the test set during model selection.
+111. Do not use the test set during model selection.
 
-88. Save evaluation metrics in metrics.json.
+112. Save evaluation metrics in metrics.json.
 
 ============================================================
 12. TIMING
 ============================================================
 
-89. Measure training execution time separately.
+113. Measure training execution time separately.
 
-90. Measure evaluation execution time separately.
+114. Measure evaluation execution time separately.
 
-91. Measure complete experiment wall-clock execution time.
+115. Measure complete experiment wall-clock execution time.
 
-92. Use time.perf_counter() for timing.
+116. Use time.perf_counter() for timing.
 
-93. Total experiment execution time must include all required work from
+117. Total experiment execution time must include all required work from
     experiment start until all required artifacts have been generated and
     saved.
 
-94. This includes:
+118. This includes:
 
     - dataset loading
     - preprocessing
@@ -777,35 +856,35 @@ IMPORTANT RULES:
     - training-history saving
     - checkpoint saving
 
-95. Record:
+119. Record:
 
     - training_seconds
     - evaluation_seconds
     - total_execution_seconds
 
-96. Record the selected device and GPU name when available.
+120. Record the selected device and GPU name when available.
 
 ============================================================
 13. VISUALIZATION
 ============================================================
 
-97. Generate useful visualizations relevant to the experiment.
+121. Generate useful visualizations relevant to the experiment.
 
-98. For training experiments, generate training-history visualizations
+122. For training experiments, generate training-history visualizations
     where appropriate.
 
-99. For classification experiments, generate a confusion matrix visualization.
+123. For classification experiments, generate a confusion matrix visualization.
 
-100. Generate a performance metrics visualization when appropriate.
+124. Generate a performance metrics visualization when appropriate.
 
-101. Do not display plots interactively.
+125. Do not display plots interactively.
 
-102. Use a non-interactive matplotlib backend suitable for remote/server
+126. Use a non-interactive matplotlib backend suitable for remote/server
      execution.
 
-103. Save all visualization files inside EXPERIMENT_OUTPUT_DIR.
+127. Save all visualization files inside EXPERIMENT_OUTPUT_DIR.
 
-104. Use these exact filenames when applicable:
+128. Use these exact filenames when applicable:
 
     loss_visualization.png
     accuracy_visualization.png
@@ -816,29 +895,29 @@ IMPORTANT RULES:
 14. OUTPUT ARTIFACTS
 ============================================================
 
-105. The ExperimentRunner provides the environment variable
+129. The ExperimentRunner provides the environment variable
      EXPERIMENT_OUTPUT_DIR.
 
-106. All generated experiment artifacts MUST be saved inside
+130. All generated experiment artifacts MUST be saved inside
      EXPERIMENT_OUTPUT_DIR.
 
-107. Do not save experiment artifacts to arbitrary system directories.
+131. Do not save experiment artifacts to arbitrary system directories.
 
-108. Create EXPERIMENT_OUTPUT_DIR if it does not exist.
+132. Create EXPERIMENT_OUTPUT_DIR if it does not exist.
 
-109. Save these files using the exact filenames:
+133. Save these files using the exact filenames:
 
     metrics.json
     training_history.json
     best_model.pt
 
-110. Save all required visualization files inside the same output directory.
+134. Save all required visualization files inside the same output directory.
 
 ============================================================
 15. EXPERIMENT SUMMARY
 ============================================================
 
-111. Generate a final experiment summary containing, when applicable:
+135. Generate a final experiment summary containing, when applicable:
 
     - Experiment name
     - Research hypothesis
@@ -859,93 +938,93 @@ IMPORTANT RULES:
     - GPU name
     - Random seed
 
-112. Save the experiment summary in a structured JSON file.
+136. Save the experiment summary in a structured JSON file.
 
 ============================================================
 16. AUTOMATED SERVER EXECUTION
 ============================================================
 
-113. The generated experiment will run unattended.
+137. The generated experiment will run unattended.
 
-114. Do not require interactive user input.
+138. Do not require interactive user input.
 
-115. Do not use input().
+139. Do not use input().
 
-116. Do not require a graphical desktop environment.
+140. Do not require a graphical desktop environment.
 
-117. Do not open interactive matplotlib windows.
+141. Do not open interactive matplotlib windows.
 
-118. Do not require manual confirmation.
+142. Do not require manual confirmation.
 
-119. Do not assume files have been manually created by the user.
+143. Do not assume files have been manually created by the user.
 
-120. Use environment variables and portable paths where appropriate.
+144. Use environment variables and portable paths where appropriate.
 
 ============================================================
 17. DEPENDENCIES
 ============================================================
 
-121. Use only libraries that are required by the experiment.
+145. Use only libraries that are required by the experiment.
 
-122. Avoid unnecessary dependencies.
+146. Avoid unnecessary dependencies.
 
-123. Do not include unused imports.
+147. Do not include unused imports.
 
-124. Use commonly available scientific Python libraries where appropriate.
+148. Use commonly available scientific Python libraries where appropriate.
 
-125. Do not introduce unnecessary external packages merely for convenience.
+149. Do not introduce unnecessary external packages merely for convenience.
 
 ============================================================
 18. CODE QUALITY
 ============================================================
 
-126. Generate clean, readable, modular Python code.
+150. Generate clean, readable, modular Python code.
 
-127. Use meaningful variable and function names.
+151. Use meaningful variable and function names.
 
-128. Use functions for logically separate operations.
+152. Use functions for logically separate operations.
 
-129. Include concise comments explaining important implementation choices.
+153. Include concise comments explaining important implementation choices.
 
-130. Avoid duplicated code.
+154. Avoid duplicated code.
 
-131. Keep configuration values clearly defined.
+155. Keep configuration values clearly defined.
 
-132. Do not generate pseudocode.
+156. Do not generate pseudocode.
 
-133. Do not generate incomplete code.
+157. Do not generate incomplete code.
 
-134. Do not use TODO placeholders.
+158. Do not use TODO placeholders.
 
-135. Do not use "pass" as a replacement for required functionality.
+159. Do not use "pass" as a replacement for required functionality.
 
-136. Do not leave required functions unimplemented.
+160. Do not leave required functions unimplemented.
 
 ============================================================
 19. HARDWARE INDEPENDENCE
 ============================================================
 
-137. Do not assume that a larger GPU is required.
+161. Do not assume that a larger GPU is required.
 
-138. Generate code that efficiently uses the available hardware.
+162. Generate code that efficiently uses the available hardware.
 
-139. Do not artificially increase model size or batch size merely to increase
+163. Do not artificially increase model size or batch size merely to increase
      GPU utilization.
 
-140. If the model or dataset is small, recognize that GPU acceleration may
+164. If the model or dataset is small, recognize that GPU acceleration may
      provide limited benefit.
 
-141. Preserve CPU compatibility.
+165. Preserve CPU compatibility.
 
 ============================================================
 20. PYTORCH COMPATIBILITY
 ============================================================
 
-142. Target the installed PyTorch API.
+166. Target the installed PyTorch API.
 
-143. Do not use unsupported arguments for the installed PyTorch version.
+167. Do not use unsupported arguments for the installed PyTorch version.
 
-144. In particular, do not pass verbose to
+168. In particular, do not pass verbose to
      torch.optim.lr_scheduler.ReduceLROnPlateau because the project's
      installed PyTorch version may not support that argument.
 
@@ -953,9 +1032,9 @@ IMPORTANT RULES:
 21. FINAL REQUIREMENTS
 ============================================================
 
-145. The final generated file must be complete and executable Python.
+169. The final generated file must be complete and executable Python.
 
-146. The experiment must automatically:
+170. The experiment must automatically:
 
     1. Load the specified local dataset.
     2. Validate the dataset.
@@ -975,11 +1054,11 @@ IMPORTANT RULES:
    16. Record training, evaluation, and total execution time.
    17. Generate a final experiment summary.
 
-147. Most importantly, preserve the scientific intent of the selected
+171. Most importantly, preserve the scientific intent of the selected
      Rank #1 hypothesis while making the generated implementation robust,
      reproducible, efficient, and suitable for automated execution.
 
-148. Return ONLY complete executable Python source code when generating the
+172. Return ONLY complete executable Python source code when generating the
      experiment.
 """.strip()
 
@@ -1059,9 +1138,31 @@ the hypothesis itself specifies an MLP.
 
 Do not change the scientific objective merely to improve execution speed.
 
-Use reasonable computational-efficiency techniques such as appropriate
-batch sizing, efficient DataLoader usage, bounded training epochs, and
-early stopping when scientifically appropriate.
+Use reasonable computational-efficiency techniques such as:
+
+- selecting a batch size appropriate for the dataset size, model complexity,
+  and available GPU memory;
+- preferring moderately large batch sizes for very large tabular datasets
+  when appropriate;
+- using efficient DataLoader configuration;
+- minimizing unnecessary CPU-to-GPU transfers;
+- using bounded training epochs;
+- using early stopping when validation performance has converged;
+- avoiding unnecessary repeated preprocessing or evaluation; and
+- avoiding unnecessarily large models or excessive training duration.
+
+Do not use a fixed batch size, epoch count, or early-stopping patience
+unless the experiment specification explicitly requires it.
+
+Do not change the scientific objective, dataset, target variable, or
+proposed architecture merely to reduce execution time.
+
+Before finalizing the experiment, consider whether any feature may leak
+information about the target variable, particularly features representing
+attack type, attack tool, outcome, post-event information, or other
+target-derived information. Exclude such features only when there is a
+clear methodological or prediction-time leakage reason, and record the
+decision in the experiment summary.
 
 Return ONLY complete executable Python source code.
 
