@@ -607,13 +607,22 @@ class ExperimentRunner:
         }
 
         try:
-            MAX_DEPENDENCY_INSTALL_ATTEMPTS = 5
+            MAX_EXPERIMENT_ATTEMPTS = 5
+
+            dependency_install_attempts = 0
+            repair_attempts = 0
 
             attempt = 0
 
-            while attempt < MAX_DEPENDENCY_INSTALL_ATTEMPTS:
+            while attempt < MAX_EXPERIMENT_ATTEMPTS:
 
                 attempt += 1
+
+                print(
+                    f"[ExperimentRunner] "
+                    f"Experiment execution attempt "
+                    f"{attempt}/{MAX_EXPERIMENT_ATTEMPTS}"
+                )
 
                 process = subprocess.run(
                     command,
@@ -630,9 +639,10 @@ class ExperimentRunner:
                 stdout = process.stdout or ""
                 stderr = process.stderr or ""
 
-                # --------------------------------------------------------
-                # Successful execution
-                # --------------------------------------------------------
+                # ========================================================
+                # SUCCESS
+                # ========================================================
+
                 if process.returncode == 0:
 
                     result.update(
@@ -643,105 +653,157 @@ class ExperimentRunner:
                             "success": True,
                             "status": "completed",
                             "installed_packages": installed_packages,
-                            "dependency_install_attempts": attempt - 1,
+                            "dependency_install_attempts":
+                                dependency_install_attempts,
+                            "repair_attempts":
+                                repair_attempts,
+                            "experiment_attempts":
+                                attempt,
                         }
+                    )
+
+                    print(
+                        "[ExperimentRunner] "
+                        "Experiment completed successfully."
                     )
 
                     break
 
-                # --------------------------------------------------------
-                # Check for missing Python module
-                # --------------------------------------------------------
-                missing_module = self._extract_missing_module(
-                    stderr
+                # ========================================================
+                # 1. MISSING PYTHON DEPENDENCY
+                # ========================================================
+
+                missing_module = (
+                    self._extract_missing_module(
+                        stderr
+                    )
                 )
 
-                if not missing_module:
+                if missing_module:
 
-                    result.update(
-                        {
-                            "return_code": process.returncode,
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "success": False,
-                            "status": "failed",
-                            "error": (
+                    if missing_module not in installed_packages:
+
+                        print(
+                            f"[ExperimentRunner] "
+                            f"Missing dependency detected: "
+                            f"{missing_module}"
+                        )
+
+                        install_success, install_output = (
+                            self._install_package(
+                                missing_module
+                            )
+                        )
+
+                        if install_success:
+
+                            installed_packages.append(
+                                missing_module
+                            )
+
+                            dependency_install_attempts += 1
+
+                            print(
+                                f"[ExperimentRunner] "
+                                f"Successfully installed "
+                                f"'{missing_module}'."
+                            )
+
+                            print(install_output)
+
+                            # IMPORTANT:
+                            # Run the SAME generated_experiment.py again.
+                            continue
+
+                        else:
+
+                            result.update(
+                                {
+                                    "return_code":
+                                        process.returncode,
+                                    "stdout":
+                                        stdout,
+                                    "stderr":
+                                        stderr,
+                                    "success":
+                                        False,
+                                    "status":
+                                        "dependency_install_failed",
+                                    "error":
+                                        (
+                                            "Failed to automatically "
+                                            f"install dependency "
+                                            f"'{missing_module}'.\n"
+                                            f"{install_output}"
+                                        ),
+                                }
+                            )
+
+                            break
+
+                # ========================================================
+                # 2. AUTOMATIC CODE REPAIR
+                # ========================================================
+
+                fixed, fix_message = (
+                    self._detect_and_fix_experiment_error(
+                        stderr,
+                        code_path,
+                    )
+                )
+
+                if fixed:
+
+                    repair_attempts += 1
+
+                    print(
+                        "[ExperimentRunner] "
+                        f"Automatic repair applied: "
+                        f"{fix_message}"
+                    )
+
+                    print(
+                        "[ExperimentRunner] "
+                        "Retrying modified generated experiment..."
+                    )
+
+                    # IMPORTANT:
+                    # The SAME code_path is executed again.
+                    continue
+
+                # ========================================================
+                # 3. NO AUTOMATIC FIX AVAILABLE
+                # ========================================================
+
+                result.update(
+                    {
+                        "return_code":
+                            process.returncode,
+                        "stdout":
+                            stdout,
+                        "stderr":
+                            stderr,
+                        "success":
+                            False,
+                        "status":
+                            "failed",
+                        "error":
+                            (
                                 "Generated experiment exited "
-                                f"with return code {process.returncode}."
+                                f"with return code "
+                                f"{process.returncode}."
                                 f"\n{stderr.strip()}"
                             ),
-                        }
-                    )
-
-                    break
-
-                # --------------------------------------------------------
-                # Prevent installing the same package repeatedly
-                # --------------------------------------------------------
-                if missing_module in installed_packages:
-
-                    result.update(
-                        {
-                            "return_code": process.returncode,
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "success": False,
-                            "status": "failed",
-                            "error": (
-                                "The experiment still requires missing "
-                                f"module '{missing_module}' after "
-                                "automatic installation."
-                                f"\n{stderr.strip()}"
-                            ),
-                        }
-                    )
-
-                    break
-
-                # --------------------------------------------------------
-                # Automatically install missing dependency
-                # --------------------------------------------------------
-                install_success, install_output = (
-                    self._install_package(
-                        missing_module
-                    )
+                        "repair_attempts":
+                            repair_attempts,
+                        "dependency_install_attempts":
+                            dependency_install_attempts,
+                        "experiment_attempts":
+                            attempt,
+                    }
                 )
 
-                if not install_success:
-
-                    result.update(
-                        {
-                            "return_code": process.returncode,
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "success": False,
-                            "status": "dependency_install_failed",
-                            "error": (
-                                f"Failed to automatically install "
-                                f"dependency '{missing_module}'.\n"
-                                f"{install_output}"
-                            ),
-                        }
-                    )
-
-                    break
-
-                installed_packages.append(
-                    missing_module
-                )
-
-                # Optional logging
-                print(
-                    f"[ExperimentRunner] Missing dependency "
-                    f"'{missing_module}' detected."
-                )
-
-                print(
-                    f"[ExperimentRunner] Automatically installing "
-                    f"'{missing_module}'..."
-                )
-
-                print(install_output)
+                break
 
             stdout_path.write_text(
                 stdout,
@@ -1522,4 +1584,159 @@ class ExperimentRunner:
             dataset_path=dataset_path,
             generated_result=generated_result,
             run_name=run_name,
+        )
+
+    # ============================================================
+    # Automatic Experiment Error Detection and Repair
+    # ============================================================
+
+    def _detect_and_fix_experiment_error(
+        self,
+        stderr: str,
+        code_path: Path,
+    ) -> tuple[bool, str]:
+        """
+        Detect known recoverable experiment errors and
+        automatically modify the generated experiment code.
+
+        The modified code is written back to the SAME
+        generated_experiment.py file.
+
+        Returns
+        -------
+        tuple[bool, str]
+            True and a message if a fix was applied.
+            False and a message if no automatic fix is available.
+        """
+
+        if not stderr:
+            return False, "No error output available."
+
+        # ------------------------------------------------------------
+        # Read current generated experiment
+        # ------------------------------------------------------------
+
+        try:
+            code = code_path.read_text(
+                encoding="utf-8"
+            )
+        except Exception as error:
+            return False, (
+                f"Could not read generated experiment: {error}"
+            )
+
+        # ============================================================
+        # Fix 1:
+        # Rare class with stratified train/test split
+        # ============================================================
+
+        if (
+            "The least populated class in y has only 1 member"
+            in stderr
+        ):
+            # --------------------------------------------------------
+            # Case A:
+            # train_test_split(..., stratify=y)
+            # --------------------------------------------------------
+
+            if "stratify=y" in code:
+
+                updated_code = code.replace(
+                    "stratify=y",
+                    "stratify=None",
+                )
+
+                code_path.write_text(
+                    updated_code,
+                    encoding="utf-8",
+                )
+
+                return True, (
+                    "Disabled stratified train/test splitting because "
+                    "at least one target class contains fewer than "
+                    "two samples."
+                )
+
+            # --------------------------------------------------------
+            # Case B:
+            # stratify = y
+            # --------------------------------------------------------
+
+            if "stratify = y" in code:
+
+                updated_code = code.replace(
+                    "stratify = y",
+                    "stratify = None",
+                )
+
+                code_path.write_text(
+                    updated_code,
+                    encoding="utf-8",
+                )
+
+                return True, (
+                    "Disabled stratified train/test splitting because "
+                    "at least one target class contains fewer than "
+                    "two samples."
+                )
+
+            # --------------------------------------------------------
+            # Case C:
+            # stratify=y_train
+            # --------------------------------------------------------
+
+            if "stratify=y_train" in code:
+
+                updated_code = code.replace(
+                    "stratify=y_train",
+                    "stratify=None",
+                )
+
+                code_path.write_text(
+                    updated_code,
+                    encoding="utf-8",
+                )
+
+                return True, (
+                    "Disabled stratified splitting because the target "
+                    "contains a class with insufficient samples."
+                )
+
+            # --------------------------------------------------------
+            # Case D:
+            # Generic fallback for train_test_split
+            # --------------------------------------------------------
+
+            if "train_test_split(" in code and "stratify=" in code:
+
+                updated_code = re.sub(
+                    r"stratify\s*=\s*[^,\)]+",
+                    "stratify=None",
+                    code,
+                )
+
+                if updated_code != code:
+                    code_path.write_text(
+                        updated_code,
+                        encoding="utf-8",
+                    )
+
+                    return True, (
+                        "Automatically disabled stratified splitting "
+                        "because at least one target class contains "
+                        "fewer than two samples."
+                    )
+
+            return False, (
+                "Rare-class stratification error detected, but the "
+                "generated code could not be safely repaired."
+            )
+
+        # ============================================================
+        # Fix 2:
+        # Add more automatic error-repair rules here
+        # ============================================================
+
+        return False, (
+            "No automatic recovery rule matched the error."
         )

@@ -192,6 +192,156 @@ def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations(
     assert "Missing required visualizations" in " ".join(validation["warnings"])
 
 
+def test_experiment_runner_extracts_and_installs_missing_python_library(
+    tmp_path,
+    monkeypatch,
+):
+    runner = ExperimentRunner(
+        output_directory=tmp_path / "runs",
+        timeout_seconds=10,
+    )
+
+    installed = []
+
+    def fake_install_package(module_name):
+        installed.append(module_name)
+        return True, "installed"
+
+    monkeypatch.setattr(
+        runner,
+        "_install_package",
+        fake_install_package,
+    )
+
+    stderr = (
+        "Traceback (most recent call last):\n"
+        "  File 'generated_experiment.py', line 1, in <module>\n"
+        "    import fake_missing_library\n"
+        "ModuleNotFoundError: No module named 'fake_missing_library'\n"
+    )
+
+    module_name = runner._extract_missing_module(stderr)
+
+    assert module_name == "fake_missing_library"
+
+    success, message = runner._install_package(module_name)
+
+    assert success is True
+
+
+def test_experiment_runner_automatically_fixes_rare_class_stratification(
+    tmp_path,
+    monkeypatch,
+):
+    """
+    Verify that the runner automatically repairs a generated experiment
+    when train_test_split(..., stratify=y) fails because a class contains
+    fewer than two samples.
+    """
+
+    runner = ExperimentRunner(
+        output_directory=tmp_path / "runs",
+        timeout_seconds=10,
+    )
+
+    run_directory = runner.create_run_directory(
+        "rare_class_fix"
+    )
+
+    generated_code = """
+import numpy as np
+from sklearn.model_selection import train_test_split
+
+X = np.array([
+    [1.0],
+    [2.0],
+    [3.0],
+    [4.0],
+])
+
+y = np.array([
+    0,
+    0,
+    0,
+    1,
+])
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.25,
+    stratify=y,
+    random_state=42,
+)
+
+print("experiment fixed and executed successfully")
+"""
+
+    code_path = runner.prepare_generated_code(
+        generated_code,
+        run_directory,
+    )
+
+    result = runner.execute(
+        code_path,
+        run_directory,
+    )
+
+    assert result["success"] is True
+    assert result["return_code"] == 0
+
+    assert (
+        "experiment fixed and executed successfully"
+        in result["stdout"]
+    )
+
+    repaired_code = code_path.read_text(
+        encoding="utf-8"
+    )
+
+    assert "stratify=None" in repaired_code
+    assert "stratify=y" not in repaired_code
+
+
+def test_experiment_runner_does_not_modify_unrecognized_error(
+    tmp_path,
+):
+    runner = ExperimentRunner(
+        output_directory=tmp_path / "runs",
+        timeout_seconds=10,
+    )
+
+    run_directory = runner.create_run_directory(
+        "unknown_error"
+    )
+
+    generated_code = """
+raise ValueError("some completely unrelated error")
+"""
+
+    code_path = runner.prepare_generated_code(
+        generated_code,
+        run_directory,
+    )
+
+    original_code = code_path.read_text(
+        encoding="utf-8"
+    )
+
+    fixed, message = runner._detect_and_fix_experiment_error(
+        'ValueError: some completely unrelated error',
+        code_path,
+    )
+
+    assert fixed is False
+
+    updated_code = code_path.read_text(
+        encoding="utf-8"
+    )
+
+    assert updated_code == original_code
+
+
 def test_experiment_orchestrator_uses_repository_dataset_by_default():
     orchestrator = ExperimentOrchestrator()
 
