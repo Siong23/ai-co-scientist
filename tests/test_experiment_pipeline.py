@@ -149,7 +149,7 @@ def test_code_generation_agent_extracts_fenced_python_response():
 def test_code_generation_agent_uses_dedicated_model_by_default():
     agent = CodeGenerationAgent()
 
-    assert agent.model == "qwen/qwen3-coder-next"
+    assert agent.model == "qwen/qwen3.8-27b"
 
 
 def test_code_repair_prompt_is_bounded(monkeypatch):
