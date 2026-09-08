@@ -1104,66 +1104,263 @@ Dataset:
 
         return result
 
+
+    # ========================================================
+    # Automatic Experiment Code Repair
+    # ========================================================
+
     def repair_generated_code(
         self,
         specification: Dict[str, Any],
         generated_code: str,
         execution_result: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Ask the LLM to repair code after a failed experiment run."""
-        if not isinstance(generated_code, str) or not generated_code.strip():
-            raise ValueError("Generated PyTorch code is required for repair.")
+        """
+        Automatically repair a failed generated experiment using the LLM.
 
-        error_context = json.dumps(
-            {
-                "status": execution_result.get("status"),
-                "return_code": execution_result.get("return_code"),
-                "error": execution_result.get("error"),
-                "output_validation": execution_result.get(
-                    "output_validation"
-                ),
-                "stderr": execution_result.get("stderr", "")[-self.MAX_REPAIR_LOG_CHARS:],
-                "stdout": execution_result.get("stdout", "")[-self.MAX_REPAIR_LOG_CHARS:],
-            },
-            ensure_ascii=False,
-            indent=2,
-            default=str,
+        The LLM receives:
+            1. The experiment specification
+            2. The current generated Python source code
+            3. The execution error / traceback
+            4. The previous stdout output
+            5. The previous stderr output
+
+        The LLM must return a complete corrected Python experiment.
+
+        This method intentionally does not contain hard-coded fixes for
+        individual Python or machine-learning errors. The LLM determines
+        the cause of the failure and modifies the generated experiment
+        accordingly.
+        """
+
+        if not isinstance(
+            generated_code,
+            str,
+        ) or not generated_code.strip():
+            raise ValueError(
+                "Generated PyTorch code is required for repair."
+            )
+
+        if not isinstance(
+            execution_result,
+            dict,
+        ):
+            raise TypeError(
+                "execution_result must be a dictionary."
+            )
+
+        if not isinstance(
+            specification,
+            dict,
+        ):
+            raise TypeError(
+                "specification must be a dictionary."
+            )
+
+        # ----------------------------------------------------
+        # Keep the repair prompt bounded.
+        # ----------------------------------------------------
+
+        bounded_source = generated_code[
+            -self.MAX_REPAIR_SOURCE_CHARS:
+        ]
+
+        stdout = str(
+            execution_result.get(
+                "stdout",
+                "",
+            )
         )
+
+        stderr = str(
+            execution_result.get(
+                "stderr",
+                "",
+            )
+        )
+
+        error_message = str(
+            execution_result.get(
+                "error",
+                "",
+            )
+        )
+
+        # Keep only the most recent part of the logs because
+        # complete training logs can become extremely large.
+        bounded_stdout = stdout[
+            -self.MAX_REPAIR_LOG_CHARS:
+        ]
+
+        bounded_stderr = stderr[
+            -self.MAX_REPAIR_LOG_CHARS:
+        ]
+
+        # ----------------------------------------------------
+        # Build compact experiment specification.
+        # ----------------------------------------------------
+
+        dataset = specification.get(
+            "dataset",
+            {},
+        )
+
+        if not isinstance(
+            dataset,
+            dict,
+        ):
+            dataset = {}
+
+        selected_hypothesis = specification.get(
+            "selected_hypothesis",
+            {},
+        )
+
+        if not isinstance(
+            selected_hypothesis,
+            dict,
+        ):
+            selected_hypothesis = {}
+
         compact_specification = {
-            "dataset": specification.get("dataset", {}),
+            "dataset": dataset,
             "selected_hypothesis": {
-                key: specification.get("selected_hypothesis", {}).get(key)
-                for key in ("hypothesis_id", "title", "text")
+                key: selected_hypothesis.get(key)
+                for key in (
+                    "hypothesis_id",
+                    "title",
+                    "text",
+                )
             },
             "code_generation_requirements": specification.get(
-                "code_generation_requirements", {}
+                "code_generation_requirements",
+                {},
             ),
             "evaluation_metrics": specification.get(
-                "evaluation_metrics", []
+                "evaluation_metrics",
+                [],
             ),
         }
-        bounded_source = generated_code[-self.MAX_REPAIR_SOURCE_CHARS:]
+
+        # ----------------------------------------------------
+        # Build execution-error context.
+        # ----------------------------------------------------
+
+        execution_context = {
+            "status": execution_result.get(
+                "status"
+            ),
+            "return_code": execution_result.get(
+                "return_code"
+            ),
+            "error": error_message,
+            "stderr": bounded_stderr,
+            "stdout": bounded_stdout,
+        }
+
+        # ----------------------------------------------------
+        # Repair prompt.
+        # ----------------------------------------------------
+
         repair_prompt = f"""
-Repair the following generated PyTorch experiment so it runs successfully.
-Return only complete executable Python source code. Do not return JSON,
-Markdown fences, explanations, or commentary. Preserve the selected
-hypothesis and experiment behavior; fix only the cause of the failure.
+You are repairing a failed automatically generated PyTorch
+experiment inside an AI Co-Scientist system.
 
-The repaired source must fit within the output token limit. Keep it concise
-and self-contained. It must use training-set median imputation for numeric
-columns, handle categorical missing values, select CUDA when available with
-CPU fallback, produce finite losses and metrics, and save all required
-artifacts.
+The experiment was generated by another LLM and then executed
+automatically by an ExperimentRunner.
 
+The experiment failed during execution.
+
+Your task is to determine the ROOT CAUSE of the failure from
+the traceback, stdout, stderr, experiment specification, and
+current source code.
+
+Then return a COMPLETE corrected Python source file.
+
+IMPORTANT:
+
+1. Return ONLY Python source code.
+2. Do NOT return Markdown fences.
+3. Do NOT return JSON.
+4. Do NOT return explanations or commentary.
+5. Do NOT return a patch or partial code.
+6. Return the COMPLETE replacement for the current source file.
+7. Preserve the original research hypothesis.
+8. Preserve the intended model architecture whenever possible.
+9. Preserve the intended experiment objective.
+10. Preserve the required evaluation metrics.
+11. Preserve the train/validation/test evaluation design.
+12. Preserve checkpoint generation.
+13. Preserve training-history generation.
+14. Preserve required visualization generation.
+15. Save generated artifacts inside EXPERIMENT_OUTPUT_DIR.
+16. Use DATASET_PATH when it is available.
+17. Do not invent a different dataset.
+18. Do not remove required experiment functionality merely to
+    make the program run.
+19. Fix the actual root cause instead of hiding the error.
+20. Make the smallest scientifically reasonable correction.
+21. If the dataset structure is different from what the original
+    code assumed, adapt the preprocessing to the actual dataset
+    information available in the specification and error.
+22. Handle class-distribution and data-splitting problems
+    robustly when necessary.
+23. Handle missing, categorical, and numerical data appropriately.
+24. Do not introduce data leakage.
+25. The repaired source must be valid executable Python.
+26. Do not use TODO, pass, placeholder code, or incomplete
+    implementations.
+
+The ExperimentRunner will execute the returned source again.
+Therefore, your response must be the complete executable
+experiment, not an explanation of what should be changed.
+
+============================================================
 EXPERIMENT SPECIFICATION
-{json.dumps(self._to_serializable(compact_specification), indent=2, ensure_ascii=False)}
+============================================================
 
-EXECUTION ERROR
-{error_context}
+{json.dumps(
+    self._to_serializable(
+        compact_specification
+    ),
+    ensure_ascii=False,
+    indent=2,
+)}
 
-CURRENT SOURCE CODE
+============================================================
+EXECUTION RESULT
+============================================================
+
+{json.dumps(
+    execution_context,
+    ensure_ascii=False,
+    indent=2,
+)}
+
+============================================================
+CURRENT GENERATED SOURCE CODE
+============================================================
+
 {bounded_source}
+
+============================================================
+REPAIR INSTRUCTIONS
+============================================================
+
+Analyze the failure carefully.
+
+Identify the actual root cause from the execution result.
+
+Then rewrite the complete experiment so that the root
+cause is corrected while preserving the original
+scientific experiment.
+
+Return ONLY the complete corrected Python source code.
 """.strip()
+
+        # ----------------------------------------------------
+        # Call LLM.
+        # ----------------------------------------------------
 
         response = _call_llm(
             repair_prompt,
@@ -1176,27 +1373,102 @@ CURRENT SOURCE CODE
             ),
             reasoning="off",
         )
-        if not isinstance(response, str):
+
+        if not isinstance(
+            response,
+            str,
+        ):
             response = str(response)
-        if response.startswith("Error:"):
-            raise RuntimeError(response)
 
-        repaired = self.extract_python_source(response)
+        if response.startswith(
+            "Error:"
+        ):
+            raise RuntimeError(
+                response
+            )
+
+        # ----------------------------------------------------
+        # Extract Python source.
+        # ----------------------------------------------------
+
+        repaired = self.extract_python_source(
+            response
+        )
+
+        # The preferred repair response is Python source.
+        #
+        # The JSON fallback is retained because the model may
+        # occasionally return the normal CodeGenerationAgent
+        # structured format.
         if repaired is None:
-            repaired = self.extract_json(response)
+            try:
+                repaired = self.extract_json(
+                    response
+                )
+            except ValueError as error:
+                raise ValueError(
+                    "LLM repair response did not contain "
+                    "valid Python source code."
+                ) from error
 
-        self.validate_generated_response(repaired)
+        # ----------------------------------------------------
+        # Validate repaired experiment.
+        # ----------------------------------------------------
+
+        self.validate_generated_response(
+            repaired
+        )
+
+        repaired_code = repaired.get(
+            "pytorch_code"
+        )
+
+        if not isinstance(
+            repaired_code,
+            str,
+        ) or not repaired_code.strip():
+            raise ValueError(
+                "LLM repair returned empty Python code."
+            )
+
+        # ----------------------------------------------------
+        # Prevent useless repair loops.
+        # ----------------------------------------------------
+
+        if repaired_code.strip() == generated_code.strip():
+            raise ValueError(
+                "LLM returned the same code without making "
+                "a repair."
+            )
+
+        # ----------------------------------------------------
+        # Return repaired experiment.
+        # ----------------------------------------------------
+
         return {
             "success": True,
             "model": self.model,
-            "model_recommendation": repaired.get("model_recommendation", {}),
-            "experiment_plan": repaired.get("experiment_plan", {}),
-            "assumptions": repaired.get("assumptions", []),
-            "dependencies": repaired.get("dependencies", []),
-            "pytorch_code": repaired["pytorch_code"],
+            "model_recommendation": repaired.get(
+                "model_recommendation",
+                {},
+            ),
+            "experiment_plan": repaired.get(
+                "experiment_plan",
+                {},
+            ),
+            "assumptions": repaired.get(
+                "assumptions",
+                [],
+            ),
+            "dependencies": repaired.get(
+                "dependencies",
+                [],
+            ),
+            "pytorch_code": repaired_code,
             "generation_seconds": 0.0,
             "errors": [],
         }
+
 
     # ========================================================
     # Generate From Components

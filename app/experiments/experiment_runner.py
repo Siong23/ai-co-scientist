@@ -542,6 +542,276 @@ class ExperimentRunner:
         except Exception as error:
             return False, str(error)
 
+
+
+    # ============================================================
+    # LLM-Based Automatic Code Repair
+    # ============================================================
+
+    def _repair_experiment_with_llm(
+        self,
+        code_path: Path,
+        stderr: str,
+        stdout: str,
+        dataset_path: Optional[str | Path] = None,
+        generated_result: Optional[Dict[str, Any]] = None,
+    ) -> tuple[bool, str, str]:
+        """
+        Ask CodeGenerationAgent to repair a failed experiment.
+
+        The ExperimentRunner is responsible for:
+            - executing the experiment
+            - capturing errors
+            - requesting repair
+            - saving repaired code
+            - retrying execution
+
+        CodeGenerationAgent is responsible for:
+            - analyzing the failed generated code
+            - identifying the likely cause
+            - generating corrected PyTorch code
+        """
+
+        try:
+            from app.agents_modules.code_generation_agent import (
+                CodeGenerationAgent,
+            )
+
+            # ----------------------------------------------------
+            # Read the current generated experiment.
+            # ----------------------------------------------------
+            current_code = code_path.read_text(
+                encoding="utf-8"
+            )
+
+            if not current_code.strip():
+                return (
+                    False,
+                    "",
+                    "Generated experiment is empty.",
+                )
+
+            # ----------------------------------------------------
+            # Reuse the original experiment specification when
+            # available.
+            #
+            # This is important because the repair LLM should
+            # understand the original research objective instead
+            # of receiving a completely new experiment definition.
+            # ----------------------------------------------------
+            if isinstance(generated_result, dict):
+
+                specification = {
+                    "dataset": {
+                        "name": "5G-NIDD",
+                        "path": (
+                            str(dataset_path)
+                            if dataset_path is not None
+                            else None
+                        ),
+                        "task": (
+                            "5G network intrusion "
+                            "detection classification"
+                        ),
+                    },
+                    "selected_hypothesis": {
+                        "title": (
+                            "Automatically generated "
+                            "deep-learning experiment"
+                        ),
+                        "text": (
+                            generated_result.get(
+                                "experiment_plan"
+                            )
+                            or
+                            "Repair the generated experiment "
+                            "while preserving its original "
+                            "research objective and model."
+                        ),
+                    },
+                    "code_generation_requirements": {
+                        "framework": "PyTorch",
+                        "language": "Python",
+                        "dataset": "5G-NIDD",
+                        "include_preprocessing": True,
+                        "include_train_validation_test": True,
+                        "include_checkpoint": True,
+                        "include_training_history": True,
+                        "include_reproducibility": True,
+                        "include_evaluation": True,
+                    },
+                    "evaluation_metrics": [
+                        "accuracy",
+                        "precision_weighted",
+                        "recall_weighted",
+                        "f1_weighted",
+                        "confusion_matrix",
+                        "training_seconds",
+                        "evaluation_seconds",
+                        "total_execution_seconds",
+                    ],
+                }
+
+            else:
+
+                specification = {
+                    "dataset": {
+                        "name": "5G-NIDD",
+                        "path": (
+                            str(dataset_path)
+                            if dataset_path is not None
+                            else None
+                        ),
+                        "task": (
+                            "5G network intrusion "
+                            "detection classification"
+                        ),
+                    },
+                    "selected_hypothesis": {
+                        "title": (
+                            "Automatically generated "
+                            "deep-learning experiment"
+                        ),
+                        "text": (
+                            "Repair the generated experiment "
+                            "while preserving its original "
+                            "research objective and model."
+                        ),
+                    },
+                    "code_generation_requirements": {
+                        "framework": "PyTorch",
+                        "language": "Python",
+                        "dataset": "5G-NIDD",
+                        "include_preprocessing": True,
+                        "include_train_validation_test": True,
+                        "include_checkpoint": True,
+                        "include_training_history": True,
+                        "include_reproducibility": True,
+                        "include_evaluation": True,
+                    },
+                    "evaluation_metrics": [
+                        "accuracy",
+                        "precision_weighted",
+                        "recall_weighted",
+                        "f1_weighted",
+                        "confusion_matrix",
+                        "training_seconds",
+                        "evaluation_seconds",
+                        "total_execution_seconds",
+                    ],
+                }
+
+            # ----------------------------------------------------
+            # Execution information passed to CodeGenerationAgent.
+            # ----------------------------------------------------
+            execution_result = {
+                "status": "execution_failed",
+                "return_code": 1,
+                "error": stderr.strip(),
+                "stderr": stderr,
+                "stdout": stdout,
+            }
+
+            # ----------------------------------------------------
+            # Instantiate the existing CodeGenerationAgent.
+            # ----------------------------------------------------
+            repair_agent = CodeGenerationAgent()
+
+            repair_result = (
+                repair_agent.repair_generated_code(
+                    specification=specification,
+                    generated_code=current_code,
+                    execution_result=execution_result,
+                )
+            )
+
+            if not isinstance(
+                repair_result,
+                dict,
+            ):
+                return (
+                    False,
+                    "",
+                    "CodeGenerationAgent returned an invalid repair result.",
+                )
+
+            if not repair_result.get(
+                "success",
+                False,
+            ):
+                errors = repair_result.get(
+                    "errors",
+                    [],
+                )
+
+                return (
+                    False,
+                    "",
+                    "LLM repair failed: "
+                    + "; ".join(
+                        str(error)
+                        for error in errors
+                    ),
+                )
+
+            repaired_code = repair_result.get(
+                "pytorch_code"
+            )
+
+            if not isinstance(
+                repaired_code,
+                str,
+            ) or not repaired_code.strip():
+                return (
+                    False,
+                    "",
+                    "LLM repair returned empty Python code.",
+                )
+
+            # ----------------------------------------------------
+            # Validate repaired Python before replacing the file.
+            # ----------------------------------------------------
+            import ast
+
+            try:
+                ast.parse(
+                    repaired_code
+                )
+            except SyntaxError as error:
+                return (
+                    False,
+                    "",
+                    (
+                        "LLM returned syntactically invalid "
+                        f"Python: {error}"
+                    ),
+                )
+
+            # ----------------------------------------------------
+            # Prevent the LLM from returning exactly the same code.
+            # ----------------------------------------------------
+            if repaired_code.strip() == current_code.strip():
+                return (
+                    False,
+                    "",
+                    "LLM returned the same code without making a repair.",
+                )
+
+            return (
+                True,
+                repaired_code,
+                "CodeGenerationAgent successfully repaired "
+                "the generated experiment.",
+            )
+
+        except Exception as error:
+            return (
+                False,
+                "",
+                f"LLM repair exception: {error}",
+            )
+
+
     # ============================================================
     # Execute Experiment
     # ============================================================
@@ -552,6 +822,9 @@ class ExperimentRunner:
         run_directory: Path,
         dataset_path: Optional[
             str | Path
+        ] = None,
+        generated_result: Optional[
+            Dict[str, Any]
         ] = None,
     ) -> Dict[str, Any]:
         """
@@ -607,7 +880,7 @@ class ExperimentRunner:
         }
 
         try:
-            MAX_EXPERIMENT_ATTEMPTS = 5
+            MAX_EXPERIMENT_ATTEMPTS = 10
 
             dependency_install_attempts = 0
             repair_attempts = 0
@@ -742,33 +1015,37 @@ class ExperimentRunner:
                             break
 
                 # ========================================================
-                # 2. AUTOMATIC CODE REPAIR
+                # 2. LLM-BASED AUTOMATIC CODE REPAIR
                 # ========================================================
 
-                fixed, fix_message = (
-                    self._detect_and_fix_experiment_error(
-                        stderr,
-                        code_path,
+                repair_success, repaired_code, repair_message = (
+                    self._repair_experiment_with_llm(
+                        code_path=code_path,
+                        stderr=stderr,
+                        stdout=stdout,
+                        dataset_path=dataset_path,
+                        generated_result=generated_result,
                     )
                 )
 
-                if fixed:
-
+                if repair_success:
                     repair_attempts += 1
 
-                    print(
-                        "[ExperimentRunner] "
-                        f"Automatic repair applied: "
-                        f"{fix_message}"
+                    code_path.write_text(
+                        repaired_code,
+                        encoding="utf-8",
                     )
 
                     print(
                         "[ExperimentRunner] "
-                        "Retrying modified generated experiment..."
+                        f"LLM repair applied: {repair_message}"
                     )
 
-                    # IMPORTANT:
-                    # The SAME code_path is executed again.
+                    print(
+                        "[ExperimentRunner] "
+                        "Retrying repaired generated experiment..."
+                    )
+
                     continue
 
                 # ========================================================
@@ -777,29 +1054,20 @@ class ExperimentRunner:
 
                 result.update(
                     {
-                        "return_code":
-                            process.returncode,
-                        "stdout":
-                            stdout,
-                        "stderr":
-                            stderr,
-                        "success":
-                            False,
-                        "status":
-                            "failed",
-                        "error":
-                            (
-                                "Generated experiment exited "
-                                f"with return code "
-                                f"{process.returncode}."
-                                f"\n{stderr.strip()}"
-                            ),
-                        "repair_attempts":
-                            repair_attempts,
+                        "return_code": process.returncode,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "success": False,
+                        "status": "repair_failed",
+                        "error": (
+                            "Generated experiment failed and "
+                            "automatic LLM repair was unsuccessful.\n"
+                            f"{stderr.strip()}"
+                        ),
+                        "repair_attempts": repair_attempts,
                         "dependency_install_attempts":
                             dependency_install_attempts,
-                        "experiment_attempts":
-                            attempt,
+                        "experiment_attempts": attempt,
                     }
                 )
 
@@ -1394,6 +1662,7 @@ class ExperimentRunner:
                     experiment_code_path,
                     run_directory,
                     dataset_path,
+                    generated_result=generated_result,
                 )
             )
 
@@ -1586,157 +1855,4 @@ class ExperimentRunner:
             run_name=run_name,
         )
 
-    # ============================================================
-    # Automatic Experiment Error Detection and Repair
-    # ============================================================
-
-    def _detect_and_fix_experiment_error(
-        self,
-        stderr: str,
-        code_path: Path,
-    ) -> tuple[bool, str]:
-        """
-        Detect known recoverable experiment errors and
-        automatically modify the generated experiment code.
-
-        The modified code is written back to the SAME
-        generated_experiment.py file.
-
-        Returns
-        -------
-        tuple[bool, str]
-            True and a message if a fix was applied.
-            False and a message if no automatic fix is available.
-        """
-
-        if not stderr:
-            return False, "No error output available."
-
-        # ------------------------------------------------------------
-        # Read current generated experiment
-        # ------------------------------------------------------------
-
-        try:
-            code = code_path.read_text(
-                encoding="utf-8"
-            )
-        except Exception as error:
-            return False, (
-                f"Could not read generated experiment: {error}"
-            )
-
-        # ============================================================
-        # Fix 1:
-        # Rare class with stratified train/test split
-        # ============================================================
-
-        if (
-            "The least populated class in y has only 1 member"
-            in stderr
-        ):
-            # --------------------------------------------------------
-            # Case A:
-            # train_test_split(..., stratify=y)
-            # --------------------------------------------------------
-
-            if "stratify=y" in code:
-
-                updated_code = code.replace(
-                    "stratify=y",
-                    "stratify=None",
-                )
-
-                code_path.write_text(
-                    updated_code,
-                    encoding="utf-8",
-                )
-
-                return True, (
-                    "Disabled stratified train/test splitting because "
-                    "at least one target class contains fewer than "
-                    "two samples."
-                )
-
-            # --------------------------------------------------------
-            # Case B:
-            # stratify = y
-            # --------------------------------------------------------
-
-            if "stratify = y" in code:
-
-                updated_code = code.replace(
-                    "stratify = y",
-                    "stratify = None",
-                )
-
-                code_path.write_text(
-                    updated_code,
-                    encoding="utf-8",
-                )
-
-                return True, (
-                    "Disabled stratified train/test splitting because "
-                    "at least one target class contains fewer than "
-                    "two samples."
-                )
-
-            # --------------------------------------------------------
-            # Case C:
-            # stratify=y_train
-            # --------------------------------------------------------
-
-            if "stratify=y_train" in code:
-
-                updated_code = code.replace(
-                    "stratify=y_train",
-                    "stratify=None",
-                )
-
-                code_path.write_text(
-                    updated_code,
-                    encoding="utf-8",
-                )
-
-                return True, (
-                    "Disabled stratified splitting because the target "
-                    "contains a class with insufficient samples."
-                )
-
-            # --------------------------------------------------------
-            # Case D:
-            # Generic fallback for train_test_split
-            # --------------------------------------------------------
-
-            if "train_test_split(" in code and "stratify=" in code:
-
-                updated_code = re.sub(
-                    r"stratify\s*=\s*[^,\)]+",
-                    "stratify=None",
-                    code,
-                )
-
-                if updated_code != code:
-                    code_path.write_text(
-                        updated_code,
-                        encoding="utf-8",
-                    )
-
-                    return True, (
-                        "Automatically disabled stratified splitting "
-                        "because at least one target class contains "
-                        "fewer than two samples."
-                    )
-
-            return False, (
-                "Rare-class stratification error detected, but the "
-                "generated code could not be safely repaired."
-            )
-
-        # ============================================================
-        # Fix 2:
-        # Add more automatic error-repair rules here
-        # ============================================================
-
-        return False, (
-            "No automatic recovery rule matched the error."
-        )
+    
