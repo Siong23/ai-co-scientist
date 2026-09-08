@@ -32,6 +32,7 @@ COLLECTION. It does not generate machine-learning code itself.
 
 from __future__ import annotations
 
+import re
 import json
 import math
 import os
@@ -429,6 +430,119 @@ class ExperimentRunner:
         return environment
 
     # ============================================================
+    # Dependency Management
+    # ============================================================
+
+    @staticmethod
+    def _extract_missing_module(
+        stderr: str,
+    ) -> Optional[str]:
+        """
+        Extract a missing Python module from a
+        ModuleNotFoundError.
+
+        Example:
+            ModuleNotFoundError: No module named 'seaborn'
+
+        Returns:
+            Top-level module name, e.g. 'seaborn'.
+        """
+
+        if not stderr:
+            return None
+
+        match = re.search(
+            r"ModuleNotFoundError:\s+No module named ['\"]([^'\"]+)['\"]",
+            stderr,
+        )
+
+        if not match:
+            return None
+
+        module_name = match.group(1).strip()
+
+        if not module_name:
+            return None
+
+        return module_name.split(".")[0]
+
+    def _install_package(
+        self,
+        module_name: str,
+    ) -> tuple[bool, str]:
+        """
+        Automatically install a missing Python package
+        using the same Python interpreter that runs
+        the generated experiment.
+        """
+
+        # Python import name -> PyPI package name
+        package_mapping = {
+            "sklearn": "scikit-learn",
+            "cv2": "opencv-python",
+            "PIL": "Pillow",
+            "yaml": "PyYAML",
+            "bs4": "beautifulsoup4",
+            "dotenv": "python-dotenv",
+            "dateutil": "python-dateutil",
+            "imblearn": "imbalanced-learn",
+        }
+
+        package_name = package_mapping.get(
+            module_name,
+            module_name,
+        )
+
+        # Prevent invalid package names from being passed
+        # to pip.
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*",
+            package_name,
+        ):
+            return (
+                False,
+                f"Rejected invalid package name: "
+                f"{package_name}",
+            )
+
+        command = [
+            self.python_executable,
+            "-m",
+            "pip",
+            "install",
+            package_name,
+        ]
+
+        try:
+            process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            output = (
+                (process.stdout or "")
+                + "\n"
+                + (process.stderr or "")
+            )
+
+            if process.returncode == 0:
+                return True, output
+
+            return False, output
+
+        except subprocess.TimeoutExpired:
+            return (
+                False,
+                f"Timed out while installing "
+                f"{package_name}.",
+            )
+
+        except Exception as error:
+            return False, str(error)
+
+    # ============================================================
     # Execute Experiment
     # ============================================================
 
@@ -472,6 +586,8 @@ class ExperimentRunner:
 
         start_time = time.perf_counter()
 
+        installed_packages: List[str] = []
+
         result: Dict[str, Any] = {
             "success": False,
             "status": "not_started",
@@ -486,23 +602,146 @@ class ExperimentRunner:
             "stdout_path": str(stdout_path),
             "stderr_path": str(stderr_path),
             "error": None,
+            "installed_packages": installed_packages,
+            "dependency_install_attempts": 0,
         }
 
         try:
-            process = subprocess.run(
-                command,
-                cwd=str(run_directory),
-                env=self.build_environment(
-                    run_directory,
-                    dataset_path,
-                ),
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-            )
+            MAX_DEPENDENCY_INSTALL_ATTEMPTS = 5
 
-            stdout = process.stdout or ""
-            stderr = process.stderr or ""
+            attempt = 0
+
+            while attempt < MAX_DEPENDENCY_INSTALL_ATTEMPTS:
+
+                attempt += 1
+
+                process = subprocess.run(
+                    command,
+                    cwd=str(run_directory),
+                    env=self.build_environment(
+                        run_directory,
+                        dataset_path,
+                    ),
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                )
+
+                stdout = process.stdout or ""
+                stderr = process.stderr or ""
+
+                # --------------------------------------------------------
+                # Successful execution
+                # --------------------------------------------------------
+                if process.returncode == 0:
+
+                    result.update(
+                        {
+                            "return_code": 0,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "success": True,
+                            "status": "completed",
+                            "installed_packages": installed_packages,
+                            "dependency_install_attempts": attempt - 1,
+                        }
+                    )
+
+                    break
+
+                # --------------------------------------------------------
+                # Check for missing Python module
+                # --------------------------------------------------------
+                missing_module = self._extract_missing_module(
+                    stderr
+                )
+
+                if not missing_module:
+
+                    result.update(
+                        {
+                            "return_code": process.returncode,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "success": False,
+                            "status": "failed",
+                            "error": (
+                                "Generated experiment exited "
+                                f"with return code {process.returncode}."
+                                f"\n{stderr.strip()}"
+                            ),
+                        }
+                    )
+
+                    break
+
+                # --------------------------------------------------------
+                # Prevent installing the same package repeatedly
+                # --------------------------------------------------------
+                if missing_module in installed_packages:
+
+                    result.update(
+                        {
+                            "return_code": process.returncode,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "success": False,
+                            "status": "failed",
+                            "error": (
+                                "The experiment still requires missing "
+                                f"module '{missing_module}' after "
+                                "automatic installation."
+                                f"\n{stderr.strip()}"
+                            ),
+                        }
+                    )
+
+                    break
+
+                # --------------------------------------------------------
+                # Automatically install missing dependency
+                # --------------------------------------------------------
+                install_success, install_output = (
+                    self._install_package(
+                        missing_module
+                    )
+                )
+
+                if not install_success:
+
+                    result.update(
+                        {
+                            "return_code": process.returncode,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "success": False,
+                            "status": "dependency_install_failed",
+                            "error": (
+                                f"Failed to automatically install "
+                                f"dependency '{missing_module}'.\n"
+                                f"{install_output}"
+                            ),
+                        }
+                    )
+
+                    break
+
+                installed_packages.append(
+                    missing_module
+                )
+
+                # Optional logging
+                print(
+                    f"[ExperimentRunner] Missing dependency "
+                    f"'{missing_module}' detected."
+                )
+
+                print(
+                    f"[ExperimentRunner] Automatically installing "
+                    f"'{missing_module}'..."
+                )
+
+                print(install_output)
 
             stdout_path.write_text(
                 stdout,
@@ -514,29 +753,31 @@ class ExperimentRunner:
                 encoding="utf-8",
             )
 
-            result.update(
-                {
-                    "return_code": process.returncode,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "success": (
-                        process.returncode == 0
-                    ),
-                    "status": (
-                        "completed"
-                        if process.returncode == 0
-                        else "failed"
-                    ),
-                }
-            )
+            # Only update the basic execution information here.
+            # Do not overwrite a more specific status that was
+            # already assigned inside the dependency handling loop.
 
-            if process.returncode != 0:
+            result["return_code"] = process.returncode
+            result["stdout"] = stdout
+            result["stderr"] = stderr
+
+            if process.returncode == 0:
+                result["success"] = True
+                result["status"] = "completed"
+
+            elif result.get("status") == "not_started":
+                result["success"] = False
+                result["status"] = "failed"
+
                 result["error"] = (
                     "Generated experiment exited "
                     f"with return code {process.returncode}."
                 )
+
                 if stderr.strip():
-                    result["error"] += f"\n{stderr.strip()}"
+                    result["error"] += (
+                        f"\n{stderr.strip()}"
+                    )
 
         except subprocess.TimeoutExpired as error:
             stdout = (
