@@ -866,6 +866,7 @@ class ExperimentRunner:
             "status": "not_started",
             "return_code": None,
             "command": command,
+            "run_directory": str(run_directory),
             "started_at": started_at.isoformat(),
             "finished_at": None,
             "execution_seconds": None,

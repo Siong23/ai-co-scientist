@@ -200,6 +200,9 @@ def render_report(run: Dict[str, Any]) -> str:
         ".meta{color:#52606d}.hypothesis{border-left:4px solid #2f80ed;padding-left:12px;margin:14px 0}",
         "pre{white-space:pre-wrap;background:#f5f7fa;padding:12px;border-radius:6px;overflow:auto}",
         "table{border-collapse:collapse;width:100%}td,th{border:1px solid #d9e2ec;padding:8px;text-align:left}",
+        ".file-link{display:inline-block;padding:8px 12px;border:1px solid #bcccdc;border-radius:6px;text-decoration:none}",
+        ".file-link:hover{text-decoration:underline}",
+        ".file-missing{color:#9b1c1c}",
         "</style>",
         "</head>",
         "<body><main>",
@@ -366,57 +369,273 @@ def render_report(run: Dict[str, Any]) -> str:
 
 
 def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
+    """
+    Render the automated experiment section of the run report.
+
+    Displays:
+        - experiment status
+        - execution / repair attempt counts
+        - generated experiment source code
+        - stdout log
+        - stderr log
+        - evaluation metrics
+        - errors
+        - visualizations
+
+    The experiment files remain in the experiment run directory.
+    This section provides clickable Gradio file-serving links so that
+    the files can be inspected directly from the run report.
+    """
     execution = experiment_result.get("execution", {})
-    outputs = execution.get("outputs", {}) if isinstance(execution, dict) else {}
+    outputs = (
+        execution.get("outputs", {})
+        if isinstance(execution, dict)
+        else {}
+    )
+
     if not isinstance(outputs, dict):
         outputs = {}
 
     metrics = outputs.get("metrics", {})
     errors = experiment_result.get("errors", [])
     visualizations = outputs.get("visualizations", [])
+
     if not isinstance(metrics, dict):
         metrics = {}
+
     if not isinstance(errors, list):
         errors = [errors]
+
     if not isinstance(visualizations, list):
         visualizations = [visualizations]
 
+    # ------------------------------------------------------------
+    # Execution information
+    # ------------------------------------------------------------
+    if not isinstance(execution, dict):
+        execution = {}
+
+    experiment_attempts = execution.get(
+        "experiment_attempts",
+        experiment_result.get("experiment_attempts", 0),
+    )
+
+    repair_attempts = execution.get(
+        "repair_attempts",
+        experiment_result.get("repair_attempts", 0),
+    )
+
+    dependency_install_attempts = execution.get(
+        "dependency_install_attempts",
+        experiment_result.get(
+            "dependency_install_attempts",
+            0,
+        ),
+    )
+
+    run_directory = experiment_result.get(
+        "run_directory"
+    )
+
+    generated_code_path = experiment_result.get(
+        "generated_code_path"
+    )
+
+    stdout_path = execution.get(
+        "stdout_path"
+    )
+
+    stderr_path = execution.get(
+        "stderr_path"
+    )
+
+    # ------------------------------------------------------------
+    # Helper for creating file links
+    # ------------------------------------------------------------
+    def file_link(
+        file_path: Any,
+        label: str,
+    ) -> str:
+        if not file_path:
+            return (
+                f'<span class="file-missing">'
+                f'{_escape(label)} not available'
+                f'</span>'
+            )
+
+        path = Path(str(file_path))
+
+        if not path.exists():
+            return (
+                f'<span class="file-missing">'
+                f'{_escape(label)} not found'
+                f'</span>'
+            )
+
+        file_url = report_file_url(path)
+
+        return (
+            f'<a class="file-link" '
+            f'href="{_escape(file_url)}" '
+            f'target="_blank">'
+            f'{_escape(label)}'
+            f'</a>'
+        )
+
     parts = [
-        '<section><h2>Automated Experiment</h2>',
-        f"<p><strong>Status:</strong> {_escape('Completed' if experiment_result.get('success') else 'Failed')}</p>",
+        "<section><h2>Automated Experiment</h2>",
+        (
+            "<p><strong>Status:</strong> "
+            f"{_escape('Completed' if experiment_result.get('success') else 'Failed')}"
+            "</p>"
+        ),
     ]
 
+    # ------------------------------------------------------------
+    # Attempt information
+    # ------------------------------------------------------------
+    parts.append(
+        "<h3>Execution Summary</h3>"
+        "<table><tbody>"
+        f"<tr><th>Experiment Attempts</th>"
+        f"<td>{_escape(experiment_attempts)}</td></tr>"
+        f"<tr><th>LLM Repair Attempts</th>"
+        f"<td>{_escape(repair_attempts)}</td></tr>"
+        f"<tr><th>Dependency Installation Attempts</th>"
+        f"<td>{_escape(dependency_install_attempts)}</td></tr>"
+        "</tbody></table>"
+    )
+
+    # ------------------------------------------------------------
+    # Experiment files
+    # ------------------------------------------------------------
+    parts.append(
+        "<h3>Experiment Files</h3>"
+        "<table><tbody>"
+        "<tr>"
+        "<th>Generated Experiment</th>"
+        f"<td>{file_link(generated_code_path, 'View generated_experiment.py')}</td>"
+        "</tr>"
+        "<tr>"
+        "<th>Standard Output</th>"
+        f"<td>{file_link(stdout_path, 'View stdout.log')}</td>"
+        "</tr>"
+        "<tr>"
+        "<th>Error Output</th>"
+        f"<td>{file_link(stderr_path, 'View stderr.log')}</td>"
+        "</tr>"
+    )
+
+    if run_directory:
+        run_path = Path(str(run_directory))
+
+        if run_path.exists():
+            parts.append(
+                "<tr>"
+                "<th>Run Directory</th>"
+                f"<td><code>{_escape(run_path)}</code></td>"
+                "</tr>"
+            )
+
+    parts.append(
+        "</tbody></table>"
+    )
+
+    # ------------------------------------------------------------
+    # Evaluation metrics
+    # ------------------------------------------------------------
     if metrics:
-        parts.append("<h3>Evaluation Metrics</h3><table><tbody>")
+        parts.append(
+            "<h3>Evaluation Metrics</h3>"
+            "<table><tbody>"
+        )
+
         for name, value in metrics.items():
-            parts.append(f"<tr><th>{_escape(name)}</th><td>{_escape(value)}</td></tr>")
+            parts.append(
+                f"<tr>"
+                f"<th>{_escape(name)}</th>"
+                f"<td>{_escape(value)}</td>"
+                f"</tr>"
+            )
+
         parts.append("</tbody></table>")
 
+    # ------------------------------------------------------------
+    # Errors
+    # ------------------------------------------------------------
     if errors:
         parts.append("<h3>Errors</h3><ul>")
-        parts.extend(f"<li>{_escape(error)}</li>" for error in errors)
+
+        for error in errors:
+            parts.append(
+                f"<li><pre>{_escape(error)}</pre></li>"
+            )
+
         parts.append("</ul>")
 
+    # ------------------------------------------------------------
+    # Visualizations
+    # ------------------------------------------------------------
     if visualizations:
-        parts.append("<h3>Visualizations</h3><div>")
+        parts.append(
+            "<h3>Visualizations</h3><div>"
+        )
+
         for visualization in visualizations:
-            visualization_path = Path(str(visualization))
-            visualization_url = report_file_url(visualization_path)
-            label = _escape(visualization_path.name or visualization)
-            if visualization_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".svg"}:
+            visualization_path = Path(
+                str(visualization)
+            )
+
+            if not visualization_path.exists():
+                continue
+
+            visualization_url = report_file_url(
+                visualization_path
+            )
+
+            label = _escape(
+                visualization_path.name
+                or visualization
+            )
+
+            if visualization_path.suffix.lower() in {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".svg",
+            }:
                 parts.append(
-                    f'<figure><a href="{_escape(visualization_url)}" target="_blank">'
-                    f'<img src="{_escape(visualization_url)}" alt="{label}" style="max-width:100%;height:auto"></a>'
-                    f"<figcaption>{label}</figcaption></figure>"
+                    f'<figure>'
+                    f'<a href="{_escape(visualization_url)}" '
+                    f'target="_blank">'
+                    f'<img src="{_escape(visualization_url)}" '
+                    f'alt="{label}" '
+                    f'style="max-width:100%;height:auto">'
+                    f'</a>'
+                    f'<figcaption>{label}</figcaption>'
+                    f'</figure>'
                 )
             else:
-                parts.append(f'<p><a href="{_escape(visualization_url)}" target="_blank">{label}</a></p>')
+                parts.append(
+                    f'<p>'
+                    f'<a href="{_escape(visualization_url)}" '
+                    f'target="_blank">'
+                    f'{label}'
+                    f'</a>'
+                    f'</p>'
+                )
+
         parts.append("</div>")
+
     else:
-        parts.append("<p>No visualizations were produced.</p>")
+        parts.append(
+            "<p>No visualizations were produced.</p>"
+        )
 
     parts.append("</section>")
+
     return "\n".join(parts)
+
 
 
 def write_report(run: Dict[str, Any]) -> Path:
