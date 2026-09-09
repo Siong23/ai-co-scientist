@@ -1659,11 +1659,20 @@ def format_documents_for_prompt(
                     text = document.metadata.get("abstract", "")
                 if not isinstance(text, str) or not text.strip():
                     continue
+                raw_section_path = evidence_ref.get("section_path")
+                if isinstance(raw_section_path, (list, tuple)):
+                    section_path = " > ".join(str(item) for item in raw_section_path if str(item))
+                else:
+                    section_path = str(raw_section_path or "")
                 attributes = {
                     "chunk_id": evidence_ref.get("chunk_id", ""),
                     "source_id": evidence_ref.get("source_id", source_id),
                     "section": evidence_ref.get("section", "Unknown"),
-                    "page": evidence_ref.get("page", ""),
+                    "subsection": evidence_ref.get("subsection", ""),
+                    "section_path": section_path,
+                    "page_start": evidence_ref.get("page_start", evidence_ref.get("page", "")),
+                    "page_end": evidence_ref.get("page_end", evidence_ref.get("page", "")),
+                    "element_type": evidence_ref.get("element_type", ""),
                     "evidence_type": evidence_type,
                 }
                 serialized_attributes = " ".join(

@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import Any, Sequence
@@ -17,6 +17,15 @@ from langchain_core.documents import Document
 
 from .config import config
 from .rag_retriever import SharedSentenceTransformerEmbeddings
+from .scientific_documents import (
+    DocumentElement,
+    ExtractedPaper,
+    PypdfScientificParser,
+    ScientificDocumentParser,
+    chunk_document_elements,
+    recover_document_elements,
+    split_text_by_boundaries,
+)
 from .utils import logger
 
 
@@ -36,15 +45,32 @@ class PaperChunk:
     parser: str = "pypdf"
     schema_version: str = ""
     requirement_ids: tuple[str, ...] = ()
+    raw_text: str = ""
+    retrieval_text: str = ""
+    display_text: str = ""
+    section_path: tuple[str, ...] = ()
+    page_start: int = 0
+    page_end: int = 0
+    element_type: str = "paragraph"
+    content_sha256: str = ""
+    retrieval_text_sha256: str = ""
+    parent_id: str = ""
+    previous_chunk_id: str = ""
+    next_chunk_id: str = ""
+    parser_version: str = ""
+    chunking_version: str = ""
+    retrieval_template_version: str = ""
+    embedding_model: str = ""
+    document_id: str = ""
+    paper_version: str = ""
 
+    def __post_init__(self) -> None:
+        """Keep the historical ``text`` field as the raw-evidence alias."""
 
-@dataclass(frozen=True)
-class ExtractedPaper:
-    """Parsed pages plus an honest record of parser-side truncation."""
-
-    pages: tuple[tuple[int, str], ...]
-    total_pages: int
-    truncated: bool
+        if not self.raw_text:
+            object.__setattr__(self, "raw_text", self.text)
+        if not self.text:
+            object.__setattr__(self, "text", self.raw_text)
 
 
 @dataclass(frozen=True)
@@ -95,6 +121,7 @@ class ChromaPaperLibrary:
         persist_directory: str | Path | None = None,
         pdf_directory: str | Path | None = None,
         client: Any | None = None,
+        document_parser: ScientificDocumentParser | None = None,
     ) -> None:
         library_config = config.get("paper_library", {})
         self.enabled = bool(library_config.get("enabled", True)) if enabled is None else enabled
@@ -104,9 +131,11 @@ class ChromaPaperLibrary:
         self.persist_directory = Path(persist_directory or library_config.get("persist_directory", "chroma_db"))
         self.pdf_directory = Path(pdf_directory or library_config.get("pdf_directory", ".cache/papers"))
         self.collection_prefix = str(library_config.get("collection_name", "research_papers"))
-        self.index_schema_version = str(library_config.get("index_schema_version", "2"))
-        self.parser_version = str(library_config.get("parser_version", "pypdf-1"))
-        self.chunking_version = str(library_config.get("chunking_version", "page-boundary-2"))
+        self.index_schema_version = str(library_config.get("index_schema_version", "3"))
+        self.parser_version = str(library_config.get("parser_version", "pypdf-structured-2"))
+        self.chunking_version = str(library_config.get("chunking_version", "section-paragraph-sentence-3"))
+        self.retrieval_template_version = str(library_config.get("retrieval_template_version", "intrinsic-context-1"))
+        self.parser_backend = str(library_config.get("parser_backend", "pypdf")).strip().casefold()
         self.embedding_model = str(config.get("sentence_transformer_model", "default"))
         self.candidate_download_limit = max(
             1,
@@ -134,6 +163,13 @@ class ChromaPaperLibrary:
         )
         self.allowed_pdf_hosts = {str(host).strip().casefold() for host in configured_hosts if str(host).strip()}
         self.embeddings = embeddings or SharedSentenceTransformerEmbeddings()
+        self._pypdf_parser = PypdfScientificParser()
+        self.document_parser = document_parser or self._pypdf_parser
+        if document_parser is None and self.parser_backend != "pypdf":
+            logger.warning(
+                "Unknown scientific parser backend %r; using the pypdf fallback.",
+                self.parser_backend,
+            )
         self._client = client
         self._vector_store = None
         self._manifest_lock = RLock()
@@ -174,6 +210,7 @@ class ChromaPaperLibrary:
                 self.index_schema_version,
                 self.parser_version,
                 self.chunking_version,
+                self.retrieval_template_version,
             )
         )
         model_hash = hashlib.sha256(schema_key.encode("utf-8")).hexdigest()[:12]
@@ -203,13 +240,14 @@ class ChromaPaperLibrary:
                 "index_schema_version": self.index_schema_version,
                 "parser_version": self.parser_version,
                 "chunking_version": self.chunking_version,
+                "retrieval_template_version": self.retrieval_template_version,
             },
         )
         return self._vector_store
 
     @staticmethod
     def _empty_manifest() -> dict[str, Any]:
-        return {"manifest_version": 1, "sources": {}}
+        return {"manifest_version": 2, "sources": {}}
 
     def _read_manifest(self) -> dict[str, Any]:
         if not self.manifest_path.exists():
@@ -267,6 +305,7 @@ class ChromaPaperLibrary:
             "schema_version": self.index_schema_version,
             "parser_version": self.parser_version,
             "chunking_version": self.chunking_version,
+            "retrieval_template_version": self.retrieval_template_version,
             "max_pages_per_paper": self.max_pages_per_paper,
             "max_chunks_per_paper": self.max_chunks_per_paper,
         }
@@ -293,10 +332,27 @@ class ChromaPaperLibrary:
                 "chunk_index",
                 "chunk_count",
                 "content_sha256",
+                "retrieval_text_sha256",
+                "document_id",
+                "paper_version",
                 "page",
+                "page_start",
+                "page_end",
+                "section",
+                "subsection",
+                "section_path",
+                "element_type",
+                "parent_id",
+                "previous_chunk_id",
+                "next_chunk_id",
                 "schema_version",
                 "parser_version",
                 "chunking_version",
+                "retrieval_template_version",
+                "embedding_model",
+                "source_type",
+                "document_type",
+                "evidence_type",
                 "index_completeness",
             )
         }
@@ -350,8 +406,15 @@ class ChromaPaperLibrary:
                 metadata_mismatches.append(chunk_id)
                 continue
             actual_text, actual_metadata = actual_records[chunk_id]
-            expected_hash = str(expected.get("content_sha256", ""))
-            if not expected_hash or self._content_hash(actual_text) != expected_hash:
+            expected_content_hash = str(expected.get("content_sha256", ""))
+            expected_retrieval_hash = str(expected.get("retrieval_text_sha256") or expected_content_hash)
+            actual_raw_text = str(actual_metadata.get("raw_text") or actual_text)
+            if (
+                not expected_content_hash
+                or self._content_hash(actual_raw_text) != expected_content_hash
+                or not expected_retrieval_hash
+                or self._content_hash(actual_text) != expected_retrieval_hash
+            ):
                 content_mismatches.append(chunk_id)
             expected_metadata = expected.get("metadata")
             if (
@@ -736,22 +799,7 @@ class ChromaPaperLibrary:
             text = chunk.text[:allocation].strip()
             if not text:
                 continue
-            chunks_by_source.setdefault(chunk.source_id, []).append(
-                PaperChunk(
-                    chunk.source_id,
-                    chunk.title,
-                    chunk.page,
-                    text,
-                    chunk.distance,
-                    chunk.chunk_id,
-                    chunk.section,
-                    chunk.subsection,
-                    chunk.evidence_type,
-                    chunk.parser,
-                    chunk.schema_version,
-                    chunk.requirement_ids,
-                )
-            )
+            chunks_by_source.setdefault(chunk.source_id, []).append(replace(chunk, text=text))
             used_chars += len(text)
 
         selected_chunk_ids_by_source: dict[str, list[str]] = {}
@@ -805,10 +853,25 @@ class ChromaPaperLibrary:
                     "chunk_id": chunk.chunk_id,
                     "section": chunk.section,
                     "subsection": chunk.subsection,
+                    "section_path": list(chunk.section_path),
                     "page": chunk.page,
+                    "page_start": chunk.page_start or chunk.page,
+                    "page_end": chunk.page_end or chunk.page,
+                    "element_type": chunk.element_type,
                     "evidence_type": chunk.evidence_type,
                     "parser": chunk.parser,
                     "schema_version": chunk.schema_version,
+                    "parser_version": chunk.parser_version,
+                    "chunking_version": chunk.chunking_version,
+                    "retrieval_template_version": chunk.retrieval_template_version,
+                    "embedding_model": chunk.embedding_model,
+                    "document_id": chunk.document_id or chunk.source_id,
+                    "paper_version": chunk.paper_version,
+                    "content_sha256": chunk.content_sha256,
+                    "retrieval_text_sha256": chunk.retrieval_text_sha256,
+                    "parent_id": chunk.parent_id,
+                    "previous_chunk_id": chunk.previous_chunk_id,
+                    "next_chunk_id": chunk.next_chunk_id,
                     "retrieval_score": chunk.distance,
                     "requirement_ids": list(chunk.requirement_ids),
                     "text": chunk.text,
@@ -895,18 +958,10 @@ class ChromaPaperLibrary:
                     chunk_id,
                     chunk
                     if chunk.chunk_id
-                    else PaperChunk(
-                        chunk.source_id,
-                        chunk.title,
-                        chunk.page,
-                        chunk.text,
-                        chunk.distance,
-                        chunk_id,
-                        chunk.section,
-                        chunk.subsection,
-                        chunk.evidence_type,
-                        chunk.parser,
-                        chunk.schema_version or self.index_schema_version,
+                    else replace(
+                        chunk,
+                        chunk_id=chunk_id,
+                        schema_version=chunk.schema_version or self.index_schema_version,
                     ),
                 )
                 fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
@@ -943,19 +998,9 @@ class ChromaPaperLibrary:
         for chunk_id in selected_ids:
             chunk = chunks_by_id[chunk_id]
             selected.append(
-                PaperChunk(
-                    chunk.source_id,
-                    chunk.title,
-                    chunk.page,
-                    chunk.text,
-                    chunk.distance,
-                    chunk.chunk_id,
-                    chunk.section,
-                    chunk.subsection,
-                    chunk.evidence_type,
-                    chunk.parser,
-                    chunk.schema_version,
-                    tuple(requirements_by_chunk.get(chunk_id, ())),
+                replace(
+                    chunk,
+                    requirement_ids=tuple(requirements_by_chunk.get(chunk_id, ())),
                 )
             )
         return selected
@@ -988,15 +1033,25 @@ class ChromaPaperLibrary:
         extracted = self._extract_pages(pdf_path)
         if isinstance(extracted, ExtractedPaper):
             pages = extracted.pages
+            elements = extracted.elements
+            parser_name = extracted.parser
             pages_truncated = extracted.truncated
             total_pages = extracted.total_pages
         else:
             # Preserve compatibility with parser test doubles and custom parsers.
             pages = tuple(extracted)
+            elements = ()
+            parser_name = "pypdf"
             pages_truncated = False
             total_pages = len(pages)
 
-        chunked = self._chunk_pages(source_id, document, pages)
+        chunked = self._chunk_pages(
+            source_id,
+            document,
+            pages,
+            elements=elements,
+            parser_name=parser_name,
+        )
         if isinstance(chunked, ChunkedPaper):
             chunks = list(chunked.chunks)
             chunks_truncated = chunked.truncated
@@ -1012,21 +1067,32 @@ class ChromaPaperLibrary:
         index_completeness = "partial" if truncated else "complete"
         ids: list[str] = []
         for index, chunk in enumerate(chunks):
-            chunk_id = self._chunk_id(source_id, int(chunk.metadata["page"]), index, chunk.page_content)
+            raw_text = str(chunk.metadata.get("raw_text") or chunk.page_content)
+            page_start = int(chunk.metadata.get("page_start") or chunk.metadata.get("page") or 0)
+            chunk_id = self._chunk_id(source_id, page_start, index, raw_text)
             chunk.metadata.update(
                 {
                     "chunk_id": chunk_id,
                     "chunk_index": index,
                     "chunk_count": len(chunks),
-                    "content_sha256": self._content_hash(chunk.page_content),
+                    "content_sha256": self._content_hash(raw_text),
+                    "retrieval_text_sha256": self._content_hash(chunk.page_content),
                     "index_completeness": index_completeness,
                 }
             )
             ids.append(chunk_id)
+        for index, chunk in enumerate(chunks):
+            chunk.metadata.update(
+                {
+                    "previous_chunk_id": ids[index - 1] if index else "",
+                    "next_chunk_id": ids[index + 1] if index + 1 < len(ids) else "",
+                }
+            )
 
         expected_chunks = {
             chunk_id: {
                 "content_sha256": str(chunk.metadata["content_sha256"]),
+                "retrieval_text_sha256": str(chunk.metadata["retrieval_text_sha256"]),
                 "metadata": self._critical_chunk_metadata(chunk.metadata),
             }
             for chunk_id, chunk in zip(ids, chunks)
@@ -1112,12 +1178,22 @@ class ChromaPaperLibrary:
         chunks: list[PaperChunk] = []
         for document, distance in results:
             metadata = document.metadata
+            raw_text = str(metadata.get("raw_text") or document.page_content)
+            page = int(metadata.get("page_start") or metadata.get("page") or 0)
+            path = tuple(
+                part.strip()
+                for part in str(metadata.get("section_path") or metadata.get("section") or "Unknown").split(">")
+                if part.strip()
+            )
+            title = str(metadata.get("title", "Untitled"))
+            section_path = " > ".join(path or ("Unknown",))
+            page_end = int(metadata.get("page_end") or page)
             chunks.append(
                 PaperChunk(
                     source_id=str(metadata.get("source_id", "")),
-                    title=str(metadata.get("title", "Untitled")),
-                    page=int(metadata.get("page", 0)),
-                    text=document.page_content,
+                    title=title,
+                    page=page,
+                    text=raw_text,
                     distance=float(distance) if distance is not None else None,
                     chunk_id=str(metadata.get("chunk_id", "")),
                     section=str(metadata.get("section", "Unknown")),
@@ -1125,6 +1201,31 @@ class ChromaPaperLibrary:
                     evidence_type=str(metadata.get("evidence_type", "full_text")),
                     parser=str(metadata.get("parser", "pypdf")),
                     schema_version=str(metadata.get("schema_version", self.index_schema_version)),
+                    raw_text=raw_text,
+                    retrieval_text=document.page_content,
+                    display_text=self._display_text(
+                        str(metadata.get("source_id", "")),
+                        title,
+                        section_path,
+                        page,
+                        page_end,
+                        raw_text,
+                    ),
+                    section_path=path or ("Unknown",),
+                    page_start=int(metadata.get("page_start") or page),
+                    page_end=page_end,
+                    element_type=str(metadata.get("element_type") or "paragraph"),
+                    content_sha256=str(metadata.get("content_sha256") or ""),
+                    retrieval_text_sha256=str(metadata.get("retrieval_text_sha256") or ""),
+                    parent_id=str(metadata.get("parent_id") or ""),
+                    previous_chunk_id=str(metadata.get("previous_chunk_id") or ""),
+                    next_chunk_id=str(metadata.get("next_chunk_id") or ""),
+                    parser_version=str(metadata.get("parser_version") or ""),
+                    chunking_version=str(metadata.get("chunking_version") or ""),
+                    retrieval_template_version=str(metadata.get("retrieval_template_version") or ""),
+                    embedding_model=str(metadata.get("embedding_model") or ""),
+                    document_id=str(metadata.get("document_id") or metadata.get("source_id") or ""),
+                    paper_version=str(metadata.get("paper_version") or ""),
                 )
             )
         return chunks
@@ -1174,56 +1275,161 @@ class ChromaPaperLibrary:
             raise ValueError(f"PDF host is not allowed: {host or 'missing host'}")
 
     def _extract_pages(self, pdf_path: Path) -> ExtractedPaper:
-        from pypdf import PdfReader
+        try:
+            parsed = self.document_parser.parse(
+                pdf_path,
+                max_pages=self.max_pages_per_paper,
+            )
+            if not isinstance(parsed, ExtractedPaper):
+                raise TypeError("scientific document parser returned an unsupported result")
+            return parsed
+        except Exception as exc:
+            if self.document_parser is self._pypdf_parser:
+                raise
+            logger.warning(
+                "Structured scientific parser %s failed for %s; using pypdf fallback: %s",
+                getattr(self.document_parser, "name", type(self.document_parser).__name__),
+                pdf_path,
+                exc,
+            )
+            return self._pypdf_parser.parse(
+                pdf_path,
+                max_pages=self.max_pages_per_paper,
+            )
 
-        reader = PdfReader(str(pdf_path))
-        pages: list[tuple[int, str]] = []
-        total_pages = len(reader.pages)
-        for page_number, page in enumerate(reader.pages[: self.max_pages_per_paper], start=1):
-            raw_text = (page.extract_text() or "").replace("\r\n", "\n").replace("\r", "\n")
-            lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw_text.split("\n")]
-            text = "\n".join(lines)
-            text = re.sub(r"\n{3,}", "\n\n", text).strip()
-            if text:
-                pages.append((page_number, text))
-        return ExtractedPaper(
-            pages=tuple(pages),
-            total_pages=total_pages,
-            truncated=total_pages > self.max_pages_per_paper,
+    @staticmethod
+    def _metadata_text(metadata: dict[str, Any], key: str, fallback: str = "") -> str:
+        value = metadata.get(key, fallback)
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item).strip() for item in value if str(item).strip())
+        return str(value or fallback).strip()
+
+    @staticmethod
+    def _paper_version(source_id: str, metadata: dict[str, Any]) -> str:
+        explicit = str(metadata.get("paper_version") or metadata.get("arxiv_version") or "").strip()
+        if explicit:
+            return explicit
+        arxiv_identity = str(metadata.get("arxiv_id") or source_id)
+        match = re.search(r"v(\d+)$", arxiv_identity, re.IGNORECASE)
+        return f"v{match.group(1)}" if match else ""
+
+    def _retrieval_text(
+        self,
+        document: Document,
+        raw_text: str,
+        section_path: str,
+    ) -> str:
+        """Add only document-intrinsic context to text sent to embeddings."""
+
+        metadata = document.metadata
+        title = self._metadata_text(metadata, "title", "Untitled")
+        authors = self._metadata_text(metadata, "authors")
+        publication = self._metadata_text(metadata, "venue")
+        published_at = self._metadata_text(metadata, "published_at") or self._metadata_text(
+            metadata,
+            "published",
         )
+        doi = self._metadata_text(metadata, "doi")
+        arxiv_id = self._metadata_text(metadata, "arxiv_id")
+        context = [f"Paper: {title}", f"Section: {section_path}"]
+        if authors:
+            context.append(f"Authors: {authors}")
+        if publication:
+            context.append(f"Publication: {publication}")
+        if published_at:
+            context.append(f"Published: {published_at}")
+        if doi:
+            context.append(f"DOI: {doi}")
+        if arxiv_id:
+            context.append(f"arXiv: {arxiv_id}")
+        context_text = "\n".join(context)
+        return f"{context_text}\n\n{raw_text}"
+
+    @staticmethod
+    def _display_text(
+        source_id: str,
+        title: str,
+        section_path: str,
+        page_start: int,
+        page_end: int,
+        raw_text: str,
+    ) -> str:
+        pages = str(page_start) if page_start == page_end else f"{page_start}-{page_end}"
+        return f"Source ID: {source_id}\nPaper: {title}\nSection: {section_path}\nPages: {pages}\n\n{raw_text}"
 
     def _chunk_pages(
         self,
         source_id: str,
         document: Document,
         pages: Sequence[tuple[int, str]],
+        *,
+        elements: Sequence[DocumentElement] = (),
+        parser_name: str = "pypdf",
     ) -> ChunkedPaper:
         title = str(document.metadata.get("title", "Untitled"))
         pdf_url = str(document.metadata.get("pdf_url", ""))
-        page_documents = [
-            Document(
-                page_content=text,
-                metadata={
-                    "source_id": source_id,
-                    "title": title,
-                    "page": page,
-                    "pdf_url": pdf_url,
-                    "embedding_model": self.embedding_model,
-                    "section": "Unknown",
-                    "subsection": "",
-                    "evidence_type": "full_text",
-                    "parser": "pypdf",
-                    "parser_version": self.parser_version,
-                    "chunking_version": self.chunking_version,
-                    "schema_version": self.index_schema_version,
-                },
-            )
-            for page, text in pages
-        ]
+        authors = self._metadata_text(document.metadata, "authors")
+        doi = self._metadata_text(document.metadata, "doi")
+        arxiv_id = self._metadata_text(document.metadata, "arxiv_id")
+        published_at = self._metadata_text(document.metadata, "published_at") or self._metadata_text(
+            document.metadata,
+            "published",
+        )
+        updated_at = self._metadata_text(document.metadata, "updated_at")
+        source_type = self._metadata_text(document.metadata, "source_type") or self._metadata_text(
+            document.metadata,
+            "source_family",
+            "academic",
+        )
+        document_type = self._metadata_text(document.metadata, "document_type", "research_paper")
+        paper_version = self._paper_version(source_id, document.metadata)
+        recovered_elements = tuple(elements) or recover_document_elements(pages)
+        element_chunks = chunk_document_elements(
+            recovered_elements,
+            max_chars=self.chunk_size,
+            overlap_chars=self.chunk_overlap,
+        )
         all_chunks: list[Document] = []
-        for page_document in page_documents:
-            for text in self._split_text(page_document.page_content):
-                all_chunks.append(Document(page_content=text, metadata=dict(page_document.metadata)))
+        for chunk in element_chunks:
+            raw_text = chunk.raw_text
+            section_path = " > ".join(chunk.section_path)
+            retrieval_text = self._retrieval_text(document, raw_text, section_path)
+            parent_id = self._content_hash(f"{source_id}\0{section_path}")
+            all_chunks.append(
+                Document(
+                    page_content=retrieval_text,
+                    metadata={
+                        "source_id": source_id,
+                        "document_id": source_id,
+                        "paper_version": paper_version,
+                        "title": title,
+                        "authors": authors,
+                        "doi": doi,
+                        "arxiv_id": arxiv_id,
+                        "published_at": published_at,
+                        "updated_at": updated_at,
+                        "page": chunk.page_start,
+                        "page_start": chunk.page_start,
+                        "page_end": chunk.page_end,
+                        "pdf_url": pdf_url,
+                        "section": chunk.section,
+                        "subsection": chunk.subsection,
+                        "section_path": section_path,
+                        "element_type": chunk.element_type,
+                        "parent_id": parent_id,
+                        "raw_text": raw_text,
+                        "embedding_model": self.embedding_model,
+                        "source_type": source_type,
+                        "document_type": document_type,
+                        "evidence_type": "full_text",
+                        "parser": parser_name,
+                        "parser_version": self.parser_version,
+                        "chunking_version": self.chunking_version,
+                        "retrieval_template_version": self.retrieval_template_version,
+                        "schema_version": self.index_schema_version,
+                    },
+                )
+            )
         return ChunkedPaper(
             chunks=tuple(all_chunks[: self.max_chunks_per_paper]),
             truncated=len(all_chunks) > self.max_chunks_per_paper,
@@ -1232,27 +1438,7 @@ class ChromaPaperLibrary:
     def _split_text(self, text: str) -> list[str]:
         """Split on paragraph, line, sentence, then word boundaries when possible."""
 
-        chunks: list[str] = []
-        start = 0
-        minimum_boundary = max(1, self.chunk_size // 2)
-        while start < len(text):
-            hard_end = min(start + self.chunk_size, len(text))
-            end = hard_end
-            if hard_end < len(text):
-                boundary_floor = start + minimum_boundary
-                candidates = [
-                    text.rfind(separator, boundary_floor, hard_end) for separator in ("\n\n", "\n", ". ", " ")
-                ]
-                best_boundary = max(candidates)
-                if best_boundary >= boundary_floor:
-                    end = best_boundary + (2 if text.startswith(("\n\n", ". "), best_boundary) else 1)
-            chunk = text[start:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            if end >= len(text):
-                break
-            start = max(start + 1, end - self.chunk_overlap)
-        return chunks
+        return split_text_by_boundaries(text, self.chunk_size, self.chunk_overlap)
 
     def _pdf_path(self, source_id: str) -> Path:
         digest = hashlib.sha256(source_id.encode("utf-8")).hexdigest()

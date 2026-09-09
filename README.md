@@ -103,9 +103,18 @@ The system uses a multi-agent approach:
   clearly irrelevant search results are removed before PDF acquisition.
 - Downloads only the bounded relevant shortlist into `app/paper/`, reuses
   cached PDFs, and stores versioned full-text evidence chunks in `chroma_db/`.
+- Parses PDFs through a scientific-document interface with a dependency-light
+  pypdf fallback. The fallback conservatively recovers sections, subsections,
+  paragraphs, tables, captions, equations, and code blocks, then chunks at
+  section, paragraph, and sentence boundaries before using a hard size limit.
+- Stores source-faithful `raw_text` separately from document-intrinsic
+  `retrieval_text`. Embeddings include paper/section/publication context but
+  never research-goal conclusions or hypothesis judgments; prompt/citation
+  display is rebuilt from provenance plus raw evidence.
 - Retrieves focused method, result, comparison, and limitation passages before
-  literature synthesis. Each passage carries a chunk ID, source ID, page,
-  evidence type, parser, and index schema version.
+  literature synthesis. Each passage carries document/chunk identity, section
+  path, page range, element type, content/retrieval hashes, parser/chunker/
+  template versions, and source provenance.
 - Keeps unavailable papers as explicitly limited `abstract_only` evidence;
   one failed PDF does not abort a research cycle.
 - Provides passage-level coverage and strict chunk-grounded audit helpers for
@@ -127,7 +136,8 @@ search), `paper_library` (download budget, PDF cache, Chroma schema and prompt
 limits), `evidence_retrieval` (focused-query limits and query-side embedding
 instructions), and `validation` (numeric/entailment checks and per-candidate
 audit context). Changing an index, parser, or chunking version selects a new
-Chroma collection; cached PDFs remain reusable for re-indexing.
+Chroma collection; retrieval-template versions are collection-signature inputs
+as well. Cached PDFs remain reusable for re-indexing.
 
 ## ⚙️ Technical Details
 

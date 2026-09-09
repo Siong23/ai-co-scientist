@@ -211,9 +211,13 @@ paper_library:
   persist_directory: "chroma_db"
   pdf_directory: "app/paper"
   collection_name: "research_papers"
-  index_schema_version: "2"
-  parser_version: "pypdf-1"
-  chunking_version: "page-boundary-2"
+  # Schema 3 stores source-faithful raw text separately from intrinsic-context
+  # retrieval text and records structured scientific-document provenance.
+  index_schema_version: "3"
+  parser_backend: "pypdf"
+  parser_version: "pypdf-structured-2"
+  chunking_version: "section-paragraph-sentence-3"
+  retrieval_template_version: "intrinsic-context-1"
   candidate_download_limit: 8
   # Each explicit evidence requirement gets bounded candidate failover within
   # the global per-enrichment acquisition budget.
