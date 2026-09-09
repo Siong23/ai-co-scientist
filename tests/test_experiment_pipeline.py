@@ -25,6 +25,7 @@ import pytest
 from app.agents_modules.code_generation_agent import CodeGenerationAgent
 from app.experiments.experiment_orchestrator import ExperimentOrchestrator
 from app.experiments.experiment_runner import ExperimentRunner
+from app.data.dataset_manager import DatasetManager
 from app.config import load_config
 from app.utils import call_llm
 
@@ -683,13 +684,16 @@ def test_experiment_runner_executes_relative_code_path_from_run_directory(
 # ============================================================
 
 
-def test_experiment_orchestrator_uses_repository_dataset_by_default():
-    orchestrator = ExperimentOrchestrator()
-
-    assert orchestrator.dataset_path == (
-        Path(__file__).resolve().parents[1]
-        / "data/5g_nidd/5g_nidd.csv"
+def test_experiment_orchestrator_uses_repository_dataset_by_default(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
     )
+
+    orchestrator = ExperimentOrchestrator()
 
 
 def test_config_loads_from_repository_when_cwd_is_elsewhere(
@@ -703,7 +707,15 @@ def test_config_loads_from_repository_when_cwd_is_elsewhere(
     assert config["logging_level"] is not None
 
 
-def test_experiment_orchestrator_selects_best_accepted_hypothesis():
+def test_experiment_orchestrator_selects_best_accepted_hypothesis(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+
     class FakeReport:
         def __init__(self, recommendation):
             self.recommendation = recommendation
@@ -770,9 +782,15 @@ def test_experiment_orchestrator_selects_best_accepted_hypothesis():
     )
 
 
-def test_experiment_orchestrator_repairs_failed_execution(
+def test_experiment_orchestrator_delegates_execution_to_runner(
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+
     orchestrator = ExperimentOrchestrator()
 
     specification = dict(VALID_SPECIFICATION)
@@ -783,45 +801,19 @@ def test_experiment_orchestrator_repairs_failed_execution(
         "experiment_specification": specification,
     }
 
-    initial_generation = {
+    generation = {
         "success": True,
-        "pytorch_code": (
-            "import torch\n"
-            "raise RuntimeError('broken')"
-        ),
+        "pytorch_code": "print('experiment')",
     }
 
-    repaired_generation = {
+    runner_result = {
         "success": True,
-        "pytorch_code": (
-            "import torch\n"
-            "print('fixed')"
-        ),
+        "status": "completed",
+        "output_validation": {
+            "valid": True,
+            "warnings": [],
+        },
     }
-
-    executions = [
-        {
-            "success": False,
-            "status": "failed",
-            "execution": {
-                "status": "failed",
-                "stderr": "RuntimeError: broken",
-            },
-            "errors": [
-                "Generated experiment exited with return code 1."
-            ],
-        },
-        {
-            "success": True,
-            "status": "completed",
-            "output_validation": {
-                "valid": True,
-                "warnings": [],
-            },
-        },
-    ]
-
-    repair_calls = []
 
     monkeypatch.setattr(
         orchestrator,
@@ -832,35 +824,32 @@ def test_experiment_orchestrator_repairs_failed_execution(
     monkeypatch.setattr(
         orchestrator,
         "generate_pytorch_code",
-        lambda specification: initial_generation,
+        lambda specification: generation,
     )
+
+    runner_calls = []
+
+    def fake_run_generated_experiment(**kwargs):
+        runner_calls.append(kwargs)
+        return runner_result
 
     monkeypatch.setattr(
         orchestrator,
         "run_generated_experiment",
-        lambda **kwargs: executions.pop(0),
-    )
-
-    def fake_repair_generated_code(**kwargs):
-        repair_calls.append(kwargs)
-        return repaired_generation
-
-    monkeypatch.setattr(
-        orchestrator.code_generation_agent,
-        "repair_generated_code",
-        fake_repair_generated_code,
+        fake_run_generated_experiment,
     )
 
     result = orchestrator.run_experiment(
         context=object(),
         execute_generated_code=True,
-        max_repair_attempts=2,
     )
 
     assert result["success"] is True
-    assert len(repair_calls) == 1
-    assert result["repair_attempts"][0]["success"] is True
-    assert result["code_generation"] == repaired_generation
+    assert result["execution"] == runner_result
+
+    assert len(runner_calls) == 1
+    assert runner_calls[0]["experiment_id"] == "H-1_test"
+    assert runner_calls[0]["generated_result"] == generation
 
 
 # ============================================================
