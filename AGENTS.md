@@ -48,6 +48,8 @@ Work directly in the user's current checkout, including `main` when it is the
 active branch. Preserve unrelated user changes and keep edits scoped to the
 requested task.
 
+After completing every task, commit the task's changes locally.
+
 ## Pull request follow-up
 
 When the user asks to create/open PRs, create **ready-for-review PRs by
