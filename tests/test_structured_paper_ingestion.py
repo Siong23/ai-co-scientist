@@ -250,7 +250,7 @@ def test_persistent_index_embeds_retrieval_text_and_returns_raw_evidence(tmp_pat
     assert metadata["section_path"] == "Results > Main Results"
     assert metadata["page_start"] == metadata["page_end"] == 5
     assert metadata["element_type"] == "paragraph"
-    assert metadata["schema_version"] == "3"
+    assert metadata["schema_version"] == "4"
     assert metadata["parser_version"] == "pypdf-structured-2"
     assert metadata["chunking_version"] == "section-paragraph-sentence-3"
     assert metadata["retrieval_template_version"] == "intrinsic-context-1"

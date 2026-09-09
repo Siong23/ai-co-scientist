@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from threading import RLock
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
 import requests
@@ -27,6 +28,7 @@ from .scientific_documents import (
     recover_document_elements,
     split_text_by_boundaries,
 )
+from .source_registry import JsonSourceRegistry, SourceVersionIdentity, resolve_source_version
 from .utils import logger
 
 
@@ -120,6 +122,21 @@ class IndexIntegrityReport:
         return self.status == "COMMITTED" and not self.truncated and self.records_valid
 
 
+@dataclass(frozen=True)
+class IncrementalIndexReport:
+    """Observable work performed while bringing one source version current."""
+
+    source_id: str
+    canonical_source_id: str
+    version_key: str
+    remote_refresh: bool
+    pdf_cache_hit: bool
+    artifact_cache_hit: bool
+    embedded_chunks: int
+    reused_embeddings: int
+    deleted_chunks: int
+
+
 class ChromaPaperLibrary:
     """Maintain a bounded local collection of downloaded, chunked papers."""
 
@@ -141,11 +158,17 @@ class ChromaPaperLibrary:
         self.persist_directory = Path(persist_directory or library_config.get("persist_directory", "chroma_db"))
         self.pdf_directory = Path(pdf_directory or library_config.get("pdf_directory", ".cache/papers"))
         self.collection_prefix = str(library_config.get("collection_name", "research_papers"))
-        self.index_schema_version = str(library_config.get("index_schema_version", "3"))
+        self.index_schema_version = str(library_config.get("index_schema_version", "4"))
         self.parser_version = str(library_config.get("parser_version", "pypdf-structured-2"))
         self.chunking_version = str(library_config.get("chunking_version", "section-paragraph-sentence-3"))
         self.retrieval_template_version = str(library_config.get("retrieval_template_version", "intrinsic-context-1"))
         self.parser_backend = str(library_config.get("parser_backend", "pypdf")).strip().casefold()
+        self.incremental_indexing_enabled = bool(library_config.get("incremental_indexing_enabled", True))
+        self.embedding_reuse_enabled = bool(library_config.get("embedding_reuse_enabled", True))
+        registry_filename = str(library_config.get("source_registry_filename", "paper_source_registry.json"))
+        artifact_directory = str(library_config.get("chunk_artifact_directory", "paper_chunk_artifacts"))
+        self.source_registry = JsonSourceRegistry(self.persist_directory / registry_filename)
+        self.chunk_artifact_directory = self.persist_directory / artifact_directory
         self.embedding_model = str(config.get("sentence_transformer_model", "default"))
         self.candidate_download_limit = max(
             1,
@@ -204,6 +227,8 @@ class ChromaPaperLibrary:
         self._full_text_requested_source_ids: set[str] = set()
         self._full_text_cache_hit_source_ids: set[str] = set()
         self._full_text_downloaded_source_ids: set[str] = set()
+        self.last_incremental_index_report: IncrementalIndexReport | None = None
+        self.last_incremental_index_reports: list[IncrementalIndexReport] = []
 
     def begin_run(self) -> None:
         """Reset bounded acquisition state and diagnostics for one generation run."""
@@ -216,6 +241,8 @@ class ChromaPaperLibrary:
         self._full_text_requested_source_ids = set()
         self._full_text_cache_hit_source_ids = set()
         self._full_text_downloaded_source_ids = set()
+        self.last_incremental_index_report = None
+        self.last_incremental_index_reports = []
 
     @property
     def acquisition_funnel(self) -> dict[str, int]:
@@ -235,8 +262,6 @@ class ChromaPaperLibrary:
             (
                 self.embedding_model,
                 self.index_schema_version,
-                self.parser_version,
-                self.chunking_version,
                 self.retrieval_template_version,
             )
         )
@@ -274,7 +299,7 @@ class ChromaPaperLibrary:
 
     @staticmethod
     def _empty_manifest() -> dict[str, Any]:
-        return {"manifest_version": 2, "sources": {}}
+        return {"manifest_version": 3, "sources": {}}
 
     def _read_manifest(self) -> dict[str, Any]:
         if not self.manifest_path.exists():
@@ -330,11 +355,14 @@ class ChromaPaperLibrary:
             "collection_name": self.collection_name,
             "embedding_model": self.embedding_model,
             "schema_version": self.index_schema_version,
+            "parser_backend": self.parser_backend,
             "parser_version": self.parser_version,
             "chunking_version": self.chunking_version,
             "retrieval_template_version": self.retrieval_template_version,
             "max_pages_per_paper": self.max_pages_per_paper,
             "max_chunks_per_paper": self.max_chunks_per_paper,
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
         }
 
     @staticmethod
@@ -350,6 +378,126 @@ class ChromaPaperLibrary:
         return digest.hexdigest()
 
     @staticmethod
+    def _source_identity(document: Document) -> SourceVersionIdentity:
+        source_id = str(document.metadata.get("source_id") or "").strip()
+        return resolve_source_version(source_id, document.metadata)
+
+    @staticmethod
+    def _normalize_identity_text(text: str, *, casefold: bool = False) -> str:
+        normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).strip()
+        return normalized.casefold() if casefold else normalized
+
+    def _chunk_content_hash(self, section_path: str, raw_text: str) -> str:
+        normalized_section = self._normalize_identity_text(section_path, casefold=True)
+        normalized_text = self._normalize_identity_text(raw_text)
+        return self._content_hash(f"{normalized_section}\0{normalized_text}")
+
+    def _embedding_cache_key(self, retrieval_text_sha256: str) -> str:
+        return self._content_hash(f"{retrieval_text_sha256}\0{self.embedding_model}")
+
+    def _semantic_chunk_id(
+        self,
+        canonical_source_id: str,
+        chunk_content_sha256: str,
+        occurrence: int,
+    ) -> str:
+        return self._content_hash(f"{canonical_source_id}\0{chunk_content_sha256}\0{occurrence}")
+
+    def _versioned_pdf_path(
+        self,
+        identity: SourceVersionIdentity,
+        version_record: dict[str, Any] | None = None,
+    ) -> Path:
+        if version_record and version_record.get("remote_revision") == identity.remote_revision:
+            filename = Path(str(version_record.get("pdf_filename") or "")).name
+            if filename:
+                return self.pdf_directory / filename
+        legacy_path = self._pdf_path(identity.source_id)
+        source_has_explicit_version = bool(
+            identity.paper_version
+            and re.search(f"{re.escape(identity.paper_version)}$", identity.source_id, re.IGNORECASE)
+        )
+        if not version_record and source_has_explicit_version and legacy_path.exists():
+            return legacy_path
+        if identity.version_key == "unversioned":
+            return legacy_path
+        digest = self._content_hash(
+            f"{identity.canonical_source_id}\0{identity.version_key}\0{identity.remote_revision}"
+        )
+        return self.pdf_directory / f"{digest}.pdf"
+
+    def _acquire_versioned_pdf(
+        self,
+        identity: SourceVersionIdentity,
+    ) -> tuple[Path, str, bool]:
+        version_record = self.source_registry.get_version(identity)
+        pdf_path = self._versioned_pdf_path(identity, version_record)
+        expected_hash = str((version_record or {}).get("document_sha256") or "")
+        cache_hit = False
+        if pdf_path.exists():
+            actual_hash = self._file_hash(pdf_path)
+            if expected_hash:
+                cache_hit = actual_hash == expected_hash
+            elif identity.version_key == "unversioned" or (
+                identity.paper_version
+                and re.search(f"{re.escape(identity.paper_version)}$", identity.source_id, re.IGNORECASE)
+            ):
+                cache_hit = True
+            if cache_hit:
+                document_sha256 = actual_hash
+        if not cache_hit:
+            self._download_pdf(identity.pdf_url, pdf_path)
+            self._full_text_downloaded_source_ids.add(identity.source_id)
+            document_sha256 = self._file_hash(pdf_path)
+        self.source_registry.update_version(
+            identity,
+            pdf_filename=pdf_path.name,
+            document_sha256=document_sha256,
+        )
+        return pdf_path, document_sha256, cache_hit
+
+    def _chunk_artifact_signature(self, document_sha256: str) -> str:
+        payload = {
+            "artifact_version": 1,
+            "document_sha256": document_sha256,
+            "parser_backend": self.parser_backend,
+            "parser_version": self.parser_version,
+            "chunking_version": self.chunking_version,
+            "max_pages_per_paper": self.max_pages_per_paper,
+            "max_chunks_per_paper": self.max_chunks_per_paper,
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
+        }
+        return self._content_hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    def _artifact_path(self, artifact_signature: str) -> Path:
+        return self.chunk_artifact_directory / f"{artifact_signature}.json"
+
+    @staticmethod
+    def _artifact_chunk_record(chunk: Document) -> dict[str, Any]:
+        metadata = chunk.metadata
+        return {
+            "raw_text": str(metadata.get("raw_text") or chunk.page_content),
+            "page_start": int(metadata.get("page_start") or metadata.get("page") or 0),
+            "page_end": int(metadata.get("page_end") or metadata.get("page") or 0),
+            "section": str(metadata.get("section") or "Unknown"),
+            "subsection": str(metadata.get("subsection") or ""),
+            "section_path": str(metadata.get("section_path") or metadata.get("section") or "Unknown"),
+            "element_type": str(metadata.get("element_type") or "paragraph"),
+            "parser": str(metadata.get("parser") or "pypdf"),
+        }
+
+    @staticmethod
+    def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    @staticmethod
     def _critical_chunk_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         return {
             key: metadata.get(key)
@@ -359,8 +507,13 @@ class ChromaPaperLibrary:
                 "chunk_index",
                 "chunk_count",
                 "content_sha256",
+                "chunk_content_sha256",
                 "retrieval_text_sha256",
+                "embedding_cache_key",
                 "document_id",
+                "canonical_source_id",
+                "source_version_key",
+                "remote_revision",
                 "paper_version",
                 "page",
                 "page_start",
@@ -389,6 +542,20 @@ class ChromaPaperLibrary:
             where={"source_id": source_id},
             include=["documents", "metadatas"],
         )
+        return self._stored_records_from_result(result)
+
+    def _stored_canonical_records(
+        self,
+        canonical_source_id: str,
+    ) -> dict[str, tuple[str, dict[str, Any]]]:
+        result = self._get_vector_store().get(
+            where={"canonical_source_id": canonical_source_id},
+            include=["documents", "metadatas"],
+        )
+        return self._stored_records_from_result(result)
+
+    @staticmethod
+    def _stored_records_from_result(result: Mapping[str, Any]) -> dict[str, tuple[str, dict[str, Any]]]:
         ids = list(result.get("ids") or [])
         documents = list(result.get("documents") or [])
         metadatas = list(result.get("metadatas") or [])
@@ -458,7 +625,8 @@ class ChromaPaperLibrary:
         expected_ids_hash = self._content_hash("\n".join(sorted(expected_ids)))
         if record.get("expected_chunk_ids_sha256") != expected_ids_hash:
             metadata_mismatches.append("__expected_chunk_ids_sha256__")
-        pdf_path = self._pdf_path(normalized_source_id)
+        pdf_filename = Path(str(record.get("pdf_filename") or "")).name
+        pdf_path = self.pdf_directory / pdf_filename if pdf_filename else self._pdf_path(normalized_source_id)
         if pdf_path.exists() and record.get("document_sha256") != self._file_hash(pdf_path):
             content_mismatches.append("__document_sha256__")
 
@@ -582,8 +750,18 @@ class ChromaPaperLibrary:
             diagnostic["index_status"] = status
             if status != "MISSING":
                 diagnostic["full_text_chunk_count"] = self.verify_indexed_source(source_id).actual_count
+            incremental_report = next(
+                (report for report in reversed(self.last_incremental_index_reports) if report.source_id == source_id),
+                None,
+            )
+            if incremental_report is not None:
+                diagnostic["incremental_indexing"] = asdict(incremental_report)
         self._diagnostics_by_key[key] = diagnostic
         self.last_evidence_diagnostics = list(self._diagnostics_by_key.values())
+
+    def _remember_incremental_report(self, report: IncrementalIndexReport) -> None:
+        self.last_incremental_index_report = report
+        self.last_incremental_index_reports.append(report)
 
     def record_strict_gate(self, source_id: str, *, retained: bool, reason: str) -> None:
         """Attach strict-gate decisions to every diagnostic lane for a source."""
@@ -655,13 +833,16 @@ class ChromaPaperLibrary:
         for document in original_documents:
             source_id = str(document.metadata.get("source_id", ""))
             status = self.get_index_status(source_id) if source_id else "MISSING"
-            if status == "PARTIAL":
+            identity = self._source_identity(document)
+            manifest = self._manifest_source(source_id) if source_id else None
+            version_is_current = bool(manifest and manifest.get("remote_revision") == identity.remote_revision)
+            if status == "PARTIAL" and version_is_current:
                 partial_source_ids.add(source_id)
                 acquisition_results[source_id] = "partial"
-            elif status == "FAILED":
+            elif status == "FAILED" and version_is_current:
                 failed_source_ids.add(source_id)
                 acquisition_results[source_id] = "failed"
-            if source_id and self.has_indexed_source(source_id):
+            if source_id and self.has_current_indexed_source(document):
                 indexed_source_ids.add(source_id)
                 self._full_text_requested_source_ids.add(source_id)
                 self._full_text_cache_hit_source_ids.add(source_id)
@@ -713,7 +894,10 @@ class ChromaPaperLibrary:
                     acquisition_results.setdefault(source_id, "cached_committed")
                     return True
                 status = self.get_index_status(source_id)
-                if status == "PARTIAL":
+                manifest = self._manifest_source(source_id)
+                identity = self._source_identity(document)
+                version_is_current = bool(manifest and manifest.get("remote_revision") == identity.remote_revision)
+                if status == "PARTIAL" and version_is_current:
                     partial_source_ids.add(source_id)
                     acquisition_results[source_id] = "partial"
                     continue
@@ -954,6 +1138,22 @@ class ChromaPaperLibrary:
         )
         return enriched
 
+    def has_current_indexed_source(self, document: Document) -> bool:
+        """Return whether the committed index matches this observable version."""
+
+        identity = self._source_identity(document)
+        if not identity.source_id:
+            return False
+        manifest = self._manifest_source(identity.source_id)
+        if not manifest:
+            return self.has_indexed_source(identity.source_id)
+        recorded_revision = manifest.get("remote_revision")
+        if recorded_revision is None and identity.version_key == "unversioned":
+            return self.verify_indexed_source(identity.source_id).ok
+        if recorded_revision != identity.remote_revision:
+            return False
+        return self.verify_indexed_source(identity.source_id).ok
+
     def has_indexed_source(self, source_id: str) -> bool:
         """Return True only for an exact, complete, committed source index."""
 
@@ -1090,19 +1290,221 @@ class ChromaPaperLibrary:
             )
         return selected
 
+    def _load_or_build_chunk_artifact(
+        self,
+        identity: SourceVersionIdentity,
+        document: Document,
+        pdf_path: Path,
+        document_sha256: str,
+    ) -> tuple[list[Document], bool, bool, int, str, bool]:
+        artifact_signature = self._chunk_artifact_signature(document_sha256)
+        artifact_path = self._artifact_path(artifact_signature)
+        payload: dict[str, Any] | None = None
+        if artifact_path.exists():
+            try:
+                candidate = json.loads(artifact_path.read_text(encoding="utf-8"))
+                candidate_chunks = candidate.get("chunks") if isinstance(candidate, dict) else None
+                chunks_sha256 = (
+                    self._content_hash(json.dumps(candidate_chunks, sort_keys=True, separators=(",", ":")))
+                    if isinstance(candidate_chunks, list)
+                    else ""
+                )
+                if (
+                    isinstance(candidate, dict)
+                    and candidate.get("artifact_version") == 1
+                    and candidate.get("artifact_signature") == artifact_signature
+                    and candidate.get("document_sha256") == document_sha256
+                    and candidate.get("chunks_sha256") == chunks_sha256
+                    and isinstance(candidate_chunks, list)
+                ):
+                    payload = candidate
+                else:
+                    logger.warning(
+                        "Ignoring paper chunk artifact %s because integrity validation failed.", artifact_path
+                    )
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                logger.warning("Ignoring invalid paper chunk artifact %s: %s", artifact_path, exc)
+
+        artifact_cache_hit = payload is not None
+        if payload is None:
+            extracted = self._extract_pages(pdf_path)
+            if isinstance(extracted, ExtractedPaper):
+                pages = extracted.pages
+                elements = extracted.elements
+                parser_name = extracted.parser
+                pages_truncated = extracted.truncated
+                total_pages = extracted.total_pages
+            else:
+                pages = tuple(extracted)
+                elements = ()
+                parser_name = "pypdf"
+                pages_truncated = False
+                total_pages = len(pages)
+            chunked = self._chunk_pages(
+                identity.source_id,
+                document,
+                pages,
+                elements=elements,
+                parser_name=parser_name,
+            )
+            if isinstance(chunked, ChunkedPaper):
+                chunks = list(chunked.chunks)
+                chunks_truncated = chunked.truncated
+            else:
+                chunks = list(chunked)
+                chunks_truncated = False
+            artifact_chunks = [self._artifact_chunk_record(chunk) for chunk in chunks]
+            payload = {
+                "artifact_version": 1,
+                "artifact_signature": artifact_signature,
+                "document_sha256": document_sha256,
+                "parser_name": parser_name,
+                "pages_truncated": pages_truncated,
+                "chunks_truncated": chunks_truncated,
+                "total_pages": total_pages,
+                "chunks_sha256": self._content_hash(json.dumps(artifact_chunks, sort_keys=True, separators=(",", ":"))),
+                "chunks": artifact_chunks,
+            }
+            self._write_json_atomic(artifact_path, payload)
+        else:
+            parser_name = str(payload.get("parser_name") or "pypdf")
+            pages_truncated = bool(payload.get("pages_truncated"))
+            chunks_truncated = bool(payload.get("chunks_truncated"))
+            total_pages = int(payload.get("total_pages") or 0)
+            chunks = [
+                self._chunk_document_from_record(identity.source_id, document, record)
+                for record in payload["chunks"]
+                if isinstance(record, dict)
+            ]
+
+        try:
+            relative_artifact_path = str(artifact_path.relative_to(self.persist_directory))
+        except ValueError:
+            relative_artifact_path = artifact_path.name
+        self.source_registry.update_version(
+            identity,
+            artifacts={
+                artifact_signature: {
+                    "path": relative_artifact_path,
+                    "document_sha256": document_sha256,
+                    "chunks_sha256": str(payload.get("chunks_sha256") or ""),
+                    "parser_version": self.parser_version,
+                    "chunking_version": self.chunking_version,
+                    "chunk_count": len(chunks),
+                }
+            },
+        )
+        return (
+            chunks,
+            pages_truncated,
+            chunks_truncated,
+            total_pages,
+            artifact_signature,
+            artifact_cache_hit,
+        )
+
+    def _cached_embeddings(
+        self,
+        vector_store: Any,
+        cache_keys: set[str],
+    ) -> dict[str, list[float]]:
+        if not self.incremental_indexing_enabled or not self.embedding_reuse_enabled or not cache_keys:
+            return {}
+        result = vector_store.get(include=["documents", "metadatas", "embeddings"])
+        ids = list(result.get("ids") or [])
+        documents = list(result.get("documents") or [])
+        metadatas = list(result.get("metadatas") or [])
+        raw_embeddings = result.get("embeddings")
+        embeddings = [] if raw_embeddings is None else list(raw_embeddings)
+        cached: dict[str, list[float]] = {}
+        for index, _stored_id in enumerate(ids):
+            if index >= len(documents) or index >= len(metadatas) or index >= len(embeddings):
+                continue
+            document_text = str(documents[index] or "")
+            metadata = metadatas[index]
+            embedding = embeddings[index]
+            if not isinstance(metadata, dict) or embedding is None:
+                continue
+            retrieval_hash = self._content_hash(document_text)
+            recorded_hash = str(metadata.get("retrieval_text_sha256") or "")
+            if recorded_hash and recorded_hash != retrieval_hash:
+                continue
+            recorded_model = str(metadata.get("embedding_model") or self.embedding_model)
+            if recorded_model != self.embedding_model:
+                continue
+            cache_key = str(metadata.get("embedding_cache_key") or self._embedding_cache_key(retrieval_hash))
+            if cache_key not in cache_keys or cache_key in cached:
+                continue
+            try:
+                cached[cache_key] = [float(value) for value in embedding]
+            except (TypeError, ValueError):
+                continue
+        return cached
+
+    @staticmethod
+    def _upsert_reused_embeddings(
+        vector_store: Any,
+        documents: Sequence[Document],
+        ids: Sequence[str],
+        embeddings: Sequence[Sequence[float]],
+    ) -> bool:
+        collection = getattr(vector_store, "_collection", None)
+        if collection is None or not callable(getattr(collection, "upsert", None)):
+            return False
+        collection.upsert(
+            ids=list(ids),
+            documents=[document.page_content for document in documents],
+            metadatas=[dict(document.metadata) for document in documents],
+            embeddings=[list(embedding) for embedding in embeddings],
+        )
+        return True
+
     def ensure_indexed(self, document: Document) -> bool:
         """Build, verify, and logically commit one complete paper index."""
 
-        source_id = str(document.metadata.get("source_id", "")).strip()
-        pdf_url = str(document.metadata.get("pdf_url", "")).strip()
-        if not source_id or not pdf_url:
+        identity = self._source_identity(document)
+        source_id = identity.source_id
+        if not source_id or not identity.pdf_url:
             return False
 
-        if self.has_indexed_source(source_id):
+        if self.has_current_indexed_source(document):
+            self._remember_incremental_report(
+                IncrementalIndexReport(
+                    source_id=source_id,
+                    canonical_source_id=identity.canonical_source_id,
+                    version_key=identity.version_key,
+                    remote_refresh=False,
+                    pdf_cache_hit=True,
+                    artifact_cache_hit=True,
+                    embedded_chunks=0,
+                    reused_embeddings=0,
+                    deleted_chunks=0,
+                )
+            )
             return True
 
+        if self.source_registry.is_older_than_latest(identity):
+            logger.warning(
+                "Refusing to replace canonical source %s with older version %s.",
+                identity.canonical_source_id,
+                identity.version_key,
+            )
+            return False
+
+        registry_snapshot = self.source_registry.snapshot()
+        registered_source = registry_snapshot.get("sources", {}).get(identity.canonical_source_id)
+        registered_versions = registered_source.get("versions") if isinstance(registered_source, dict) else None
+        registered_version = (
+            registered_versions.get(identity.version_key) if isinstance(registered_versions, dict) else None
+        )
+        remote_refresh = bool(registered_versions) and (
+            not isinstance(registered_version, dict)
+            or registered_version.get("remote_revision") != identity.remote_revision
+        )
         existing_report = self.verify_indexed_source(source_id)
-        if existing_report.status == "PARTIAL" and existing_report.records_valid:
+        existing_manifest = self._manifest_source(source_id) or {}
+        same_remote_revision = existing_manifest.get("remote_revision") == identity.remote_revision
+        if existing_report.status == "PARTIAL" and existing_report.records_valid and same_remote_revision:
             logger.warning(
                 "Source %s remains PARTIAL because configured ingestion limits truncated it.",
                 source_id,
@@ -1110,40 +1512,21 @@ class ChromaPaperLibrary:
             return False
 
         vector_store = self._get_vector_store()
-
-        pdf_path = self._pdf_path(source_id)
-        if not pdf_path.exists():
-            self._download_pdf(pdf_url, pdf_path)
-            self._full_text_downloaded_source_ids.add(source_id)
-        extracted = self._extract_pages(pdf_path)
-        if isinstance(extracted, ExtractedPaper):
-            pages = extracted.pages
-            elements = extracted.elements
-            parser_name = extracted.parser
-            pages_truncated = extracted.truncated
-            total_pages = extracted.total_pages
-        else:
-            # Preserve compatibility with parser test doubles and custom parsers.
-            pages = tuple(extracted)
-            elements = ()
-            parser_name = "pypdf"
-            pages_truncated = False
-            total_pages = len(pages)
-
-        chunked = self._chunk_pages(
-            source_id,
+        previous_canonical_ids = set(self._stored_canonical_records(identity.canonical_source_id))
+        pdf_path, document_sha256, pdf_cache_hit = self._acquire_versioned_pdf(identity)
+        (
+            chunks,
+            pages_truncated,
+            chunks_truncated,
+            total_pages,
+            artifact_signature,
+            artifact_cache_hit,
+        ) = self._load_or_build_chunk_artifact(
+            identity,
             document,
-            pages,
-            elements=elements,
-            parser_name=parser_name,
+            pdf_path,
+            document_sha256,
         )
-        if isinstance(chunked, ChunkedPaper):
-            chunks = list(chunked.chunks)
-            chunks_truncated = chunked.truncated
-        else:
-            # Preserve compatibility with custom chunkers returning a plain list.
-            chunks = list(chunked)
-            chunks_truncated = False
         if not chunks:
             logger.warning("No extractable full text found in %s.", source_id)
             return False
@@ -1151,17 +1534,28 @@ class ChromaPaperLibrary:
         truncated = pages_truncated or chunks_truncated
         index_completeness = "partial" if truncated else "complete"
         ids: list[str] = []
+        occurrences: dict[str, int] = {}
         for index, chunk in enumerate(chunks):
             raw_text = str(chunk.metadata.get("raw_text") or chunk.page_content)
-            page_start = int(chunk.metadata.get("page_start") or chunk.metadata.get("page") or 0)
-            chunk_id = self._chunk_id(source_id, page_start, index, raw_text)
+            section_path = str(chunk.metadata.get("section_path") or chunk.metadata.get("section") or "Unknown")
+            chunk_content_sha256 = self._chunk_content_hash(section_path, raw_text)
+            occurrence = occurrences.get(chunk_content_sha256, 0)
+            occurrences[chunk_content_sha256] = occurrence + 1
+            chunk_id = self._semantic_chunk_id(
+                identity.canonical_source_id,
+                chunk_content_sha256,
+                occurrence,
+            )
+            retrieval_text_sha256 = self._content_hash(chunk.page_content)
             chunk.metadata.update(
                 {
                     "chunk_id": chunk_id,
                     "chunk_index": index,
                     "chunk_count": len(chunks),
                     "content_sha256": self._content_hash(raw_text),
-                    "retrieval_text_sha256": self._content_hash(chunk.page_content),
+                    "chunk_content_sha256": chunk_content_sha256,
+                    "retrieval_text_sha256": retrieval_text_sha256,
+                    "embedding_cache_key": self._embedding_cache_key(retrieval_text_sha256),
                     "index_completeness": index_completeness,
                 }
             )
@@ -1190,7 +1584,15 @@ class ChromaPaperLibrary:
         manifest_record = {
             "status": "INDEXING",
             "failure_reason": "",
-            "document_sha256": self._file_hash(pdf_path),
+            "source_id": source_id,
+            "canonical_source_id": identity.canonical_source_id,
+            "source_version_key": identity.version_key,
+            "paper_version": identity.paper_version,
+            "remote_updated_at": identity.remote_updated_at,
+            "remote_revision": identity.remote_revision,
+            "pdf_filename": pdf_path.name,
+            "document_sha256": document_sha256,
+            "artifact_signature": artifact_signature,
             "expected_chunk_count": len(ids),
             "expected_chunk_ids_sha256": self._content_hash("\n".join(sorted(ids))),
             "truncated": truncated,
@@ -1198,10 +1600,45 @@ class ChromaPaperLibrary:
             "index_signature": self._current_index_signature(),
             "chunks": expected_chunks,
         }
+        cache_keys = {str(chunk.metadata["embedding_cache_key"]) for chunk in chunks}
+        embedding_cache = self._cached_embeddings(vector_store, cache_keys)
         self._set_manifest_source(source_id, manifest_record)
 
+        embedded_chunks = 0
+        reused_embeddings = 0
+        deleted_chunks = 0
+        final_status = "COMMITTED"
+        index_result = True
         try:
-            vector_store.add_documents(documents=chunks, ids=ids)
+            reuse_documents: list[Document] = []
+            reuse_ids: list[str] = []
+            reuse_vectors: list[list[float]] = []
+            embed_documents: list[Document] = []
+            embed_ids: list[str] = []
+            for chunk_id, chunk in zip(ids, chunks):
+                cache_key = str(chunk.metadata["embedding_cache_key"])
+                cached_embedding = embedding_cache.get(cache_key)
+                if cached_embedding is None:
+                    embed_documents.append(chunk)
+                    embed_ids.append(chunk_id)
+                    continue
+                reuse_documents.append(chunk)
+                reuse_ids.append(chunk_id)
+                reuse_vectors.append(cached_embedding)
+
+            if reuse_documents and self._upsert_reused_embeddings(
+                vector_store,
+                reuse_documents,
+                reuse_ids,
+                reuse_vectors,
+            ):
+                reused_embeddings = len(reuse_documents)
+            else:
+                embed_documents.extend(reuse_documents)
+                embed_ids.extend(reuse_ids)
+            if embed_documents:
+                vector_store.add_documents(documents=embed_documents, ids=embed_ids)
+                embedded_chunks = len(embed_documents)
             report = self.verify_indexed_source(source_id)
             if report.missing_ids or report.content_hash_mismatches or report.metadata_mismatches:
                 raise ValueError(
@@ -1210,8 +1647,10 @@ class ChromaPaperLibrary:
                     f"content_mismatches={len(report.content_hash_mismatches)}, "
                     f"metadata_mismatches={len(report.metadata_mismatches)})."
                 )
-            if report.stale_ids:
-                vector_store.delete(ids=list(report.stale_ids))
+            stale_ids = set(report.stale_ids) | (previous_canonical_ids - set(ids))
+            if stale_ids:
+                vector_store.delete(ids=sorted(stale_ids))
+                deleted_chunks = len(stale_ids)
                 report = self.verify_indexed_source(source_id)
             if not report.records_valid:
                 raise ValueError(
@@ -1222,25 +1661,75 @@ class ChromaPaperLibrary:
             if truncated:
                 reason = "; ".join(truncation_reasons)
                 self._set_manifest_status(source_id, "PARTIAL", reason)
+                final_status = "PARTIAL"
+                index_result = False
                 logger.warning(
                     "Indexed %d verified chunks for %s, but the source is PARTIAL: %s.",
                     len(chunks),
                     source_id,
                     reason,
                 )
-                return False
-
-            self._set_manifest_status(source_id, "COMMITTED")
-            committed_report = self.verify_indexed_source(source_id)
-            if not committed_report.ok:
-                self._set_manifest_status(source_id, "FAILED", "post-commit verification failed")
-                return False
+            else:
+                self._set_manifest_status(source_id, "COMMITTED")
+                committed_report = self.verify_indexed_source(source_id)
+                if not committed_report.ok:
+                    self._set_manifest_status(source_id, "FAILED", "post-commit verification failed")
+                    final_status = "FAILED"
+                    index_result = False
         except Exception as exc:
             self._set_manifest_status(source_id, "FAILED", str(exc))
+            self.source_registry.update_version(
+                identity,
+                indexes={self.collection_name: {"status": "FAILED", "failure_reason": str(exc)}},
+            )
             raise
 
-        logger.info("Indexed and verified %d full-text chunks for %s in Chroma.", len(chunks), source_id)
-        return True
+        self._remember_incremental_report(
+            IncrementalIndexReport(
+                source_id=source_id,
+                canonical_source_id=identity.canonical_source_id,
+                version_key=identity.version_key,
+                remote_refresh=remote_refresh,
+                pdf_cache_hit=pdf_cache_hit,
+                artifact_cache_hit=artifact_cache_hit,
+                embedded_chunks=embedded_chunks,
+                reused_embeddings=reused_embeddings,
+                deleted_chunks=deleted_chunks,
+            )
+        )
+        self.source_registry.update_version(
+            identity,
+            indexes={
+                self.collection_name: {
+                    "status": final_status,
+                    "manifest": self.manifest_path.name,
+                    "expected_chunk_count": len(chunks),
+                    "embedded_chunks": embedded_chunks,
+                    "reused_embeddings": reused_embeddings,
+                    "deleted_chunks": deleted_chunks,
+                    "embedding_model": self.embedding_model,
+                    "schema_version": self.index_schema_version,
+                    "retrieval_template_version": self.retrieval_template_version,
+                }
+            },
+        )
+        if final_status == "COMMITTED":
+            superseded_source_ids = self.source_registry.mark_older_versions_superseded(
+                identity,
+                self.collection_name,
+            )
+            for superseded_source_id in superseded_source_ids:
+                self._set_manifest_status(superseded_source_id, "SUPERSEDED")
+        logger.info(
+            "Indexed %d chunks for %s (embedded=%d, reused=%d, deleted=%d, artifact_cache_hit=%s).",
+            len(chunks),
+            source_id,
+            embedded_chunks,
+            reused_embeddings,
+            deleted_chunks,
+            artifact_cache_hit,
+        )
+        return index_result
 
     @staticmethod
     def _source_filter(source_ids: Sequence[str]) -> dict[str, Any]:
@@ -1737,7 +2226,8 @@ class ChromaPaperLibrary:
             "published",
         )
         doi = self._metadata_text(metadata, "doi")
-        arxiv_id = self._metadata_text(metadata, "arxiv_id")
+        identity = self._source_identity(document)
+        arxiv_id = identity.canonical_arxiv_id or self._metadata_text(metadata, "arxiv_id")
         context = [f"Paper: {title}", f"Section: {section_path}"]
         if authors:
             context.append(f"Authors: {authors}")
@@ -1764,6 +2254,75 @@ class ChromaPaperLibrary:
         pages = str(page_start) if page_start == page_end else f"{page_start}-{page_end}"
         return f"Source ID: {source_id}\nPaper: {title}\nSection: {section_path}\nPages: {pages}\n\n{raw_text}"
 
+    def _chunk_document_from_record(
+        self,
+        source_id: str,
+        document: Document,
+        record: Mapping[str, Any],
+    ) -> Document:
+        identity = self._source_identity(document)
+        title = str(document.metadata.get("title", "Untitled"))
+        authors = self._metadata_text(document.metadata, "authors")
+        doi = self._metadata_text(document.metadata, "doi")
+        arxiv_id = self._metadata_text(document.metadata, "arxiv_id")
+        published_at = self._metadata_text(document.metadata, "published_at") or self._metadata_text(
+            document.metadata,
+            "published",
+        )
+        updated_at = self._metadata_text(document.metadata, "updated_at") or self._metadata_text(
+            document.metadata,
+            "updated",
+        )
+        source_type = self._metadata_text(document.metadata, "source_type") or self._metadata_text(
+            document.metadata,
+            "source_family",
+            "academic",
+        )
+        document_type = self._metadata_text(document.metadata, "document_type", "research_paper")
+        raw_text = str(record.get("raw_text") or "")
+        section = str(record.get("section") or "Unknown")
+        subsection = str(record.get("subsection") or "")
+        section_path = str(record.get("section_path") or section)
+        page_start = int(record.get("page_start") or 0)
+        page_end = int(record.get("page_end") or page_start)
+        retrieval_text = self._retrieval_text(document, raw_text, section_path)
+        return Document(
+            page_content=retrieval_text,
+            metadata={
+                "source_id": source_id,
+                "document_id": source_id,
+                "canonical_source_id": identity.canonical_source_id,
+                "source_version_key": identity.version_key,
+                "remote_revision": identity.remote_revision,
+                "paper_version": identity.paper_version,
+                "title": title,
+                "authors": authors,
+                "doi": doi,
+                "arxiv_id": arxiv_id,
+                "published_at": published_at,
+                "updated_at": updated_at,
+                "page": page_start,
+                "page_start": page_start,
+                "page_end": page_end,
+                "pdf_url": str(document.metadata.get("pdf_url", "")),
+                "section": section,
+                "subsection": subsection,
+                "section_path": section_path,
+                "element_type": str(record.get("element_type") or "paragraph"),
+                "parent_id": self._content_hash(f"{source_id}\0{section_path}"),
+                "raw_text": raw_text,
+                "embedding_model": self.embedding_model,
+                "source_type": source_type,
+                "document_type": document_type,
+                "evidence_type": "full_text",
+                "parser": str(record.get("parser") or "pypdf"),
+                "parser_version": self.parser_version,
+                "chunking_version": self.chunking_version,
+                "retrieval_template_version": self.retrieval_template_version,
+                "schema_version": self.index_schema_version,
+            },
+        )
+
     def _chunk_pages(
         self,
         source_id: str,
@@ -1773,23 +2332,6 @@ class ChromaPaperLibrary:
         elements: Sequence[DocumentElement] = (),
         parser_name: str = "pypdf",
     ) -> ChunkedPaper:
-        title = str(document.metadata.get("title", "Untitled"))
-        pdf_url = str(document.metadata.get("pdf_url", ""))
-        authors = self._metadata_text(document.metadata, "authors")
-        doi = self._metadata_text(document.metadata, "doi")
-        arxiv_id = self._metadata_text(document.metadata, "arxiv_id")
-        published_at = self._metadata_text(document.metadata, "published_at") or self._metadata_text(
-            document.metadata,
-            "published",
-        )
-        updated_at = self._metadata_text(document.metadata, "updated_at")
-        source_type = self._metadata_text(document.metadata, "source_type") or self._metadata_text(
-            document.metadata,
-            "source_family",
-            "academic",
-        )
-        document_type = self._metadata_text(document.metadata, "document_type", "research_paper")
-        paper_version = self._paper_version(source_id, document.metadata)
         recovered_elements = tuple(elements) or recover_document_elements(pages)
         element_chunks = chunk_document_elements(
             recovered_elements,
@@ -1798,42 +2340,19 @@ class ChromaPaperLibrary:
         )
         all_chunks: list[Document] = []
         for chunk in element_chunks:
-            raw_text = chunk.raw_text
-            section_path = " > ".join(chunk.section_path)
-            retrieval_text = self._retrieval_text(document, raw_text, section_path)
-            parent_id = self._content_hash(f"{source_id}\0{section_path}")
             all_chunks.append(
-                Document(
-                    page_content=retrieval_text,
-                    metadata={
-                        "source_id": source_id,
-                        "document_id": source_id,
-                        "paper_version": paper_version,
-                        "title": title,
-                        "authors": authors,
-                        "doi": doi,
-                        "arxiv_id": arxiv_id,
-                        "published_at": published_at,
-                        "updated_at": updated_at,
-                        "page": chunk.page_start,
+                self._chunk_document_from_record(
+                    source_id,
+                    document,
+                    {
+                        "raw_text": chunk.raw_text,
                         "page_start": chunk.page_start,
                         "page_end": chunk.page_end,
-                        "pdf_url": pdf_url,
                         "section": chunk.section,
                         "subsection": chunk.subsection,
-                        "section_path": section_path,
+                        "section_path": " > ".join(chunk.section_path),
                         "element_type": chunk.element_type,
-                        "parent_id": parent_id,
-                        "raw_text": raw_text,
-                        "embedding_model": self.embedding_model,
-                        "source_type": source_type,
-                        "document_type": document_type,
-                        "evidence_type": "full_text",
                         "parser": parser_name,
-                        "parser_version": self.parser_version,
-                        "chunking_version": self.chunking_version,
-                        "retrieval_template_version": self.retrieval_template_version,
-                        "schema_version": self.index_schema_version,
                     },
                 )
             )

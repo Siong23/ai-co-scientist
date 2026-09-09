@@ -468,13 +468,18 @@ class GenerationAgent:
             )
             return list(documents)
 
-    def _has_verified_cached_full_text(self, source_id: str) -> bool:
+    def _has_verified_cached_full_text(self, source_id: str, document: Document | None = None) -> bool:
         """Check the persistent integrity ledger without trusting result metadata."""
 
+        has_current_source = getattr(self.paper_library, "has_current_indexed_source", None)
         has_indexed_source = getattr(self.paper_library, "has_indexed_source", None)
-        if not source_id or not callable(has_indexed_source):
+        if not source_id:
             return False
         try:
+            if document is not None and callable(has_current_source):
+                return has_current_source(document) is True
+            if not callable(has_indexed_source):
+                return False
             return has_indexed_source(source_id) is True
         except Exception as exc:
             logger.warning(
@@ -523,7 +528,7 @@ class GenerationAgent:
         candidates_by_source_id: dict[str, Document] = {}
         for document in document_list:
             source_id = str(document.metadata.get("source_id") or "").strip()
-            if source_id and self._has_verified_cached_full_text(source_id):
+            if source_id and self._has_verified_cached_full_text(source_id, document):
                 cached_source_ids.add(source_id)
                 document.metadata["full_text_cache_hit"] = True
                 continue
@@ -966,21 +971,51 @@ class GenerationAgent:
 
                 existing_index = index_by_id[canonical_id]
                 existing = merged[existing_index]
-                metadata = dict(existing.metadata)
-                incoming_metadata = document.metadata
+
+                def version_order(candidate: Document) -> tuple[int, str]:
+                    candidate_source_id = str(candidate.metadata.get("source_id") or "")
+                    match = re.search(r"v(\d+)$", candidate_source_id, re.IGNORECASE)
+                    return (
+                        int(match.group(1)) if match else -1,
+                        str(candidate.metadata.get("updated_at") or candidate.metadata.get("updated") or ""),
+                    )
+
+                if version_order(document) > version_order(existing):
+                    preferred, secondary = document, existing
+                else:
+                    preferred, secondary = existing, document
+                metadata = dict(preferred.metadata)
+                incoming_metadata = secondary.metadata
                 for key, value in incoming_metadata.items():
                     if key not in metadata or metadata[key] in (None, "", (), []):
                         metadata[key] = value
 
                 query_contexts = []
                 for context in (
-                    *(metadata.get("query_contexts") or ()),
-                    *(incoming_metadata.get("query_contexts") or ()),
+                    *(existing.metadata.get("query_contexts") or ()),
+                    *(document.metadata.get("query_contexts") or ()),
                 ):
                     if isinstance(context, dict) and context not in query_contexts:
                         query_contexts.append(dict(context))
                 if query_contexts:
                     metadata["query_contexts"] = tuple(query_contexts)
+
+                observed_versions = []
+                for item in (
+                    *(existing.metadata.get("observed_source_versions") or ()),
+                    *(document.metadata.get("observed_source_versions") or ()),
+                    {
+                        "source_id": str(existing.metadata.get("source_id") or ""),
+                        "updated_at": str(existing.metadata.get("updated_at") or ""),
+                    },
+                    {
+                        "source_id": str(document.metadata.get("source_id") or ""),
+                        "updated_at": str(document.metadata.get("updated_at") or ""),
+                    },
+                ):
+                    if isinstance(item, dict) and item not in observed_versions:
+                        observed_versions.append(item)
+                metadata["observed_source_versions"] = tuple(observed_versions)
 
                 reserved_requirement_ids = []
                 for candidate in (existing, document):
@@ -1001,7 +1036,7 @@ class GenerationAgent:
                     metadata["reserved_requirement_ids"] = reserved_requirement_ids
 
                 merged[existing_index] = Document(
-                    page_content=existing.page_content or document.page_content,
+                    page_content=preferred.page_content or secondary.page_content,
                     metadata=metadata,
                 )
 

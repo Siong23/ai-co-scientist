@@ -1641,7 +1641,11 @@ def test_reciprocal_rank_fusion_deduplicates_versions_and_rewards_recurrence():
     )
 
     assert len(fused) == 2
-    assert fused[0].source_id == "arXiv:2001.03488v1"
+    assert fused[0].source_id == "arXiv:2001.03488v2"
+    assert {item["source_id"] for item in fused[0].metadata["observed_source_versions"]} == {
+        "arXiv:2001.03488v1",
+        "arXiv:2001.03488v2",
+    }
     assert fused[0].rrf_score > fused[1].rrf_score
 
 
@@ -1703,7 +1707,7 @@ def test_multi_query_retrieval_filters_irrelevant_history_papers():
 
     assert retriever.arxiv.search_papers.call_count == 5
     assert len(documents) == 1
-    assert documents[0].metadata["source_id"] == ("arXiv:2001.03488v1")
+    assert documents[0].metadata["source_id"] == ("arXiv:2001.03488v2")
     indexed_text = documents[0].page_content
     assert "Malaysia" in indexed_text
     assert "Context-aware" not in indexed_text
@@ -2364,6 +2368,8 @@ def test_corrective_merge_preserves_requirement_context_for_existing_source():
     merged = GenerationAgent._merge_retrieved_documents([initial], [corrective])
 
     assert len(merged) == 1
+    assert merged[0].metadata["source_id"] == "arXiv:2401.00001v2"
+    assert merged[0].page_content == "Corrective abstract"
     assert merged[0].metadata["reserved_requirement_ids"] == ["spikes"]
     assert [item["query"] for item in merged[0].metadata["query_contexts"]] == [
         "broad goal",

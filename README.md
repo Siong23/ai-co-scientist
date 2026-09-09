@@ -124,6 +124,15 @@ The system uses a multi-agent approach:
 - Each passage carries document/chunk identity, section path, page range,
   element type, content/retrieval hashes, parser/chunker/template versions, and
   source provenance.
+- Tracks canonical papers and observable remote versions in a durable JSON
+  registry shared by all model-specific collections. arXiv IDs such as `v1`
+  and `v2` remain separate versions beneath one versionless paper identity;
+  changed version or `updated` metadata forces a source refresh.
+- Caches parser/chunker output by document hash and pipeline version, so an
+  embedding-model change reuses the cached PDF and chunk artifact. Within one
+  embedding collection, deterministic content and retrieval hashes let
+  unchanged chunks reuse stored vectors while modified/new chunks are embedded
+  and removed chunks are deleted after read-after-write verification.
 - Keeps unavailable papers as explicitly limited `abstract_only` evidence;
   one failed PDF does not abort a research cycle.
 - Provides passage-level coverage and strict chunk-grounded audit helpers for
@@ -144,10 +153,11 @@ Important `config.yaml` groups are `rag` (paper discovery and corrective
 search), `paper_library` (download budget, PDF cache, Chroma schema and prompt
 limits), `evidence_retrieval` (focused-query limits and query-side embedding
 instructions), and `validation` (numeric/entailment checks and per-candidate
-audit context). Changing an index, parser, or chunking version selects a new
-Chroma collection; retrieval-template versions are collection-signature inputs
-as well. Hybrid/BM25 ranking and context-expansion settings do not alter stored
-embeddings, so cached PDFs and existing Phase B indexes remain reusable.
+audit context). Collections are isolated by embedding model, index schema, and
+retrieval template. Parser/chunker changes invalidate the shared chunk artifact
+and update the current collection incrementally; embedding-model changes reuse
+the artifact but populate a model-specific collection. Hybrid/BM25 ranking and
+context-expansion settings do not alter stored embeddings.
 
 ## ⚙️ Technical Details
 

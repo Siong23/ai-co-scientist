@@ -211,13 +211,19 @@ paper_library:
   persist_directory: "chroma_db"
   pdf_directory: "app/paper"
   collection_name: "research_papers"
-  # Schema 3 stores source-faithful raw text separately from intrinsic-context
-  # retrieval text and records structured scientific-document provenance.
-  index_schema_version: "3"
+  # Schema 4 adds canonical source/version identity and content-addressed chunk
+  # and embedding-cache identities while retaining the Phase B text model.
+  index_schema_version: "4"
   parser_backend: "pypdf"
   parser_version: "pypdf-structured-2"
   chunking_version: "section-paragraph-sentence-3"
   retrieval_template_version: "intrinsic-context-1"
+  # The registry and parse/chunk artifacts are shared across model-specific
+  # Chroma collections. Incremental writes reuse matching stored vectors.
+  source_registry_filename: "paper_source_registry.json"
+  chunk_artifact_directory: "paper_chunk_artifacts"
+  incremental_indexing_enabled: true
+  embedding_reuse_enabled: true
   candidate_download_limit: 8
   # Each explicit evidence requirement gets bounded candidate failover within
   # the global per-enrichment acquisition budget.

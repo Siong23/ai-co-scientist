@@ -230,6 +230,25 @@ def _canonical_arxiv_id(arxiv_id: str) -> str:
     return re.sub(r"v\d+$", "", arxiv_id.strip(), flags=re.IGNORECASE)
 
 
+def _source_version_order(evidence: EvidenceSource) -> tuple[int, str]:
+    """Sort observable source revisions without conflating them with relevance."""
+
+    arxiv_id = str(evidence.metadata.get("arxiv_id") or evidence.source_id)
+    match = re.search(r"v(\d+)$", arxiv_id, re.IGNORECASE)
+    version = int(match.group(1)) if match else -1
+    return version, str(evidence.updated_at or evidence.metadata.get("updated") or "")
+
+
+def _observed_source_version(evidence: EvidenceSource) -> dict[str, str]:
+    arxiv_id = str(evidence.metadata.get("arxiv_id") or "")
+    match = re.search(r"v(\d+)$", arxiv_id or evidence.source_id, re.IGNORECASE)
+    return {
+        "source_id": evidence.source_id,
+        "paper_version": f"v{match.group(1)}" if match else "",
+        "updated_at": str(evidence.updated_at or evidence.metadata.get("updated") or ""),
+    }
+
+
 def reciprocal_rank_fusion(
     ranked_results: Sequence[Sequence[EvidenceSource | dict[str, Any]]],
     k: int = 60,
@@ -269,9 +288,23 @@ def reciprocal_rank_fusion(
                     if context_key not in seen_contexts:
                         seen_contexts.add(context_key)
                         merged_contexts.append(context)
-                preferred = evidence if (evidence.search_score or 0) > (existing.search_score or 0) else existing
+                existing_order = _source_version_order(existing)
+                incoming_order = _source_version_order(evidence)
+                if incoming_order != existing_order:
+                    preferred = evidence if incoming_order > existing_order else existing
+                else:
+                    preferred = evidence if (evidence.search_score or 0) > (existing.search_score or 0) else existing
                 merged_metadata = dict(preferred.metadata)
                 merged_metadata["query_contexts"] = tuple(merged_contexts)
+                observed_versions = []
+                for candidate in (
+                    *(existing.metadata.get("observed_source_versions") or ()),
+                    _observed_source_version(existing),
+                    _observed_source_version(evidence),
+                ):
+                    if isinstance(candidate, dict) and candidate not in observed_versions:
+                        observed_versions.append(candidate)
+                merged_metadata["observed_source_versions"] = tuple(observed_versions)
                 evidence_by_key[canonical_key] = replace(
                     preferred,
                     metadata=merged_metadata,
@@ -1614,6 +1647,7 @@ class ResearchRetriever:
                 "pdf_url": pdf_url,
                 "provider_rrf_score": evidence.provider_rrf_score,
                 "rrf_score": evidence.rrf_score,
+                "observed_source_versions": list(evidence.metadata.get("observed_source_versions", ())),
                 # Compatibility fields for the current UI and saved runs.
                 "arxiv_id": evidence.metadata.get("arxiv_id") if evidence.source_family == "academic" else None,
                 "abstract": summary,
