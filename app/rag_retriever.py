@@ -24,6 +24,7 @@ from .evidence import (
     coerce_evidence,
     evidence_from_result,
 )
+from .search_backoff import guarded_search
 from .tools.arxiv_search import ArxivSearchTool
 from .tools.elsevier_search import ElsevierSearchTool
 from .tools.pdf_urls import find_pdf_url
@@ -765,18 +766,27 @@ class ResearchRetriever:
         started_at = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = [
-                (source_name, task_queries, source, executor.submit(search))
+                (
+                    source_name,
+                    task_queries,
+                    source,
+                    executor.submit(guarded_search, source, search, provider_name=source_name),
+                )
                 for source_name, task_queries, source, search in tasks
             ]
             ranked_results: list[list[EvidenceSource]] = []
             for source_name, task_queries, source, future in futures:
                 query_total = len(task_queries)
                 try:
-                    source_results = future.result()
+                    source_results, cooling_down = future.result()
                     ranked_results.extend(source_results)
                     completed = len(source_results)
                     result_count = sum(len(results) for results in source_results)
-                    status = self._provider_status(source, completed, query_total, result_count)
+                    status = (
+                        "cooldown"
+                        if cooling_down
+                        else self._provider_status(source, completed, query_total, result_count)
+                    )
                     error_status = getattr(source, "last_error_status", None)
                     if not isinstance(error_status, int):
                         error_status = None

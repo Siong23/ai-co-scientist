@@ -680,6 +680,22 @@ def test_execute_cycle_uses_configured_supervisor_entrypoint(gradio_app_module, 
     assert "completed successfully" in result["status"]
 
 
+def test_execute_cycle_surfaces_recovery_warnings(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.chdir(tmp_path)
+    supervisor = Mock()
+    supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {},
+        "warnings": ["Evidence search was degraded."],
+        "finalization": {"ready": True},
+    }
+    result = gradio_app_module.execute_cycle(ResearchGoal(description="test"), ContextMemory(), supervisor)
+    assert "completed with recovery warnings" in result["status"]
+    assert "completed successfully" not in result["status"]
+
+
 def test_execute_cycle_reports_bounded_quality_gate_without_claiming_timeout(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
 

@@ -12,10 +12,10 @@ import gradio as gr
 from numpy.ma import count  # noqa: F401
 
 from app.agents import SupervisorAgent
+from app.config import config
 from app.experiments.experiment_orchestrator import (
     ExperimentOrchestrator,
 )
-from app.config import config
 from app.models import ContextMemory, ResearchGoal
 from app.research_trace import format_research_trace_html, merge_trace_event, normalize_trace_event
 from app.run_store import (
@@ -39,7 +39,6 @@ from app.utils import (
     logger,
     redact_secrets,
 )
-
 
 # Global state for the Gradio app
 global_context = ContextMemory()
@@ -638,6 +637,13 @@ def execute_cycle(
                 headline = f"⚠️ Cycle {iteration} reached its compute budget before finalization"
             status_msg = (
                 f"{headline} ({unmet}).\n\n{to_bold('Execution Time:')} {formatted_time}\n{to_bold('Log:')} {log_file}"
+            )
+        elif cycle_details.get("warnings"):
+            status_msg = (
+                f"⚠️ Cycle {iteration} completed with recovery warnings.\n\n"
+                "Evidence retrieval or generation was degraded; see the results panel for details.\n"
+                f"{to_bold('Execution Time:')} {formatted_time}\n"
+                f"{to_bold('Log:')} {log_file}"
             )
         else:
             status_msg = (

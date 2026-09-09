@@ -972,12 +972,16 @@ def test_query_rewriting_rejects_hard_requirement_absent_from_goal():
         }
     )
 
-    with patch("app.agents.call_llm", return_value=payload):
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
         plan, error = call_llm_for_search_queries("Compare concept bottleneck models with Grad-CAM.")
 
     assert plan is None
     assert error is not None
     assert "verbatim goal quotes" in error
+    repair_prompt = mock_call.call_args.args[0]
+    assert 'Rejected goal_quote values: ["adversarial perturbations"]' in repair_prompt
+    assert "PREVIOUS INVALID RESPONSE" in repair_prompt
+    assert "Copy goal_quote only from this ORIGINAL USER REQUEST" in repair_prompt
 
 
 def test_query_rewriting_retries_a_composite_requirement_as_atomic_quotes():

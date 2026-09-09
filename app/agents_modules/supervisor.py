@@ -194,6 +194,21 @@ class SupervisorAgent:
         if not isinstance(raw_generation_warnings, (list, tuple)):
             raw_generation_warnings = []
         generation_warnings = [str(warning) for warning in raw_generation_warnings if str(warning).strip()]
+        search_stats = list(getattr(self.generation_agent.rag_retriever, "last_search_stats", []))
+        affected_providers = sorted(
+            {
+                str(stat.get("source", "Unknown provider"))
+                for stat in search_stats
+                if stat.get("status")
+                in {"rate_limited", "timeout", "provider_error", "quota_or_plan_rejection", "cooldown"}
+            }
+        )
+        if affected_providers:
+            generation_warnings.append(
+                "Evidence search was degraded for "
+                + ", ".join(affected_providers)
+                + ". Some searches failed or were skipped during provider cooldown; literature coverage may be incomplete."
+            )
         evidence_pipeline = generation_diagnostics.get("evidence_pipeline", [])
         if not isinstance(evidence_pipeline, list):
             evidence_pipeline = []
@@ -248,7 +263,7 @@ class SupervisorAgent:
             "hypotheses": [h.to_dict() for h in new_hypotheses],
             "sources": generation_sources,
             "audits": generation_audits,
-            "search_stats": list(getattr(self.generation_agent.rag_retriever, "last_search_stats", [])),
+            "search_stats": search_stats,
             "query_plan": query_plan_details,
             "query_fidelity": list(query_fidelity),
             "evidence_funnel": dict(evidence_funnel),

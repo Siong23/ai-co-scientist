@@ -530,6 +530,7 @@ def call_llm_for_search_queries(
         explicit_requirements: list[EvidenceAspect] = []
         seen_aspect_ids: set[str] = set()
         seen_evidence_needs: set[str] = set()
+        rejected_quotes: list[str] = []
         for raw_aspect in raw_requirements:
             if not isinstance(raw_aspect, dict):
                 continue
@@ -550,6 +551,7 @@ def call_llm_for_search_queries(
                 or aspect_id in seen_aspect_ids
                 or (normalized_evidence_need and normalized_evidence_need in seen_evidence_needs)
             ):
+                rejected_quotes.append(goal_quote)
                 continue
             seen_aspect_ids.add(aspect_id)
             if normalized_evidence_need:
@@ -566,7 +568,10 @@ def call_llm_for_search_queries(
                 )
             )
         if not 1 <= len(explicit_requirements) <= 5:
-            raise ValueError("Expected 1 to 5 unique explicit requirements with verbatim goal quotes.")
+            raise ValueError(
+                "Expected 1 to 5 unique explicit requirements with verbatim goal quotes. "
+                "Rejected goal_quote values: " + json.dumps(rejected_quotes, ensure_ascii=False)
+            )
 
         valid_requirement_ids = {aspect.aspect_id for aspect in explicit_requirements}
         valid_hypothesis_ids = {hypothesis.hypothesis_id for hypothesis in provisional_hypotheses}
@@ -781,6 +786,10 @@ without turning optional ideas into hard requirements.
 - explicit_requirements: 1 to 5 non-overlapping objects with a stable
   snake_case id, a goal_quote copied verbatim from the original request, and
   an evidence_need describing the literature evidence to retrieve. Each quote
+  must come from ORIGINAL USER REQUEST, never from STRUCTURED RESEARCH PLAN,
+  sub-questions, or your own paraphrase. Optional methods and standards from
+  the plan must not become required_terms or explicit_requirements.
+  Each quote
   must be at most 16 words and each evidence_need at most 24 words. Write the
   evidence_need as a scientific topic or finding, never as a user action such
   as "develop", "design", "write", or "generate". Do not require literature
@@ -872,6 +881,10 @@ STRUCTURED RESEARCH PLAN
                 f"{exc}. Return a corrected JSON object. Atomize long or "
                 "composite goal quotes into separate verbatim spans of at "
                 "most 16 words; do not add anything absent from the goal."
+                "\nCopy goal_quote only from this ORIGINAL USER REQUEST, not the research plan: "
+                + research_goal
+                + "\nPREVIOUS INVALID RESPONSE (repair its fields, not the user's goal):\n"
+                + response
             )
 
     return None, "Query rewriting failed."
