@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -129,6 +131,15 @@ class SpringerSearchTool:
         entry_url = web_url or (
             f"https://doi.org/{doi}" if doi else f"https://api.springernature.com/meta/v2/json?q=doi:{doi}"
         )
+        # Metadata responses can omit PDF links even for accessible articles.
+        # Supply a publisher endpoint for acquisition, not proof of full text:
+        # the library must still download, validate, and commit the PDF.
+        if not pdf_url and re.fullmatch(r"10\.(?:1007|1038)/\S+", doi):
+            encoded_doi = quote(doi, safe="/")
+            if doi.startswith("10.1038/"):
+                pdf_url = f"https://www.nature.com/articles/{encoded_doi.split('/', 1)[1]}.pdf"
+            else:
+                pdf_url = f"https://link.springer.com/content/pdf/{encoded_doi}.pdf"
 
         return {
             "arxiv_id": source_id,

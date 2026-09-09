@@ -2,6 +2,8 @@
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from app.tools.springer_search import SpringerSearchTool
 
 
@@ -47,6 +49,27 @@ def test_extract_abstract_handles_dict_structure():
     record = _springer_record(abstract={"p": "Structured paragraph abstract."})
     abstract = SpringerSearchTool._extract_abstract(record)
     assert abstract == "Structured paragraph abstract."
+
+
+@pytest.mark.parametrize(
+    "doi, expected",
+    [
+        ("10.1007/s10922-026-10060-7", "https://link.springer.com/content/pdf/10.1007/s10922-026-10060-7.pdf"),
+        ("10.1038/s41598-026-40237-8", "https://www.nature.com/articles/s41598-026-40237-8.pdf"),
+        ("10.1007/book#chapter", "https://link.springer.com/content/pdf/10.1007/book%23chapter.pdf"),
+        ("10.9999/unknown", None),
+        ("10.1007/", None),
+        ("", None),
+    ],
+)
+def test_missing_pdf_link_uses_known_publisher_doi(doi, expected):
+    record = _springer_record(doi=doi)
+    record["url"] = [{"format": "html", "value": f"https://doi.org/{doi}"}]
+
+    paper = SpringerSearchTool._format_paper(record)
+
+    assert paper["pdf_url"] == expected
+    assert paper["entry_id"] == f"https://doi.org/{doi}"
 
 
 def test_search_skips_when_api_key_is_missing(monkeypatch):
