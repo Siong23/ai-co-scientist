@@ -60,6 +60,8 @@ jobs:
       - name: Update local repository
         run: |
           cd /home/server2/ai-co-scientist
+
+          git lfs install
           git fetch origin main
 
           if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -74,6 +76,8 @@ jobs:
 
           git checkout main
           git reset --hard origin/main
+
+          git lfs pull origin main
 
       - name: Install/update dependencies
         run: |
