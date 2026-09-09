@@ -341,6 +341,7 @@ def test_download_allows_configured_springer_pdf_host(tmp_path):
 
 @pytest.mark.parametrize("download_succeeds", [True, False])
 def test_springer_metadata_without_pdf_reaches_acquisition_and_strict_gate(tmp_path, monkeypatch, download_succeeds):
+    from app.agents import AbstractScreeningResult
     from app.agents_modules.generation import GenerationAgent
     from app.tools.springer_search import SpringerSearchTool
 
@@ -366,6 +367,22 @@ def test_springer_metadata_without_pdf_reaches_acquisition_and_strict_gate(tmp_p
 
     monkeypatch.setattr(library, "_download_pdf", download)
     monkeypatch.setattr(library, "_extract_pages", lambda _: [(1, "Latency control evidence. " * 30)])
+    monkeypatch.setattr(
+        "app.agents_modules.generation.call_llm_for_abstract_screening",
+        lambda *_args, **_kwargs: (
+            (
+                AbstractScreeningResult(
+                    source_id=paper["arxiv_id"],
+                    decision="ACCEPT",
+                    relevance_score=9.0,
+                    reason="Directly relevant to 5G latency control.",
+                    full_text_needed=True,
+                    full_text_questions=("What latency results were measured?",),
+                ),
+            ),
+            None,
+        ),
+    )
     agent = GenerationAgent(paper_library=library)
 
     retained = agent._prepare_candidate_documents([document], ResearchGoal("5G latency control"))

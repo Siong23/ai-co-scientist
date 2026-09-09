@@ -173,6 +173,14 @@ def test_report_persists_and_renders_evidence_funnel_diagnostics(tmp_path, monke
             "raw_search_hits": 129,
             "unique_candidates": 37,
             "selected_sources": 10,
+            "abstract_candidates": 8,
+            "abstract_screened": 8,
+            "abstract_accepted": 3,
+            "abstract_maybe": 2,
+            "abstract_rejected": 3,
+            "full_text_requested": 4,
+            "full_text_cache_hits": 1,
+            "full_text_downloads": 2,
             "acquisition_attempts": 4,
             "committed_sources": 2,
             "retrieved_passages": 2,
@@ -214,6 +222,8 @@ def test_report_persists_and_renders_evidence_funnel_diagnostics(tmp_path, monke
     assert generation["evidence_pipeline"][0]["requirement_id"] == "spikes"
     report = render_report(saved)
     assert "Evidence funnel" in report
+    assert "Abstracts screened" in report
+    assert "Full-text cache hits" in report
     assert "Evidence path diagnostics" in report
     assert "arXiv:1234.5678" in report
     assert "traffic spike measurements" in report

@@ -140,6 +140,9 @@ class ChromaPaperLibrary:
         self.last_evidence_diagnostics: list[dict[str, Any]] = []
         self._diagnostics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         self._attempted_source_ids: set[str] = set()
+        self._full_text_requested_source_ids: set[str] = set()
+        self._full_text_cache_hit_source_ids: set[str] = set()
+        self._full_text_downloaded_source_ids: set[str] = set()
 
     def begin_run(self) -> None:
         """Reset bounded acquisition state and diagnostics for one generation run."""
@@ -147,6 +150,19 @@ class ChromaPaperLibrary:
         self.last_evidence_diagnostics = []
         self._diagnostics_by_key = {}
         self._attempted_source_ids = set()
+        self._full_text_requested_source_ids = set()
+        self._full_text_cache_hit_source_ids = set()
+        self._full_text_downloaded_source_ids = set()
+
+    @property
+    def acquisition_funnel(self) -> dict[str, int]:
+        """Return deduplicated full-text acquisition counters for this run."""
+
+        return {
+            "full_text_requested": len(self._full_text_requested_source_ids),
+            "full_text_cache_hits": len(self._full_text_cache_hit_source_ids),
+            "full_text_downloads": len(self._full_text_downloaded_source_ids),
+        }
 
     @property
     def collection_name(self) -> str:
@@ -540,13 +556,17 @@ class ChromaPaperLibrary:
                 acquisition_results[source_id] = "failed"
             if source_id and self.has_indexed_source(source_id):
                 indexed_source_ids.add(source_id)
+                self._full_text_requested_source_ids.add(source_id)
+                self._full_text_cache_hit_source_ids.add(source_id)
                 acquisition_results[source_id] = (
                     "committed" if source_id in self._attempted_source_ids else "cached_committed"
                 )
 
         lane_positions = {requirement_id: 0 for requirement_id in lanes}
         lane_attempts = {requirement_id: 0 for requirement_id in lanes}
-        global_attempts = 0
+        # The configured budget applies to the entire generation run, including
+        # corrective rounds, rather than resetting on every enrichment call.
+        global_attempts = len(self._attempted_source_ids)
 
         def attempt_one(requirement_id: str) -> bool:
             """Make at most one new acquisition attempt in one requirement lane."""
@@ -567,10 +587,22 @@ class ChromaPaperLibrary:
                 lane_positions[requirement_id] += 1
                 source_id = str(document.metadata.get("source_id", ""))
                 public_requirement_id = "" if requirement_id == "__unscoped__" else requirement_id
+                screening_decision = str(document.metadata.get("abstract_screen_decision") or "").upper()
+                if screening_decision == "REJECT":
+                    acquisition_results[source_id] = "abstract_rejected"
+                    continue
+                if screening_decision == "MAYBE" and document.metadata.get("abstract_screen_promoted") is not True:
+                    acquisition_results[source_id] = "abstract_maybe_not_promoted"
+                    continue
+                if screening_decision and document.metadata.get("full_text_needed") is False:
+                    acquisition_results[source_id] = "full_text_not_needed"
+                    continue
                 if not source_id or not document.metadata.get("pdf_url"):
                     acquisition_results[source_id] = "not_pdf_eligible"
                     continue
                 if source_id in indexed_source_ids:
+                    self._full_text_requested_source_ids.add(source_id)
+                    self._full_text_cache_hit_source_ids.add(source_id)
                     acquisition_results.setdefault(source_id, "cached_committed")
                     return True
                 status = self.get_index_status(source_id)
@@ -585,6 +617,7 @@ class ChromaPaperLibrary:
                 lane_attempts[requirement_id] += 1
                 global_attempts += 1
                 self._attempted_source_ids.add(source_id)
+                self._full_text_requested_source_ids.add(source_id)
                 try:
                     if self.ensure_indexed(document):
                         indexed_source_ids.add(source_id)
@@ -951,6 +984,7 @@ class ChromaPaperLibrary:
         pdf_path = self._pdf_path(source_id)
         if not pdf_path.exists():
             self._download_pdf(pdf_url, pdf_path)
+            self._full_text_downloaded_source_ids.add(source_id)
         extracted = self._extract_pages(pdf_path)
         if isinstance(extracted, ExtractedPaper):
             pages = extracted.pages

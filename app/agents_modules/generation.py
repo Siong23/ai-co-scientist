@@ -23,12 +23,14 @@ from ..rag_retriever import (
 )
 from ..utils import execution_cancelled, generate_unique_id, logger, redact_secrets
 from .generation_helpers import (
+    AbstractScreeningResult,
     AssumptionAssessment,
     EvidenceCoverage,
     FocusArea,
     LiteratureSynthesis,
     _resolve_retrieved_source_ids,
     build_evidence_queries,
+    call_llm_for_abstract_screening,
     call_llm_for_assumption_analysis,
     call_llm_for_debate_refinement,
     call_llm_for_evidence_coverage,
@@ -344,6 +346,9 @@ class GenerationAgent:
         # Vector paper library for full-text PDF caching and embeddings
         self.paper_library = paper_library or ChromaPaperLibrary(embeddings=self.rag_retriever.embeddings)
         self.last_evidence_gate_diagnostics: list[dict] = []
+        self._abstract_screenings: dict[str, AbstractScreeningResult] = {}
+        self._abstract_candidate_source_ids: set[str] = set()
+        self._abstract_screen_diagnostics: dict[str, dict] = {}
 
     def _format_meta_review_feedback(self, context: ContextMemory) -> str:
         """Format prior-cycle meta-review critiques and suggestions for prompt injection."""
@@ -387,10 +392,21 @@ class GenerationAgent:
         documents,
         research_goal: ResearchGoal,
         explicit_requirements=(),
+        provisional_hypotheses=(),
+        *,
+        uncovered_requirement_ids=(),
     ):
-        """Use relevant PDF bodies when available without blocking generation."""
+        """Screen abstracts, then use permitted PDF bodies when available."""
 
         try:
+            original_documents = list(documents)
+            acquisition_documents = self._screen_full_text_candidates(
+                original_documents,
+                research_goal,
+                explicit_requirements,
+                provisional_hypotheses,
+                uncovered_requirement_ids=uncovered_requirement_ids,
+            )
             evidence_queries = []
             for query in build_evidence_queries(
                 research_goal.description,
@@ -409,16 +425,216 @@ class GenerationAgent:
                         evidence_requirement_id=(requirement.aspect_id if requirement else None),
                     )
                 )
-            return self.paper_library.enrich_documents(
-                documents,
+            enriched_acquisition_documents = self.paper_library.enrich_documents(
+                acquisition_documents,
                 tuple(evidence_queries),
             )
+            enriched_by_source_id = {
+                str(document.metadata.get("source_id") or ""): document for document in enriched_acquisition_documents
+            }
+            enriched_documents = []
+            permitted_source_ids = {str(document.metadata.get("source_id") or "") for document in acquisition_documents}
+            for document in original_documents:
+                source_id = str(document.metadata.get("source_id") or "")
+                if source_id in permitted_source_ids:
+                    enriched_documents.append(enriched_by_source_id.get(source_id, document))
+                    continue
+                metadata = document.metadata
+                metadata["full_text_indexed"] = False
+                metadata["full_text_available"] = False
+                metadata["full_text_chunks_used"] = 0
+                metadata["acquisition_attempted"] = False
+                metadata["acquisition_result"] = metadata.get(
+                    "abstract_acquisition_reason",
+                    "abstract_screen_blocked",
+                )
+                metadata["evidence_status"] = "abstract_only"
+                metadata["evidence_mode"] = "abstract_only"
+                metadata["evidence_refs"] = [
+                    {
+                        "source_id": source_id,
+                        "chunk_id": f"abstract:{source_id}",
+                        "section": "Abstract",
+                        "page": None,
+                        "evidence_type": "abstract_only",
+                    }
+                ]
+                enriched_documents.append(document)
+            return enriched_documents
         except Exception as exc:
             logger.warning(
                 "Paper download/vector indexing failed; continuing with abstracts: %s",
                 redact_secrets(str(exc)),
             )
             return list(documents)
+
+    def _has_verified_cached_full_text(self, source_id: str) -> bool:
+        """Check the persistent integrity ledger without trusting result metadata."""
+
+        has_indexed_source = getattr(self.paper_library, "has_indexed_source", None)
+        if not source_id or not callable(has_indexed_source):
+            return False
+        try:
+            return has_indexed_source(source_id) is True
+        except Exception as exc:
+            logger.warning(
+                "Could not verify cached full text for %s: %s",
+                source_id,
+                redact_secrets(str(exc)),
+            )
+            return False
+
+    @staticmethod
+    def _abstract_screening_metadata(
+        result: AbstractScreeningResult,
+        *,
+        promoted: bool,
+        acquisition_reason: str,
+    ) -> dict:
+        return {
+            "source_id": result.source_id,
+            "decision": result.decision,
+            "relevance_score": result.relevance_score,
+            "reason": result.reason,
+            "evidence_requirement_ids": list(result.evidence_requirement_ids),
+            "provisional_hypothesis_ids": list(result.provisional_hypothesis_ids),
+            "full_text_needed": result.full_text_needed,
+            "full_text_questions": list(result.full_text_questions),
+            "promoted": promoted,
+            "acquisition_reason": acquisition_reason,
+        }
+
+    def _screen_full_text_candidates(
+        self,
+        documents,
+        research_goal: ResearchGoal,
+        explicit_requirements=(),
+        provisional_hypotheses=(),
+        *,
+        uncovered_requirement_ids=(),
+    ):
+        """Return only candidates allowed to reach PDF acquisition/indexing."""
+
+        document_list = list(documents)
+        if not bool(getattr(self.paper_library, "enabled", False)):
+            return document_list
+
+        cached_source_ids: set[str] = set()
+        candidates_by_source_id: dict[str, Document] = {}
+        for document in document_list:
+            source_id = str(document.metadata.get("source_id") or "").strip()
+            if source_id and self._has_verified_cached_full_text(source_id):
+                cached_source_ids.add(source_id)
+                document.metadata["full_text_cache_hit"] = True
+                continue
+            if source_id and document.metadata.get("pdf_url"):
+                self._abstract_candidate_source_ids.add(source_id)
+                if source_id not in self._abstract_screenings:
+                    candidates_by_source_id.setdefault(source_id, document)
+
+        if candidates_by_source_id:
+            screening_candidates = []
+            for source_id, document in candidates_by_source_id.items():
+                metadata = document.metadata
+                abstract = str(
+                    metadata.get("abstract") or metadata.get("summary") or document.page_content or ""
+                ).strip()
+                screening_candidates.append(
+                    {
+                        "source_id": source_id,
+                        "title": str(metadata.get("title") or "Untitled")[:300],
+                        "abstract": abstract[: self.max_grading_abstract_chars],
+                        "venue": str(metadata.get("venue") or metadata.get("primary_category") or "")[:120],
+                        "published": str(metadata.get("published_at") or metadata.get("published") or "")[:40],
+                        "provider": str(metadata.get("provider") or metadata.get("source") or "")[:80],
+                    }
+                )
+            results, error = call_llm_for_abstract_screening(
+                research_goal.description,
+                screening_candidates,
+                set(candidates_by_source_id),
+                explicit_requirements=tuple(explicit_requirements),
+                provisional_hypotheses=tuple(provisional_hypotheses),
+                model=research_goal.llm_model,
+            )
+            if error or results is None:
+                safe_reason = redact_secrets(error or "Abstract screening returned no result.")
+                logger.warning("%s New full-text acquisition is blocked for this batch.", safe_reason)
+                results = tuple(
+                    AbstractScreeningResult(
+                        source_id=source_id,
+                        decision="REJECT",
+                        relevance_score=0.0,
+                        reason=safe_reason,
+                        full_text_needed=False,
+                    )
+                    for source_id in candidates_by_source_id
+                )
+            self._abstract_screenings.update({result.source_id: result for result in results})
+
+        uncovered_ids = {
+            str(requirement_id).strip() for requirement_id in uncovered_requirement_ids if str(requirement_id).strip()
+        }
+        permitted_documents = []
+        for document in document_list:
+            source_id = str(document.metadata.get("source_id") or "").strip()
+            if source_id in cached_source_ids or not document.metadata.get("pdf_url"):
+                permitted_documents.append(document)
+                continue
+            result = self._abstract_screenings.get(source_id)
+            if result is None:
+                # An unidentifiable or unscreened PDF candidate cannot cross the gate.
+                document.metadata["abstract_acquisition_reason"] = "abstract_not_screened"
+                continue
+            promoted = False
+            if result.decision == "ACCEPT" and result.full_text_needed:
+                promoted = True
+                acquisition_reason = "abstract_accepted"
+            elif (
+                result.decision == "MAYBE"
+                and result.full_text_needed
+                and bool(set(result.evidence_requirement_ids) & uncovered_ids)
+            ):
+                promoted = True
+                acquisition_reason = "maybe_promoted_for_uncovered_requirement"
+            elif result.decision == "MAYBE":
+                acquisition_reason = "abstract_maybe_not_needed"
+            elif result.decision == "REJECT":
+                acquisition_reason = "abstract_rejected"
+            else:
+                acquisition_reason = "full_text_not_needed"
+
+            screening_metadata = self._abstract_screening_metadata(
+                result,
+                promoted=promoted,
+                acquisition_reason=acquisition_reason,
+            )
+            document.metadata["abstract_screening"] = screening_metadata
+            document.metadata["abstract_screen_decision"] = result.decision
+            document.metadata["abstract_relevance_score"] = result.relevance_score
+            document.metadata["abstract_screen_reason"] = result.reason
+            document.metadata["abstract_evidence_requirement_ids"] = list(result.evidence_requirement_ids)
+            document.metadata["abstract_provisional_hypothesis_ids"] = list(result.provisional_hypothesis_ids)
+            document.metadata["full_text_needed"] = result.full_text_needed
+            document.metadata["full_text_questions"] = list(result.full_text_questions)
+            document.metadata["abstract_screen_promoted"] = promoted
+            document.metadata["abstract_acquisition_reason"] = acquisition_reason
+            self._abstract_screen_diagnostics[source_id] = {
+                "candidate_source_id": source_id,
+                "abstract_screening": screening_metadata,
+                "abstract_screen_decision": result.decision,
+                "abstract_relevance_score": result.relevance_score,
+                "abstract_screen_reason": result.reason,
+                "abstract_evidence_requirement_ids": list(result.evidence_requirement_ids),
+                "abstract_provisional_hypothesis_ids": list(result.provisional_hypothesis_ids),
+                "full_text_needed": result.full_text_needed,
+                "full_text_questions": list(result.full_text_questions),
+                "abstract_screen_promoted": promoted,
+                "abstract_acquisition_reason": acquisition_reason,
+            }
+            if promoted:
+                permitted_documents.append(document)
+        return permitted_documents
 
     def _requires_indexed_sources(self) -> bool:
         return bool(getattr(self.paper_library, "enabled", False)) and bool(
@@ -434,6 +650,9 @@ class GenerationAgent:
         documents,
         research_goal: ResearchGoal,
         explicit_requirements=(),
+        provisional_hypotheses=(),
+        *,
+        uncovered_requirement_ids=(),
     ):
         """Retain only successfully indexed full text when strict mode is enabled."""
 
@@ -444,6 +663,8 @@ class GenerationAgent:
             documents,
             research_goal,
             explicit_requirements,
+            provisional_hypotheses,
+            uncovered_requirement_ids=uncovered_requirement_ids,
         )
         retained_documents = []
         gate_diagnostics = []
@@ -469,6 +690,15 @@ class GenerationAgent:
                 rejection_reason = "retained_extracted_web_content"
             elif is_web:
                 rejection_reason = "web_content_not_extracted"
+            elif metadata.get("abstract_screen_decision") == "REJECT":
+                rejection_reason = "abstract_screen_rejected"
+            elif (
+                metadata.get("abstract_screen_decision") == "MAYBE"
+                and metadata.get("abstract_screen_promoted") is not True
+            ):
+                rejection_reason = "abstract_maybe_not_promoted"
+            elif metadata.get("full_text_needed") is False and metadata.get("abstract_screen_decision"):
+                rejection_reason = "full_text_not_requested"
             elif metadata.get("index_status") == "PARTIAL" or metadata.get("index_truncated") is True:
                 rejection_reason = "partial_index"
             elif metadata.get("full_text_indexed") is not True:
@@ -527,8 +757,37 @@ class GenerationAgent:
                 library_diagnostics = (
                     list(raw_library_diagnostics) if isinstance(raw_library_diagnostics, (list, tuple)) else []
                 )
-        if not library_diagnostics:
-            library_diagnostics = list(self.last_evidence_gate_diagnostics)
+        gate_by_source = {
+            str(item.get("candidate_source_id") or ""): item for item in self.last_evidence_gate_diagnostics
+        }
+        merged_diagnostics = []
+        represented_source_ids: set[str] = set()
+        for library_diagnostic in library_diagnostics:
+            source_id = str(library_diagnostic.get("candidate_source_id") or "")
+            represented_source_ids.add(source_id)
+            merged_diagnostics.append(
+                {
+                    **self._abstract_screen_diagnostics.get(source_id, {}),
+                    **library_diagnostic,
+                    **{
+                        key: value
+                        for key, value in gate_by_source.get(source_id, {}).items()
+                        if key.startswith("strict_gate_")
+                    },
+                }
+            )
+        for source_id, gate_diagnostic in gate_by_source.items():
+            if source_id not in represented_source_ids:
+                merged_diagnostics.append(
+                    {
+                        **self._abstract_screen_diagnostics.get(source_id, {}),
+                        **gate_diagnostic,
+                    }
+                )
+        for source_id, screening_diagnostic in self._abstract_screen_diagnostics.items():
+            if source_id not in represented_source_ids and source_id not in gate_by_source:
+                merged_diagnostics.append(dict(screening_diagnostic))
+        library_diagnostics = merged_diagnostics
 
         raw_hits = sum(int(item.get("results", 0)) for item in self.rag_retriever.last_search_stats)
         unique_candidates = max(
@@ -557,12 +816,24 @@ class GenerationAgent:
             if coverage is not None
             else set()
         )
+        acquisition_funnel = getattr(self.paper_library, "acquisition_funnel", {})
+        if not isinstance(acquisition_funnel, dict):
+            acquisition_funnel = {}
+        screening_results = tuple(self._abstract_screenings.values())
         context.last_generation_diagnostics["evidence_pipeline"] = library_diagnostics
         context.last_generation_diagnostics["corrective_history"] = list(corrective_history)
         context.last_generation_diagnostics["evidence_funnel"] = {
             "raw_search_hits": raw_hits,
             "unique_candidates": unique_candidates,
             "selected_sources": selected_sources,
+            "abstract_candidates": len(self._abstract_candidate_source_ids),
+            "abstract_screened": len(screening_results),
+            "abstract_accepted": sum(result.decision == "ACCEPT" for result in screening_results),
+            "abstract_maybe": sum(result.decision == "MAYBE" for result in screening_results),
+            "abstract_rejected": sum(result.decision == "REJECT" for result in screening_results),
+            "full_text_requested": int(acquisition_funnel.get("full_text_requested", len(acquired_sources))),
+            "full_text_cache_hits": int(acquisition_funnel.get("full_text_cache_hits", 0)),
+            "full_text_downloads": int(acquisition_funnel.get("full_text_downloads", 0)),
             "acquisition_attempts": len(acquired_sources),
             "committed_sources": len(committed_sources),
             "retrieved_passages": len(selected_chunk_ids),
@@ -1077,6 +1348,7 @@ Your refined contribution:
                 action_documents,
                 research_goal,
                 query_plan.explicit_requirements,
+                query_plan.provisional_hypotheses,
             )
 
             if not prepared_action_documents:
@@ -1235,6 +1507,9 @@ Your refined contribution:
         if callable(begin_library_run):
             begin_library_run()
         self.last_evidence_gate_diagnostics = []
+        self._abstract_screenings = {}
+        self._abstract_candidate_source_ids = set()
+        self._abstract_screen_diagnostics = {}
         context.last_retrieved_sources = []
         context.last_generation_diagnostics = {
             "evidence_retrieval": {
@@ -1342,6 +1617,8 @@ Your refined contribution:
                 candidate_documents,
                 research_goal,
                 query_plan.explicit_requirements,
+                query_plan.provisional_hypotheses,
+                uncovered_requirement_ids=(coverage.missing_aspect_ids if coverage is not None else ()),
             )
 
             # Format documents into a budget-capped context string for LLM grading
@@ -1662,6 +1939,8 @@ Your refined contribution:
                 retrieved_documents,
                 research_goal,
                 query_plan.explicit_requirements,
+                query_plan.provisional_hypotheses,
+                uncovered_requirement_ids=coverage.missing_aspect_ids,
             )
 
         # Preserve the validated retrieval result before synthesis. If a later
