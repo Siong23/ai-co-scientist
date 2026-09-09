@@ -16,6 +16,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 from rubrics.goal_alignment import goals_match  # noqa: E402
 
 DEFAULT_GOAL_PATH = PROJECT_ROOT / "goals" / "goal_001_perovskite_humidity.txt"
@@ -254,7 +259,16 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             judge = configure_local_judge(args.judge_model, args.judge_base_url)
-            llm_report = evaluate_parsed_run(parsed, threshold=args.threshold)
+            from deepeval.models import LocalModel
+
+            # Pass the provider explicitly: DeepEval may have cached settings
+            # before configure_local_judge updated the environment.
+            local_model = LocalModel(
+                model=judge["model"],
+                base_url=judge["base_url"],
+                api_key=os.environ["LOCAL_MODEL_API_KEY"],
+            )
+            llm_report = evaluate_parsed_run(parsed, threshold=args.threshold, model=local_model)
         except (RunValidationError, LLMEvaluationError) as exc:
             print(
                 f"Evaluation error: {redact_environment_secrets(str(exc))}",

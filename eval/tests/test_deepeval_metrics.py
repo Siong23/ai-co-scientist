@@ -76,3 +76,41 @@ def test_llm_evaluation_validates_hypothesis_text_and_threshold():
         build_test_case(run)
     with pytest.raises(LLMEvaluationError, match="between 0 and 1"):
         evaluate_parsed_run(parsed_run(), threshold=1.1, metric_factory=FakeMetric)
+
+
+def test_cli_passes_explicit_local_judge_after_deepeval_import(monkeypatch):
+    from deepeval.models import LocalModel
+    from deepeval.models.llms import local_model as local_module
+    from rubrics import deepeval_metrics
+
+    from scripts import evaluate_run
+
+    monkeypatch.setenv("LOCAL_MODEL_API_KEY", "offline-placeholder")
+    monkeypatch.setattr(evaluate_run, "parse_run", lambda *args: parsed_run())
+    clients = []
+
+    def fake_client(**kwargs):
+        clients.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(local_module, "OpenAI", fake_client)
+
+    def evaluate(parsed, *, threshold, model):
+        assert isinstance(model, LocalModel)
+        assert model.name == "test-local-judge"
+        model.load_model()
+
+        def metric_factory(**kwargs):
+            assert kwargs["model"] is model
+            return FakeMetric(**kwargs)
+
+        return evaluate_parsed_run(parsed, threshold=threshold, model=model, metric_factory=metric_factory)
+
+    monkeypatch.setattr(deepeval_metrics, "evaluate_parsed_run", evaluate)
+    assert evaluate_run.main([
+        "unused.json", "--llm-metrics", "--judge-model", "test-local-judge",
+        "--judge-base-url", "http://localhost:1234/v1/",
+    ]) == 1
+    assert clients
+    assert all(client["base_url"] == "http://localhost:1234/v1" for client in clients)
+    assert all(client["api_key"] == "offline-placeholder" for client in clients)
