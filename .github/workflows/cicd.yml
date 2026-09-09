@@ -21,8 +21,6 @@ jobs:
 
       - name: Checkout source code
         uses: actions/checkout@v5
-        with:
-          lfs: true
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -62,8 +60,6 @@ jobs:
       - name: Update local repository
         run: |
           cd /home/server2/ai-co-scientist
-
-          git lfs install
           git fetch origin main
 
           if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -78,8 +74,6 @@ jobs:
 
           git checkout main
           git reset --hard origin/main
-
-          git lfs pull origin main
 
       - name: Install/update dependencies
         run: |
@@ -103,7 +97,6 @@ jobs:
           done
 
           sleep 10
-
           if systemctl is-active --quiet ai-co-scientist.service && \
              curl --fail --silent http://127.0.0.1:7860/ > /dev/null; then
             echo "AI Co-Scientist stayed healthy after startup."
@@ -113,4 +106,3 @@ jobs:
           systemctl status ai-co-scientist.service --no-pager || true
           journalctl -u ai-co-scientist.service -n 100 --no-pager || true
           exit 1
-          
