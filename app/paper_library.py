@@ -16,6 +16,7 @@ import requests
 from langchain_core.documents import Document
 
 from .config import config
+from .lexical_retrieval import BM25PassageIndex, LexicalPassage, passage_rank_fusion
 from .rag_retriever import SharedSentenceTransformerEmbeddings
 from .scientific_documents import (
     DocumentElement,
@@ -63,6 +64,15 @@ class PaperChunk:
     embedding_model: str = ""
     document_id: str = ""
     paper_version: str = ""
+    chunk_index: int = -1
+    chunk_count: int = 0
+    dense_score: float | None = None
+    lexical_score: float | None = None
+    hybrid_score: float | None = None
+    query_rrf_score: float | None = None
+    selected_anchor_chunk_id: str = ""
+    context_relation: str = "selected"
+    is_context_expansion: bool = False
 
     def __post_init__(self) -> None:
         """Keep the historical ``text`` field as the raw-evidence alias."""
@@ -154,6 +164,18 @@ class ChromaPaperLibrary:
         self.chunk_overlap = min(self.chunk_overlap, self.chunk_size - 1)
         self.top_k_chunks = max(1, int(library_config.get("top_k_chunks", 6)))
         self.max_prompt_chars = max(1000, int(library_config.get("max_prompt_chars", 12000)))
+        self.hybrid_retrieval_enabled = bool(library_config.get("hybrid_retrieval_enabled", True))
+        self.lexical_retrieval_enabled = bool(library_config.get("lexical_retrieval_enabled", True))
+        self.dense_candidate_factor = max(1, int(library_config.get("dense_candidate_factor", 3)))
+        self.lexical_candidate_factor = max(1, int(library_config.get("lexical_candidate_factor", 3)))
+        self.passage_rrf_k = max(1, int(library_config.get("passage_rrf_k", 60)))
+        self.query_rrf_k = max(1, int(library_config.get("query_rrf_k", 60)))
+        self.bm25_k1 = max(0.01, float(library_config.get("bm25_k1", 1.5)))
+        self.bm25_b = min(1.0, max(0.0, float(library_config.get("bm25_b", 0.75))))
+        self.context_expansion_enabled = bool(library_config.get("context_expansion_enabled", True))
+        self.context_neighbor_window = max(0, int(library_config.get("context_neighbor_window", 1)))
+        self.context_parent_chunk_limit = max(0, int(library_config.get("context_parent_chunk_limit", 2)))
+        self.context_expansion_max_chars = max(0, int(library_config.get("context_expansion_max_chars", 4000)))
         self.max_pdf_bytes = max(1, int(library_config.get("max_pdf_bytes", 25_000_000)))
         self.download_timeout_seconds = max(1, int(library_config.get("download_timeout_seconds", 30)))
         self.retrieval_workers = max(1, int(library_config.get("retrieval_workers", 3)))
@@ -173,7 +195,10 @@ class ChromaPaperLibrary:
         self._client = client
         self._vector_store = None
         self._manifest_lock = RLock()
+        self._retrieval_diagnostics_lock = RLock()
         self.last_evidence_diagnostics: list[dict[str, Any]] = []
+        self.last_passage_retrieval_diagnostics: list[dict[str, Any]] = []
+        self._passage_diagnostics_by_key: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
         self._diagnostics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
         self._attempted_source_ids: set[str] = set()
         self._full_text_requested_source_ids: set[str] = set()
@@ -184,7 +209,9 @@ class ChromaPaperLibrary:
         """Reset bounded acquisition state and diagnostics for one generation run."""
 
         self.last_evidence_diagnostics = []
+        self.last_passage_retrieval_diagnostics = []
         self._diagnostics_by_key = {}
+        self._passage_diagnostics_by_key = {}
         self._attempted_source_ids = set()
         self._full_text_requested_source_ids = set()
         self._full_text_cache_hit_source_ids = set()
@@ -497,6 +524,8 @@ class ChromaPaperLibrary:
         acquisition_attempted: bool | None = None,
         acquisition_result: str | None = None,
         selected_chunk_ids: Sequence[str] | None = None,
+        expanded_chunk_ids: Sequence[str] | None = None,
+        selected_chunks: Sequence[PaperChunk] | None = None,
     ) -> None:
         source_id = str(document.metadata.get("source_id") or "")
         key = (source_id, requirement_id)
@@ -516,6 +545,8 @@ class ChromaPaperLibrary:
                 "index_status": self.get_index_status(source_id) if source_id else "MISSING",
                 "full_text_chunk_count": 0,
                 "selected_chunk_ids": [],
+                "expanded_chunk_ids": [],
+                "selected_chunk_scores": [],
                 "strict_gate_retained": False,
                 "strict_gate_rejection_reason": "not_evaluated",
                 "coverage_contribution": False,
@@ -533,6 +564,19 @@ class ChromaPaperLibrary:
             diagnostic["acquisition_result"] = acquisition_result
         if selected_chunk_ids is not None:
             diagnostic["selected_chunk_ids"] = list(dict.fromkeys(selected_chunk_ids))
+        if expanded_chunk_ids is not None:
+            diagnostic["expanded_chunk_ids"] = list(dict.fromkeys(expanded_chunk_ids))
+        if selected_chunks is not None:
+            diagnostic["selected_chunk_scores"] = [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "dense_score": chunk.dense_score,
+                    "lexical_score": chunk.lexical_score,
+                    "hybrid_score": chunk.hybrid_score,
+                    "query_rrf_score": chunk.query_rrf_score,
+                }
+                for chunk in selected_chunks
+            ]
         if source_id:
             status = self.get_index_status(source_id)
             diagnostic["index_status"] = status
@@ -785,27 +829,21 @@ class ChromaPaperLibrary:
                 source_ids_by_requirement=source_ids_by_requirement,
             )
 
+        context_chunks = self.expand_context(chunks)
+        bounded_chunks = self._bounded_prompt_chunks(context_chunks)
         chunks_by_source: dict[str, list[PaperChunk]] = {}
-        used_chars = 0
-        reserved_remaining = sum(bool(chunk.requirement_ids) for chunk in chunks)
-        for chunk in chunks:
-            if used_chars >= self.max_prompt_chars:
-                break
-            remaining = self.max_prompt_chars - used_chars
-            allocation = remaining
-            if chunk.requirement_ids and reserved_remaining:
-                allocation = max(1, remaining // reserved_remaining)
-                reserved_remaining -= 1
-            text = chunk.text[:allocation].strip()
-            if not text:
-                continue
-            chunks_by_source.setdefault(chunk.source_id, []).append(replace(chunk, text=text))
-            used_chars += len(text)
-
-        selected_chunk_ids_by_source: dict[str, list[str]] = {}
-        for source_chunks in chunks_by_source.values():
-            for chunk in source_chunks:
-                selected_chunk_ids_by_source.setdefault(chunk.source_id, []).append(chunk.chunk_id)
+        selected_chunks_by_source: dict[str, list[PaperChunk]] = {}
+        expanded_chunk_ids_by_source: dict[str, list[str]] = {}
+        for chunk in bounded_chunks:
+            chunks_by_source.setdefault(chunk.source_id, []).append(chunk)
+            if chunk.is_context_expansion:
+                expanded_chunk_ids_by_source.setdefault(chunk.source_id, []).append(chunk.chunk_id)
+            else:
+                selected_chunks_by_source.setdefault(chunk.source_id, []).append(chunk)
+        selected_chunk_ids_by_source = {
+            source_id: [chunk.chunk_id for chunk in source_chunks]
+            for source_id, source_chunks in selected_chunks_by_source.items()
+        }
         for requirement_id, lane_documents in lanes.items():
             for document in lane_documents:
                 source_id = str(document.metadata.get("source_id", ""))
@@ -815,6 +853,8 @@ class ChromaPaperLibrary:
                     query=query_by_requirement.get(requirement_id, ""),
                     acquisition_result=acquisition_results.get(source_id),
                     selected_chunk_ids=selected_chunk_ids_by_source.get(source_id, ()),
+                    expanded_chunk_ids=expanded_chunk_ids_by_source.get(source_id, ()),
+                    selected_chunks=selected_chunks_by_source.get(source_id, ()),
                 )
 
         enriched: list[Document] = []
@@ -829,7 +869,9 @@ class ChromaPaperLibrary:
             metadata["index_truncated"] = source_id in partial_source_ids
             metadata["acquisition_attempted"] = source_id in self._attempted_source_ids
             metadata["acquisition_result"] = acquisition_results.get(source_id, "not_attempted")
-            metadata["selected_chunk_ids"] = [chunk.chunk_id for chunk in source_chunks]
+            metadata["selected_chunk_ids"] = selected_chunk_ids_by_source.get(source_id, [])
+            metadata["expanded_chunk_ids"] = expanded_chunk_ids_by_source.get(source_id, [])
+            metadata["context_chunk_ids"] = [chunk.chunk_id for chunk in source_chunks]
             if source_id in indexed_source_ids:
                 evidence_status = "full_text"
             elif source_id in partial_source_ids:
@@ -857,6 +899,8 @@ class ChromaPaperLibrary:
                     "page": chunk.page,
                     "page_start": chunk.page_start or chunk.page,
                     "page_end": chunk.page_end or chunk.page,
+                    "chunk_index": chunk.chunk_index,
+                    "chunk_count": chunk.chunk_count,
                     "element_type": chunk.element_type,
                     "evidence_type": chunk.evidence_type,
                     "parser": chunk.parser,
@@ -872,8 +916,15 @@ class ChromaPaperLibrary:
                     "parent_id": chunk.parent_id,
                     "previous_chunk_id": chunk.previous_chunk_id,
                     "next_chunk_id": chunk.next_chunk_id,
-                    "retrieval_score": chunk.distance,
+                    "dense_score": chunk.dense_score,
+                    "dense_distance": chunk.distance,
+                    "lexical_score": chunk.lexical_score,
+                    "hybrid_score": chunk.hybrid_score,
+                    "query_rrf_score": chunk.query_rrf_score,
                     "requirement_ids": list(chunk.requirement_ids),
+                    "selected_anchor_chunk_id": chunk.selected_anchor_chunk_id or chunk.chunk_id,
+                    "context_relation": chunk.context_relation,
+                    "is_context_expansion": chunk.is_context_expansion,
                     "text": chunk.text,
                 }
                 for chunk in source_chunks
@@ -884,7 +935,9 @@ class ChromaPaperLibrary:
                     (
                         f'<evidence chunk_id="{chunk.chunk_id}" source_id="{chunk.source_id}" '
                         f'section="{chunk.section}" page="{chunk.page}" '
-                        f'evidence_type="{chunk.evidence_type}">\n{chunk.text}\n</evidence>'
+                        f'evidence_type="{chunk.evidence_type}" '
+                        f'selected_anchor_chunk_id="{chunk.selected_anchor_chunk_id or chunk.chunk_id}" '
+                        f'context_relation="{chunk.context_relation}">\n{chunk.text}\n</evidence>'
                     )
                     for chunk in source_chunks
                 )
@@ -894,9 +947,10 @@ class ChromaPaperLibrary:
             enriched.append(Document(page_content=page_content, metadata=metadata))
 
         logger.info(
-            "Chroma paper library indexed %d source(s) and supplied %d full-text chunk(s).",
+            "Chroma paper library indexed %d source(s) and supplied %d selected plus %d expanded full-text chunk(s).",
             len(indexed_source_ids),
-            sum(len(items) for items in chunks_by_source.values()),
+            sum(len(items) for items in selected_chunks_by_source.values()),
+            sum(len(items) for items in expanded_chunk_ids_by_source.values()),
         )
         return enriched
 
@@ -954,21 +1008,51 @@ class ChromaPaperLibrary:
                     rank,
                     chunk.text,
                 )
-                chunks_by_id.setdefault(
-                    chunk_id,
+                normalized_chunk = (
                     chunk
                     if chunk.chunk_id
                     else replace(
                         chunk,
                         chunk_id=chunk_id,
                         schema_version=chunk.schema_version or self.index_schema_version,
-                    ),
+                    )
                 )
-                fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
+                existing = chunks_by_id.get(chunk_id)
+                if existing is None:
+                    chunks_by_id[chunk_id] = normalized_chunk
+                else:
+                    chunks_by_id[chunk_id] = replace(
+                        existing,
+                        distance=min(
+                            value for value in (existing.distance, normalized_chunk.distance) if value is not None
+                        )
+                        if existing.distance is not None or normalized_chunk.distance is not None
+                        else None,
+                        dense_score=max(
+                            value for value in (existing.dense_score, normalized_chunk.dense_score) if value is not None
+                        )
+                        if existing.dense_score is not None or normalized_chunk.dense_score is not None
+                        else None,
+                        lexical_score=max(
+                            value
+                            for value in (existing.lexical_score, normalized_chunk.lexical_score)
+                            if value is not None
+                        )
+                        if existing.lexical_score is not None or normalized_chunk.lexical_score is not None
+                        else None,
+                        hybrid_score=max(
+                            value
+                            for value in (existing.hybrid_score, normalized_chunk.hybrid_score)
+                            if value is not None
+                        )
+                        if existing.hybrid_score is not None or normalized_chunk.hybrid_score is not None
+                        else None,
+                    )
+                fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (self.query_rrf_k + rank)
                 if requirement_id:
                     scores = requirement_scores.setdefault(requirement_id, {})
-                    scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
-        ranked_ids = sorted(fused_scores, key=fused_scores.get, reverse=True)
+                    scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (self.query_rrf_k + rank)
+        ranked_ids = sorted(fused_scores, key=lambda chunk_id: (-fused_scores[chunk_id], chunk_id))
         limit = top_k or self.top_k_chunks
         selected_ids: list[str] = []
         requirements_by_chunk: dict[str, list[str]] = {}
@@ -979,8 +1063,7 @@ class ChromaPaperLibrary:
                 continue
             lane_ranked_ids = sorted(
                 requirement_scores.get(requirement_id, {}),
-                key=requirement_scores.get(requirement_id, {}).get,
-                reverse=True,
+                key=lambda chunk_id: (-requirement_scores[requirement_id][chunk_id], chunk_id),
             )
             if not lane_ranked_ids:
                 continue
@@ -1001,6 +1084,8 @@ class ChromaPaperLibrary:
                 replace(
                     chunk,
                     requirement_ids=tuple(requirements_by_chunk.get(chunk_id, ())),
+                    query_rrf_score=fused_scores[chunk_id],
+                    selected_anchor_chunk_id=chunk.chunk_id,
                 )
             )
         return selected
@@ -1157,78 +1242,400 @@ class ChromaPaperLibrary:
         logger.info("Indexed and verified %d full-text chunks for %s in Chroma.", len(chunks), source_id)
         return True
 
+    @staticmethod
+    def _source_filter(source_ids: Sequence[str]) -> dict[str, Any]:
+        if len(source_ids) == 1:
+            return {"source_id": source_ids[0]}
+        return {"source_id": {"$in": list(source_ids)}}
+
+    def _paper_chunk_from_document(
+        self,
+        document: Document,
+        *,
+        distance: float | None = None,
+        dense_score: float | None = None,
+        lexical_score: float | None = None,
+        hybrid_score: float | None = None,
+    ) -> PaperChunk:
+        metadata = document.metadata
+        raw_text = str(metadata.get("raw_text") or document.page_content)
+        page = int(metadata.get("page_start") or metadata.get("page") or 0)
+        path = tuple(
+            part.strip()
+            for part in str(metadata.get("section_path") or metadata.get("section") or "Unknown").split(">")
+            if part.strip()
+        )
+        title = str(metadata.get("title", "Untitled"))
+        section_path = " > ".join(path or ("Unknown",))
+        page_end = int(metadata.get("page_end") or page)
+        raw_chunk_index = metadata.get("chunk_index")
+        chunk_index = int(raw_chunk_index) if raw_chunk_index is not None else -1
+        chunk_id = str(metadata.get("chunk_id") or "")
+        if not chunk_id:
+            chunk_id = self._chunk_id(
+                str(metadata.get("source_id", "")),
+                page,
+                max(0, chunk_index),
+                raw_text,
+            )
+        return PaperChunk(
+            source_id=str(metadata.get("source_id", "")),
+            title=title,
+            page=page,
+            text=raw_text,
+            distance=distance,
+            chunk_id=chunk_id,
+            section=str(metadata.get("section", "Unknown")),
+            subsection=str(metadata.get("subsection", "")),
+            evidence_type=str(metadata.get("evidence_type", "full_text")),
+            parser=str(metadata.get("parser", "pypdf")),
+            schema_version=str(metadata.get("schema_version", self.index_schema_version)),
+            raw_text=raw_text,
+            retrieval_text=document.page_content,
+            display_text=self._display_text(
+                str(metadata.get("source_id", "")),
+                title,
+                section_path,
+                page,
+                page_end,
+                raw_text,
+            ),
+            section_path=path or ("Unknown",),
+            page_start=int(metadata.get("page_start") or page),
+            page_end=page_end,
+            element_type=str(metadata.get("element_type") or "paragraph"),
+            content_sha256=str(metadata.get("content_sha256") or ""),
+            retrieval_text_sha256=str(metadata.get("retrieval_text_sha256") or ""),
+            parent_id=str(metadata.get("parent_id") or ""),
+            previous_chunk_id=str(metadata.get("previous_chunk_id") or ""),
+            next_chunk_id=str(metadata.get("next_chunk_id") or ""),
+            parser_version=str(metadata.get("parser_version") or ""),
+            chunking_version=str(metadata.get("chunking_version") or ""),
+            retrieval_template_version=str(metadata.get("retrieval_template_version") or ""),
+            embedding_model=str(metadata.get("embedding_model") or ""),
+            document_id=str(metadata.get("document_id") or metadata.get("source_id") or ""),
+            paper_version=str(metadata.get("paper_version") or ""),
+            chunk_index=chunk_index,
+            chunk_count=int(metadata.get("chunk_count") or 0),
+            dense_score=dense_score,
+            lexical_score=lexical_score,
+            hybrid_score=hybrid_score,
+        )
+
+    def _dense_search(
+        self,
+        query: str,
+        source_ids: Sequence[str],
+        candidate_k: int,
+    ) -> list[PaperChunk]:
+        results = self._get_vector_store().similarity_search_with_score(
+            query,
+            k=candidate_k,
+            filter=self._source_filter(source_ids),
+        )
+        chunks: list[PaperChunk] = []
+        for document, raw_distance in results:
+            distance = float(raw_distance) if raw_distance is not None else None
+            dense_score = 1.0 - distance if distance is not None else None
+            chunks.append(
+                self._paper_chunk_from_document(
+                    document,
+                    distance=distance,
+                    dense_score=dense_score,
+                )
+            )
+        return chunks
+
+    def _lexical_search(
+        self,
+        query: str,
+        source_ids: Sequence[str],
+        candidate_k: int,
+    ) -> list[PaperChunk]:
+        documents_by_id: dict[str, Document] = {}
+        for source_id in source_ids:
+            for chunk_id, (retrieval_text, metadata) in self._stored_source_records(source_id).items():
+                chunk_metadata = dict(metadata)
+                documents_by_id[chunk_id] = Document(page_content=retrieval_text, metadata=chunk_metadata)
+        index = BM25PassageIndex(
+            [LexicalPassage(chunk_id, document.page_content) for chunk_id, document in documents_by_id.items()],
+            k1=self.bm25_k1,
+            b=self.bm25_b,
+        )
+        return [
+            self._paper_chunk_from_document(
+                documents_by_id[result.chunk_id],
+                lexical_score=result.lexical_score,
+            )
+            for result in index.search(query, top_k=candidate_k)
+        ]
+
+    def _record_passage_retrieval_diagnostic(
+        self,
+        query: str,
+        source_ids: Sequence[str],
+        *,
+        dense_chunks: Sequence[PaperChunk],
+        lexical_chunks: Sequence[PaperChunk],
+        selected_chunks: Sequence[PaperChunk],
+        dense_error: str | None,
+        lexical_error: str | None,
+    ) -> None:
+        key = (query, tuple(source_ids))
+        diagnostic = {
+            "query": query,
+            "source_ids": list(source_ids),
+            "dense_available": dense_error is None,
+            "lexical_available": self.lexical_retrieval_enabled and lexical_error is None,
+            "dense_error": dense_error,
+            "lexical_error": lexical_error,
+            "dense_candidate_count": len(dense_chunks),
+            "lexical_candidate_count": len(lexical_chunks),
+            "hybrid_candidate_count": len({chunk.chunk_id for chunk in (*dense_chunks, *lexical_chunks)}),
+            "selected": [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "dense_score": chunk.dense_score,
+                    "lexical_score": chunk.lexical_score,
+                    "hybrid_score": chunk.hybrid_score,
+                }
+                for chunk in selected_chunks
+            ],
+        }
+        with self._retrieval_diagnostics_lock:
+            self._passage_diagnostics_by_key[key] = diagnostic
+            self.last_passage_retrieval_diagnostics = [
+                self._passage_diagnostics_by_key[item] for item in sorted(self._passage_diagnostics_by_key)
+            ]
+
     def search(self, query: str, source_ids: Sequence[str], top_k: int | None = None) -> list[PaperChunk]:
-        """Search full-text chunks, restricted to the selected evidence papers."""
+        """Hybrid-search full-text chunks within the selected evidence papers."""
 
         normalized_ids = [source_id for source_id in dict.fromkeys(source_ids) if source_id]
         if not normalized_ids:
             return []
 
-        vector_store = self._get_vector_store()
-        where: dict[str, Any]
-        if len(normalized_ids) == 1:
-            where = {"source_id": normalized_ids[0]}
+        limit = top_k or self.top_k_chunks
+        dense_candidate_k = limit * self.dense_candidate_factor if self.hybrid_retrieval_enabled else limit
+        lexical_candidate_k = limit * self.lexical_candidate_factor
+        dense_chunks: list[PaperChunk] = []
+        lexical_chunks: list[PaperChunk] = []
+        dense_error: str | None = None
+        lexical_error: str | None = None
+        try:
+            dense_chunks = self._dense_search(query, normalized_ids, dense_candidate_k)
+        except Exception as exc:
+            dense_error = str(exc)
+            logger.warning("Dense passage retrieval unavailable for this query: %s", exc)
+
+        if self.hybrid_retrieval_enabled and self.lexical_retrieval_enabled:
+            try:
+                lexical_chunks = self._lexical_search(query, normalized_ids, lexical_candidate_k)
+            except Exception as exc:
+                lexical_error = str(exc)
+                logger.warning("Lexical passage retrieval unavailable; using dense candidates only: %s", exc)
+        elif not self.lexical_retrieval_enabled:
+            lexical_error = "disabled"
         else:
-            where = {"source_id": {"$in": normalized_ids}}
-        results = vector_store.similarity_search_with_score(
-            query,
-            k=top_k or self.top_k_chunks,
-            filter=where,
+            lexical_error = "hybrid retrieval disabled"
+
+        dense_by_id = {chunk.chunk_id: chunk for chunk in dense_chunks if chunk.chunk_id}
+        lexical_by_id = {chunk.chunk_id: chunk for chunk in lexical_chunks if chunk.chunk_id}
+        fused = passage_rank_fusion(
+            [chunk.chunk_id for chunk in dense_chunks],
+            [chunk.chunk_id for chunk in lexical_chunks],
+            k=self.passage_rrf_k,
         )
-        chunks: list[PaperChunk] = []
-        for document, distance in results:
-            metadata = document.metadata
-            raw_text = str(metadata.get("raw_text") or document.page_content)
-            page = int(metadata.get("page_start") or metadata.get("page") or 0)
-            path = tuple(
-                part.strip()
-                for part in str(metadata.get("section_path") or metadata.get("section") or "Unknown").split(">")
-                if part.strip()
-            )
-            title = str(metadata.get("title", "Untitled"))
-            section_path = " > ".join(path or ("Unknown",))
-            page_end = int(metadata.get("page_end") or page)
-            chunks.append(
-                PaperChunk(
-                    source_id=str(metadata.get("source_id", "")),
-                    title=title,
-                    page=page,
-                    text=raw_text,
-                    distance=float(distance) if distance is not None else None,
-                    chunk_id=str(metadata.get("chunk_id", "")),
-                    section=str(metadata.get("section", "Unknown")),
-                    subsection=str(metadata.get("subsection", "")),
-                    evidence_type=str(metadata.get("evidence_type", "full_text")),
-                    parser=str(metadata.get("parser", "pypdf")),
-                    schema_version=str(metadata.get("schema_version", self.index_schema_version)),
-                    raw_text=raw_text,
-                    retrieval_text=document.page_content,
-                    display_text=self._display_text(
-                        str(metadata.get("source_id", "")),
-                        title,
-                        section_path,
-                        page,
-                        page_end,
-                        raw_text,
-                    ),
-                    section_path=path or ("Unknown",),
-                    page_start=int(metadata.get("page_start") or page),
-                    page_end=page_end,
-                    element_type=str(metadata.get("element_type") or "paragraph"),
-                    content_sha256=str(metadata.get("content_sha256") or ""),
-                    retrieval_text_sha256=str(metadata.get("retrieval_text_sha256") or ""),
-                    parent_id=str(metadata.get("parent_id") or ""),
-                    previous_chunk_id=str(metadata.get("previous_chunk_id") or ""),
-                    next_chunk_id=str(metadata.get("next_chunk_id") or ""),
-                    parser_version=str(metadata.get("parser_version") or ""),
-                    chunking_version=str(metadata.get("chunking_version") or ""),
-                    retrieval_template_version=str(metadata.get("retrieval_template_version") or ""),
-                    embedding_model=str(metadata.get("embedding_model") or ""),
-                    document_id=str(metadata.get("document_id") or metadata.get("source_id") or ""),
-                    paper_version=str(metadata.get("paper_version") or ""),
+        selected: list[PaperChunk] = []
+        for fused_rank in fused[:limit]:
+            dense_chunk = dense_by_id.get(fused_rank.chunk_id)
+            lexical_chunk = lexical_by_id.get(fused_rank.chunk_id)
+            chunk = dense_chunk or lexical_chunk
+            if chunk is None:
+                continue
+            selected.append(
+                replace(
+                    chunk,
+                    dense_score=dense_chunk.dense_score if dense_chunk else None,
+                    lexical_score=lexical_chunk.lexical_score if lexical_chunk else None,
+                    hybrid_score=fused_rank.hybrid_score,
+                    selected_anchor_chunk_id=chunk.chunk_id,
                 )
             )
+        self._record_passage_retrieval_diagnostic(
+            query,
+            normalized_ids,
+            dense_chunks=dense_chunks,
+            lexical_chunks=lexical_chunks,
+            selected_chunks=selected,
+            dense_error=dense_error,
+            lexical_error=lexical_error,
+        )
+        return selected
+
+    def _source_chunks_for_expansion(self, source_id: str) -> dict[str, PaperChunk]:
+        chunks: dict[str, PaperChunk] = {}
+        for stored_id, (retrieval_text, metadata) in self._stored_source_records(source_id).items():
+            document = Document(page_content=retrieval_text, metadata=dict(metadata))
+            chunk = self._paper_chunk_from_document(document)
+            chunk_id = chunk.chunk_id or stored_id
+            chunks[chunk_id] = chunk if chunk.chunk_id else replace(chunk, chunk_id=chunk_id)
         return chunks
+
+    def expand_context(
+        self,
+        selected_chunks: Sequence[PaperChunk],
+        *,
+        max_expansion_chars: int | None = None,
+    ) -> list[PaperChunk]:
+        """Add bounded parent/sibling context while retaining each chunk's identity."""
+
+        anchors = [
+            replace(
+                chunk,
+                selected_anchor_chunk_id=chunk.chunk_id,
+                context_relation="selected",
+                is_context_expansion=False,
+            )
+            for chunk in selected_chunks
+        ]
+        if (
+            not self.context_expansion_enabled
+            or not anchors
+            or (self.context_neighbor_window == 0 and self.context_parent_chunk_limit == 0)
+        ):
+            return anchors
+
+        remaining_chars = (
+            self.context_expansion_max_chars if max_expansion_chars is None else max(0, int(max_expansion_chars))
+        )
+        if remaining_chars <= 0:
+            return anchors
+
+        chunks_by_source: dict[str, dict[str, PaperChunk]] = {}
+        for source_id in dict.fromkeys(chunk.source_id for chunk in anchors):
+            try:
+                chunks_by_source[source_id] = self._source_chunks_for_expansion(source_id)
+            except Exception as exc:
+                logger.warning("Context expansion unavailable for %s: %s", source_id, exc)
+                chunks_by_source[source_id] = {}
+
+        selected_ids = {chunk.chunk_id for chunk in anchors}
+        inserted_ids: set[str] = set()
+        emitted_ids: set[str] = set()
+        expanded: list[PaperChunk] = []
+        for anchor in anchors:
+            source_chunks = chunks_by_source.get(anchor.source_id, {})
+            relation_by_id: dict[str, str] = {}
+            candidate_ids: list[str] = []
+
+            previous_id = anchor.previous_chunk_id
+            next_id = anchor.next_chunk_id
+            for _step in range(self.context_neighbor_window):
+                previous = source_chunks.get(previous_id)
+                if (
+                    previous is not None
+                    and previous_id not in relation_by_id
+                    and (not anchor.parent_id or previous.parent_id == anchor.parent_id)
+                ):
+                    relation_by_id[previous_id] = "previous"
+                    candidate_ids.append(previous_id)
+                    previous_id = previous.previous_chunk_id
+                else:
+                    previous_id = ""
+                following = source_chunks.get(next_id)
+                if (
+                    following is not None
+                    and next_id not in relation_by_id
+                    and (not anchor.parent_id or following.parent_id == anchor.parent_id)
+                ):
+                    relation_by_id[next_id] = "next"
+                    candidate_ids.append(next_id)
+                    next_id = following.next_chunk_id
+                else:
+                    next_id = ""
+
+            if anchor.parent_id and self.context_parent_chunk_limit:
+                parent_candidates = [
+                    chunk
+                    for chunk in source_chunks.values()
+                    if chunk.parent_id == anchor.parent_id
+                    and chunk.chunk_id != anchor.chunk_id
+                    and chunk.chunk_id not in relation_by_id
+                    and chunk.chunk_id not in selected_ids
+                    and chunk.chunk_id not in inserted_ids
+                ]
+                parent_candidates.sort(
+                    key=lambda chunk: (
+                        abs(chunk.chunk_index - anchor.chunk_index)
+                        if chunk.chunk_index >= 0 and anchor.chunk_index >= 0
+                        else 1_000_000,
+                        chunk.chunk_index if chunk.chunk_index >= 0 else 1_000_000,
+                        chunk.chunk_id,
+                    )
+                )
+                for chunk in parent_candidates[: self.context_parent_chunk_limit]:
+                    relation_by_id[chunk.chunk_id] = "parent"
+                    candidate_ids.append(chunk.chunk_id)
+
+            accepted: list[PaperChunk] = []
+            for chunk_id in candidate_ids:
+                if chunk_id in selected_ids or chunk_id in inserted_ids:
+                    continue
+                candidate = source_chunks[chunk_id]
+                candidate_chars = len(candidate.raw_text or candidate.text)
+                if candidate_chars > remaining_chars:
+                    continue
+                remaining_chars -= candidate_chars
+                inserted_ids.add(chunk_id)
+                accepted.append(
+                    replace(
+                        candidate,
+                        requirement_ids=anchor.requirement_ids,
+                        selected_anchor_chunk_id=anchor.chunk_id,
+                        context_relation=relation_by_id[chunk_id],
+                        is_context_expansion=True,
+                    )
+                )
+
+            group = [anchor, *accepted]
+            group.sort(
+                key=lambda chunk: (
+                    chunk.chunk_index if chunk.chunk_index >= 0 else anchor.chunk_index,
+                    {"previous": 0, "selected": 1, "next": 2, "parent": 3}.get(chunk.context_relation, 4),
+                    chunk.chunk_id,
+                )
+            )
+            for chunk in group:
+                if chunk.chunk_id in emitted_ids:
+                    continue
+                expanded.append(chunk)
+                emitted_ids.add(chunk.chunk_id)
+        return expanded
+
+    def _bounded_prompt_chunks(self, chunks: Sequence[PaperChunk]) -> list[PaperChunk]:
+        """Apply the existing prompt cap while reserving selected anchors first."""
+
+        ordered = list(chunks)
+        priority = [chunk for chunk in ordered if not chunk.is_context_expansion]
+        priority.extend(chunk for chunk in ordered if chunk.is_context_expansion)
+        bounded_by_id: dict[str, PaperChunk] = {}
+        used_chars = 0
+        reserved_remaining = sum(bool(chunk.requirement_ids) for chunk in priority if not chunk.is_context_expansion)
+        for chunk in priority:
+            if used_chars >= self.max_prompt_chars:
+                break
+            remaining = self.max_prompt_chars - used_chars
+            allocation = remaining
+            if not chunk.is_context_expansion and chunk.requirement_ids and reserved_remaining:
+                allocation = max(1, remaining // reserved_remaining)
+                reserved_remaining -= 1
+            text = chunk.text[:allocation].strip()
+            if not text:
+                continue
+            bounded_by_id[chunk.chunk_id] = replace(chunk, text=text)
+            used_chars += len(text)
+        return [bounded_by_id[chunk.chunk_id] for chunk in ordered if chunk.chunk_id in bounded_by_id]
 
     def _download_pdf(self, url: str, destination: Path) -> None:
         self._validate_pdf_url(url)

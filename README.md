@@ -112,9 +112,18 @@ The system uses a multi-agent approach:
   never research-goal conclusions or hypothesis judgments; prompt/citation
   display is rebuilt from provenance plus raw evidence.
 - Retrieves focused method, result, comparison, and limitation passages before
-  literature synthesis. Each passage carries document/chunk identity, section
-  path, page range, element type, content/retrieval hashes, parser/chunker/
-  template versions, and source provenance.
+  literature synthesis. Dense similarity and dependency-free BM25 search each
+  produce a broader passage ranking; deterministic passage-level reciprocal
+  rank fusion deduplicates them by `chunk_id`. This `hybrid_score` remains
+  distinct from `dense_score`, `lexical_score`, and source-level
+  `provider_rrf_score` diagnostics.
+- Expands selected passages only through their Phase B parent/previous/next
+  relationships, within separate expansion and total prompt budgets. Every
+  neighbor remains an independent evidence passage with its own `chunk_id`,
+  while `selected_anchor_chunk_id` records why it was included.
+- Each passage carries document/chunk identity, section path, page range,
+  element type, content/retrieval hashes, parser/chunker/template versions, and
+  source provenance.
 - Keeps unavailable papers as explicitly limited `abstract_only` evidence;
   one failed PDF does not abort a research cycle.
 - Provides passage-level coverage and strict chunk-grounded audit helpers for
@@ -137,7 +146,8 @@ limits), `evidence_retrieval` (focused-query limits and query-side embedding
 instructions), and `validation` (numeric/entailment checks and per-candidate
 audit context). Changing an index, parser, or chunking version selects a new
 Chroma collection; retrieval-template versions are collection-signature inputs
-as well. Cached PDFs remain reusable for re-indexing.
+as well. Hybrid/BM25 ranking and context-expansion settings do not alter stored
+embeddings, so cached PDFs and existing Phase B indexes remain reusable.
 
 ## ⚙️ Technical Details
 

@@ -811,6 +811,9 @@ class GenerationAgent:
         selected_chunk_ids = {
             str(chunk_id) for item in library_diagnostics for chunk_id in item.get("selected_chunk_ids", ()) if chunk_id
         }
+        expanded_chunk_ids = {
+            str(chunk_id) for item in library_diagnostics for chunk_id in item.get("expanded_chunk_ids", ()) if chunk_id
+        }
         covered_source_ids = (
             {source_id for source_ids in coverage.aspect_source_ids.values() for source_id in source_ids}
             if coverage is not None
@@ -821,6 +824,10 @@ class GenerationAgent:
             acquisition_funnel = {}
         screening_results = tuple(self._abstract_screenings.values())
         context.last_generation_diagnostics["evidence_pipeline"] = library_diagnostics
+        passage_retrieval_diagnostics = getattr(self.paper_library, "last_passage_retrieval_diagnostics", [])
+        context.last_generation_diagnostics["passage_retrieval"] = (
+            list(passage_retrieval_diagnostics) if isinstance(passage_retrieval_diagnostics, (list, tuple)) else []
+        )
         context.last_generation_diagnostics["corrective_history"] = list(corrective_history)
         context.last_generation_diagnostics["evidence_funnel"] = {
             "raw_search_hits": raw_hits,
@@ -837,6 +844,7 @@ class GenerationAgent:
             "acquisition_attempts": len(acquired_sources),
             "committed_sources": len(committed_sources),
             "retrieved_passages": len(selected_chunk_ids),
+            "expanded_passages": len(expanded_chunk_ids),
             "coverage_approved_sources": len(covered_source_ids),
             "generation_consumed_sources": 0,
             "strict_gate_sources": len(documents_for_grading),
@@ -866,9 +874,7 @@ class GenerationAgent:
             normalized_goal,
             flags=re.IGNORECASE,
         )
-        meaningful_clauses = [
-            c.strip() for c in raw_clauses if len(c.strip().split()) >= 2
-        ]
+        meaningful_clauses = [c.strip() for c in raw_clauses if len(c.strip().split()) >= 2]
 
         explicit_requirements: list[EvidenceAspect] = []
         if meaningful_clauses and len(meaningful_clauses) > 1:

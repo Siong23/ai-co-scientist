@@ -227,6 +227,22 @@ paper_library:
   chunk_size_chars: 2400
   chunk_overlap_chars: 300
   top_k_chunks: 12
+  # Dense and BM25 search each retrieve a broader passage pool. Their rankings
+  # are fused with passage-level RRF before cross-query requirement reservation.
+  hybrid_retrieval_enabled: true
+  lexical_retrieval_enabled: true
+  dense_candidate_factor: 3
+  lexical_candidate_factor: 3
+  passage_rrf_k: 60
+  query_rrf_k: 60
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  # Selected chunks may add linked siblings from the same source/parent. Added
+  # context is separately bounded and the total still obeys max_prompt_chars.
+  context_expansion_enabled: true
+  context_neighbor_window: 1
+  context_parent_chunk_limit: 2
+  context_expansion_max_chars: 4000
   max_prompt_chars: 14000
   max_pdf_bytes: 25000000
   download_timeout_seconds: 30

@@ -283,7 +283,7 @@ def reciprocal_rank_fusion(
         key=lambda key: scores[key],
         reverse=True,
     )
-    return [evidence_by_key[key].with_rrf_score(scores[key]) for key in ranked_keys]
+    return [evidence_by_key[key].with_provider_rrf_score(scores[key]) for key in ranked_keys]
 
 
 class ResearchRetriever:
@@ -1612,6 +1612,7 @@ class ResearchRetriever:
                 "doi": evidence.doi,
                 "venue": evidence.venue,
                 "pdf_url": pdf_url,
+                "provider_rrf_score": evidence.provider_rrf_score,
                 "rrf_score": evidence.rrf_score,
                 # Compatibility fields for the current UI and saved runs.
                 "arxiv_id": evidence.metadata.get("arxiv_id") if evidence.source_family == "academic" else None,
@@ -1674,6 +1675,8 @@ def format_documents_for_prompt(
                     "page_end": evidence_ref.get("page_end", evidence_ref.get("page", "")),
                     "element_type": evidence_ref.get("element_type", ""),
                     "evidence_type": evidence_type,
+                    "selected_anchor_chunk_id": evidence_ref.get("selected_anchor_chunk_id", ""),
+                    "context_relation": evidence_ref.get("context_relation", ""),
                 }
                 serialized_attributes = " ".join(
                     f'{key}="{value}"' for key, value in attributes.items() if value not in (None, "")
@@ -1852,6 +1855,7 @@ def serialize_documents(
             "arxiv_url": document.metadata.get("arxiv_url"),
             "pdf_url": document.metadata.get("pdf_url"),
             "source": document.metadata.get("source"),
+            "provider_rrf_score": document.metadata.get("provider_rrf_score"),
             "rrf_score": document.metadata.get("rrf_score"),
             "abstract_screening": document.metadata.get("abstract_screening"),
             "abstract_screen_decision": document.metadata.get("abstract_screen_decision"),
@@ -1877,6 +1881,8 @@ def serialize_documents(
             "acquisition_attempted": document.metadata.get("acquisition_attempted", False),
             "acquisition_result": document.metadata.get("acquisition_result"),
             "selected_chunk_ids": document.metadata.get("selected_chunk_ids", []),
+            "expanded_chunk_ids": document.metadata.get("expanded_chunk_ids", []),
+            "context_chunk_ids": document.metadata.get("context_chunk_ids", []),
             "strict_gate_retained": document.metadata.get("strict_gate_retained"),
             "strict_gate_rejection_reason": document.metadata.get("strict_gate_rejection_reason"),
             "evidence_status": document.metadata.get("evidence_status", "abstract_only"),
