@@ -149,6 +149,7 @@ def _parse_reflection_response(response: str, retrieved_sources: List[dict]) -> 
         "strengths": _parse_string_list(parsed_data.get("strengths", [])),
         "weaknesses": _parse_string_list(parsed_data.get("weaknesses", [])),
         "sub_claims": _parse_string_list(parsed_data.get("sub_claims", [])),
+        "proposed_tests": _parse_string_list(parsed_data.get("proposed_tests", [])),
         "comment": str(parsed_data.get("comment", "No comment provided.")),
         "references": [],
     }
@@ -184,7 +185,7 @@ def call_llm_for_reflection(
     retrieved_sources = list(getattr(hypothesis, "evidence_sources", []) or [])
     if retrieved_sources:
         formatted_sources = "\n\n".join(
-            f"Source ID: {src.get('source_id', 'Unknown')}\nTitle: {src.get('title', 'Untitled')}\nAbstract: {src.get('abstract', 'No abstract')}"
+            f"Source ID: {src.get('source_id', 'Unknown')}\nEvidence: {_evidence_text(src)}"
             for src in retrieved_sources
             if isinstance(src, dict)
         )
@@ -209,12 +210,19 @@ def call_llm_for_reflection(
         "3. feasibility_score (1-10): Can this be experimentally tested with current techniques? (1=Infeasible, 10=Highly feasible)\n"
         "4. plausibility_score (1-10): How theoretically sound and plausible is this hypothesis?\n"
         "5. testability_score (1-10): How clearly testable are the claims in this hypothesis?\n"
-        "6. evidence_quality_score (1-10): How well supported is this hypothesis by the provided sources?\n"
+        "6. evidence_quality_score (1-10): How well do the provided sources support the factual premises? "
+        "A novel prediction need not have been demonstrated already.\n"
         "7. expected_research_value_score (1-10): What is the potential impact and value of research on this hypothesis?\n\n"
         "Additionally, provide:\n"
         "- strengths: Array of concise, specific strengths of this hypothesis.\n"
         "- weaknesses: Array of concise, specific weaknesses of this hypothesis.\n"
-        "- sub_claims: Array containing the smallest set of independently verifiable claims already present in the hypothesis.\n"
+        "- sub_claims: Array of factual premises asserted as established in the hypothesis or rationale. "
+        "Exclude proposed mechanisms, experimental predictions, and success criteria.\n"
+        "- proposed_tests: Array of proposed mechanisms, predictions, and experimental success criteria, "
+        "preserving their tentative wording. These are research questions, not established results. "
+        "Assess their plausibility, feasibility, and testability without demanding prior proof. "
+        "Do not move unsupported assertions of existing facts into this array. "
+        "Continue to penalize unjustified numerical constraints and infeasible experimental designs.\n"
         "- comment: Concise summary critique explaining the ratings and suggestions.\n"
         "- references: Array of exact Source IDs from the provided sources that support this hypothesis.\n\n"
         "STRICT CITATION RULE: In the 'references' array, return ONLY exact Source IDs from the 'Verified Retrieved Sources' list above. "
@@ -232,6 +240,7 @@ def call_llm_for_reflection(
         '  "strengths": ["concise strength"],\n'
         '  "weaknesses": ["concise weakness"],\n'
         '  "sub_claims": ["independently verifiable claim"],\n'
+        '  "proposed_tests": ["prediction to test experimentally"],\n'
         '  "comment": "Concise summary critique explaining the ratings and suggestions.",\n'
         '  "references": ["exact Source ID from the provided list above"]\n'
         "}"
@@ -283,6 +292,7 @@ def call_llm_for_reflection(
         '  "strengths": ["concise strength"],\n'
         '  "weaknesses": ["concise weakness"],\n'
         '  "sub_claims": ["independently verifiable claim"],\n'
+        '  "proposed_tests": ["prediction to test experimentally"],\n'
         '  "comment": "Concise summary critique explaining the ratings and suggestions.",\n'
         '  "references": ["exact Source ID from the provided list above"]\n'
         "}"
@@ -526,7 +536,13 @@ def _claim_terms(claim: str) -> set[str]:
 
 
 def _evidence_text(source: dict[str, Any]) -> str:
-    return " ".join(str(source.get(field, "") or "") for field in ("title", "summary", "abstract", "content", "text"))
+    text = " ".join(str(source.get(field, "") or "") for field in ("title", "summary", "abstract", "content", "text"))
+    passages = [
+        str(ref.get("text") or "")
+        for ref in (source.get("evidence_refs") or [])
+        if isinstance(ref, dict) and ref.get("source_id", source.get("source_id")) == source.get("source_id")
+    ]
+    return " ".join([text, *passages]).strip()
 
 
 def _rank_claim_evidence(
@@ -734,6 +750,7 @@ def evaluate_claims(
     model: str | None = None,
     claims: list[str] | None = None,
     sub_claims: list[str] | None = None,
+    proposed_tests: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assess every sub-claim and calculate the report's overall confidence."""
 
@@ -741,7 +758,7 @@ def evaluate_claims(
     extracted_claims = _parse_string_list(claims) if claims is not None else []
     if claims is None and sub_claims is not None:
         extracted_claims = _parse_string_list(sub_claims) or [_hypothesis_claim_text(hypothesis)]
-    if not extracted_claims:
+    if not extracted_claims and not _parse_string_list(proposed_tests):
         extracted_claims = function_to_extract_claim(hypothesis, model=model)
     for claim in extracted_claims:
         supporting_evidence = function_to_get_supporting_evidence(hypothesis, claim)

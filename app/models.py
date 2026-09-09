@@ -278,6 +278,7 @@ class ReflectionReport(BaseModel):
     recommendation: str = "UNREVIEWED"
 
     claims: List[ClaimAssessment] = []
+    proposed_tests: List[str] = Field(default_factory=list)
     overall_confidence: float = Field(default=1.0, ge=1.0, le=10.0)
 
 
