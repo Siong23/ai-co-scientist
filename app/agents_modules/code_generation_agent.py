@@ -523,24 +523,21 @@ IMPORTANT RULES:
 2. DATASET
 ============================================================
 
-7. The current dataset is 5G-NIDD.
+7. The experiment dataset is specified in the experiment specification.
 
-8. Treat 5G-NIDD as an offline/local dataset.
+8. Do not replace the specified dataset with another dataset.
 
-9. The dataset path may be provided through the DATASET_PATH environment
-   variable.
+9. The dataset path may be provided through the DATASET_PATH environment variable.
 
 10. Prefer DATASET_PATH when it is available.
 
-11. Do not depend on a machine-specific absolute path as the only dataset
-    location.
+11. Do not depend on a machine-specific absolute path as the only dataset location.
 
 12. Validate that the dataset exists before loading it.
 
 13. Raise a clear and informative error if the dataset cannot be found.
 
-14. Automatically identify and validate the target column according to the
-    experiment specification.
+14. Automatically identify and validate the target column according to the experiment specification.
 
 ============================================================
 3. DATA PREPROCESSING
@@ -2003,6 +2000,8 @@ Return ONLY the complete corrected Python source code.
         experiment_specification: Optional[
             Dict[str, Any]
         ] = None,
+        dataset_name: str = "5G-NIDD",
+        dataset_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate experiment code directly from a Hypothesis and
@@ -2026,8 +2025,8 @@ Return ONLY the complete corrected Python source code.
 
             experiment_specification = {
                 "dataset": {
-                    "name": "5G-NIDD",
-                    "path": None,
+                    "name": dataset_name,
+                    "path": dataset_path,
                     "task": (
                         "5G network intrusion "
                         "detection classification"
