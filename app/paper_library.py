@@ -833,7 +833,11 @@ class ChromaPaperLibrary:
             query, requirement_id = spec
             if requirement_id:
                 restricted_ids = list(lane_sources.get(requirement_id, ()))
-                return self.search(query, restricted_ids, top_k) if restricted_ids else []
+                # Fall back to all indexed sources when the lane has no
+                # committed papers yet.  Initial retrieval may not tag
+                # documents with requirement IDs until corrective rounds.
+                search_ids = restricted_ids if restricted_ids else list(source_ids)
+                return self.search(query, search_ids, top_k) if search_ids else []
             return self.search(query, source_ids, top_k)
 
         workers = min(self.retrieval_workers, len(query_specs))

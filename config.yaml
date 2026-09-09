@@ -12,11 +12,11 @@ lmstudio_base_url: "http://127.0.0.1:1234/v1"
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
 
-llm_model: "qwen/qwen3.8-27b"
+llm_model: "qwen/qwen3.5-9b"
 # Dedicated model for generating executable PyTorch experiments.
-code_generation_model: "qwen/qwen3.8-27b"
+code_generation_model: "qwen/qwen3.5-9b"
 # query_rewrite_model: "qwen/qwen3.6-35b-a3b"
-query_rewrite_model: "qwen/qwen3.8-27b"
+query_rewrite_model: "qwen/qwen3.5-9b"
 
 
 # Number of hypotheses to generate
@@ -235,6 +235,9 @@ paper_library:
     - "pdfs.semanticscholar.org"
     - "link.springer.com"
     - "api.springernature.com"
+    # Nature Research journals use www.nature.com for PDF downloads.
+    - "www.nature.com"
+    - "nature.com"
     # Direct scholarly PDFs observed through supplementary web search.
     # Keep this as an explicit host allowlist so web results cannot trigger
     # downloads from arbitrary or internal network locations.

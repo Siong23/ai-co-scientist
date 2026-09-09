@@ -380,6 +380,10 @@ Constraints:
 Evolution strategy: {strategy}
 Strategy instruction: {_STRATEGY_INSTRUCTIONS[strategy]}
 
+Maintain strict alignment with the research goal: do not drift into secondary metrics or assume unrequested paradigms (e.g. generic AI does not imply an LLM).
+If multi-agent coordination is requested, specify concrete interaction or communication mechanisms rather than comparing algorithms side-by-side.
+If latency guarantees or real-time control are claimed, specify the supporting operational mechanism (e.g. asynchrony, timeouts, or hierarchical decoupling).
+
 Top-ranked parent hypotheses and their existing reviews:
 {json.dumps(parent_payload, indent=2, ensure_ascii=False, default=str)}
 

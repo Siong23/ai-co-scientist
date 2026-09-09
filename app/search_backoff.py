@@ -48,7 +48,7 @@ def guarded_search(source, search, *, provider_name=""):
             delay = 300
         elif status in (429, 503) or kind == "rate_limited":
             delay = 60
-        elif kind in ("timeout", "provider_error") and status != 404:
+        elif kind in ("timeout", "provider_error") and status not in (400, 404):
             delay = 30
         state.retry_at = time.monotonic() + delay
         return results, False
