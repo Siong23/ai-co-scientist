@@ -591,7 +591,10 @@ IMPORTANT RULES:
 
 34. Features such as attack labels, attack categories, attack tools,
     outcome indicators, or post-event annotations may contain target
-    information.
+    information. Match them by case-insensitive substring, so that a
+    column named "Attack Type" or "Attack Tool" is caught by the term
+    "attack". Never narrow such a match with a second exact-name test:
+    once a column matches, exclude it instead of reconsidering it.
 
 35. If a feature is clearly derived from the target or would not be
     available at prediction time in a real-world intrusion-detection
