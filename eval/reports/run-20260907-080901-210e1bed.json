@@ -1,0 +1,462 @@
+{
+  "run_id": "run-20260907-080901-210e1bed",
+  "research_goal": "Develop a closed-loop multi-agent AI framework to dynamically allocate 5G slice bandwidth during traffic spikes",
+  "goal_matches": true,
+  "hypothesis_source_step": "evolution",
+  "final_hypothesis_count": 3,
+  "selected_hypothesis": {
+    "audit_report": {},
+    "audit_score": null,
+    "audit_verdict": null,
+    "deactivation_reason": null,
+    "elo_score": 1200.0,
+    "evidence_refs": [],
+    "evidence_source_ids": [
+      "arXiv:2605.03345v1"
+    ],
+    "evidence_sources": [
+      {
+        "abstract": "With the increasing diversity of 5G service types and the intensifying dynamic fluctuations of network load, achieve differentiated quality of service assurance in a network slicing environment has become a key issue in resource management. To address this problem, this paper proposes a deep reinforcement learning mechanism for 5G network slicing quality of service assurance based on the traditional proximal policy optimization actor-critic framework. First, the slicing resource allocation is modeled as a constrained Markov decision process, jointly considering the collaborative optimization of bandwidth, computing, and wireless resources. Meanwhile, a graph attention network and bidirectional long short-term memory are introduced to extract topological correlations and temporal service features, combined with an adaptive Lagrangian penalty and dynamic reward shaping mechanism, to comprehensively optimize delay, throughput, reliability, fairness, and slice isolation performance. Experimental results show that the proposed method outperforms existing baseline models in terms of quality of service satisfaction rate, delay control, resource utilization, and convergence stability.",
+        "acquisition_attempted": false,
+        "acquisition_result": "cached_committed",
+        "arxiv_id": "2605.03345v1",
+        "arxiv_url": "https://arxiv.org/abs/2605.03345v1",
+        "author": null,
+        "authors": [
+          "Qingyang Li"
+        ],
+        "canonical_url": "https://arxiv.org/abs/2605.03345v1",
+        "chunk_count": null,
+        "chunk_id": null,
+        "chunk_index": null,
+        "chunk_rerank_score": null,
+        "content": "",
+        "content_extracted": null,
+        "document_rerank_score": null,
+        "document_type": "academic_paper",
+        "doi": null,
+        "domain": "arxiv.org",
+        "evidence_mode": "full_text",
+        "evidence_refs": [
+          {
+            "chunk_id": "abstract:arXiv:2605.03345v1",
+            "evidence_type": "abstract_only",
+            "page": null,
+            "section": "Abstract",
+            "source_id": "arXiv:2605.03345v1"
+          },
+          {
+            "chunk_id": "53744ee2ed06313d99df10474809dd6c244d105ad06178f1864475872b712559",
+            "evidence_type": "full_text",
+            "page": 1,
+            "parser": "pypdf",
+            "requirement_ids": [
+              "slice_allocation"
+            ],
+            "retrieval_score": 0.40411776304244995,
+            "schema_version": "2",
+            "section": "Unknown",
+            "source_id": "arXiv:2605.03345v1",
+            "subsection": "",
+            "text": "domains,\nwhile different slices compete for limited capacity and may\ninterfere with each other if isolation is insufficient.\nII. RELATED WORK\nRecent studies on 5G network slicing have first established\nthe broader research landscape from the perspectives of\nadmission control, vertical applications, and intelligent\norchestration.\nKhani et al. [8] presented a survey on slice admission\ncontrol in 5G cloud radio access networks and argued that\nconventional SAC methods are insufficient for highly dynamic\nand heterogeneous wireless environments. In parallel, Hamdi et\nal. [9] provided a comprehensive survey of learning-based\nnetwork slicing techniques for the Internet of Vehicles (IoV),\ncovering terrestrial, aerial, and marine deployment domains,\nV2X datasets, implementation tools, and future opportunities\nfor machine learning-enabled slicing in vehicular scenarios.\nXXX-X-XXXX-XXXX-X/XX/$XX.00 ©20XX IEEE"
+          },
+          {
+            "chunk_id": "1f3c7ed3d0898fc6c2a41e3f7567df3913488cdbcf64588b5cafc439571be9ec",
+            "evidence_type": "full_text",
+            "page": 1,
+            "parser": "pypdf",
+            "requirement_ids": [],
+            "retrieval_score": 0.38662219047546387,
+            "schema_version": "2",
+            "section": "Unknown",
+            "source_id": "arXiv:2605.03345v1",
+            "subsection": "",
+            "text": "QoS Assurance Mechanism for 5G Network Slicing\nBased on the Deep Reinforcement Learning PPO\nAlgorithm\nQingyang Li*\nDepartment of Computer Science\nUniversity of California\nLos Angeles, USA\nqyli63@g.ucla.edu\nAbstract—With the increasing diversity of 5G service types\nand the intensifying dynamic fluctuations of network load,\nachieve differentiated quality of service assurance in a network\nslicing environment has become a key issue in resource\nmanagement. To address this problem, this paper proposes a\ndeep reinforcement learning mechanism for 5G network slicing\nquality of service assurance based on the traditional proximal\npolicy optimization actor–critic framework. First, the slicing\nresource allocation is modeled as a constrained Markov decision\nprocess, jointly considering the collaborative optimization of\nbandwidth, computing, and wireless resources. Meanwhile, a\ngraph attention network and bidirectional long short-term\nmemory are introduced to extract topological correlations and\ntemporal service features, combined with an adaptive\nLagrangian penalty and dynamic reward shaping mechanism, to\ncomprehensively optimize delay, throughput, reliability, fairness,\nand slice isolation performance. Experimental results show that\nthe proposed method outperforms existing baseline models in\nterms of quality of service satisfaction rate, delay control,\nresource utilization, and convergence stability.\nKeywords—5G Network Slicing, QoS Assurance, Deep\nReinforcement Learning, Proximal Policy Optimization, Resource\nAllocation\nI. INTRODUCTION\nThe transition from conventional mobile communication\nsystems to 5G has shifted network design from best-effort\nconnectivity toward service-oriented capability provisioning\n[1]. In this context, network slicing has emerged as one of the\ncore enabling technologies of 5G, because it allows multiple\nlogical networks with different performance characteristics to\ncoexist on a shared physical infrastructure [2]. According to\n3GPP, a network slice is a logical network that provides\nspecific network capabilities and network characteristics for\ndifferent service requirements, which makes it particularly\nsuitable for vertical applications such as enhanced broadband\naccess, industrial automation, and massive Internet of Things\nconnectivity. As a result, how to guarantee differentiated\nQuality of Service (QoS) for multiple slices under shared and"
+          },
+          {
+            "chunk_id": "5f93c041e15390d4f71981854f8e4484d58778bd30fae07611b27483f0285a31",
+            "evidence_type": "full_text",
+            "page": 1,
+            "parser": "pypdf",
+            "requirement_ids": [],
+            "retrieval_score": 0.45826321840286255,
+            "schema_version": "2",
+            "section": "Unknown",
+            "source_id": "arXiv:2605.03345v1",
+            "subsection": "",
+            "text": "rent service requirements, which makes it particularly\nsuitable for vertical applications such as enhanced broadband\naccess, industrial automation, and massive Internet of Things\nconnectivity. As a result, how to guarantee differentiated\nQuality of Service (QoS) for multiple slices under shared and\ntime-varying resources has become a central issue in 5G\nnetwork management and orchestration.\nFrom the perspective of service requirements, 5G is\nexpected to support three representative usage scenarios:\nenhanced Mobile Broadband (eMBB), Ultra-Reliable and\nLow-Latency Communications (URLLC), and massive\nMachine-Type Communications (mMTC) [3]. These scenarios\ndiffer significantly in user-experienced data rate, latency,\nreliability, mobility support, and connection density. Because\nthese service categories impose fundamentally different QoS\nobjectives, a uniform or static resource allocation strategy can\nhardly satisfy all slice demands simultaneously in practical 5G\nenvironments [4].\nThe QoS problem in 5G network slicing is further\ncomplicated by the architecture of the 5G system itself [5]. In\nthe 5G core, QoS is organized around the concept of QoS\nFlows, and flow-level markings and parameters are used to\nmap service requirements to differentiated forwarding and\nscheduling behaviors across the network [6]. This means that\nQoS assurance is not merely a matter of reserving bandwidth.\nInstead, it requires coordinated control over multiple\ndimensions. Consequently, slice-level QoS assurance must be\ntreated as a cross-layer and system-level optimization problem\nrather than a single-domain scheduling task.\nAlthough network slicing provides a flexible framework for\nservice customization, achieving stable QoS guarantees in real\ndeployments remains difficult [7]. On the one hand, wireless\nchannels, user mobility, traffic bursts, and session arrivals\ncontinuously change the network state, which makes optimal\nresource decisions highly dynamic and time-dependent. On the\nother hand, the resources consumed by slices are tightly\ncoupled across radio access, transport, and core/cloud domains,\nwhile different slices compete for limited capacity and may\ninterfere with each other if isolation is insufficient.\nII. RELATED WORK\nRecent studies on 5G network slicing have first established\nthe broader research landscape from the perspectives of\nadmission control, vertical applications,"
+          },
+          {
+            "chunk_id": "f0204a47e368cc09bbfa94786863078e05b4ddf54268d078ca470a9d5ae65c3f",
+            "evidence_type": "full_text",
+            "page": 4,
+            "parser": "pypdf",
+            "requirement_ids": [],
+            "retrieval_score": 0.3884952664375305,
+            "schema_version": "2",
+            "section": "Unknown",
+            "source_id": "arXiv:2605.03345v1",
+            "subsection": "",
+            "text": "Wajid, et al. \"A survey on beyond 5g network slicing for smart\ncities applications.\" IEEE Communications Surveys & Tutorials 27.1\n(2024): 595-628.\n8.Khani, Mohsen, et al. \"Slice admission control in 5G cloud radio access\nnetwork using deep reinforcement learning: A survey.\" International\nJournal of Communication Systems 37.13 (2024): e5857.\n9.Hamdi, Wafa, et al. \"Network slicing-based learning techniques for IoV\nin 5G and beyond networks.\" IEEE Communications Surveys &\nTutorials 26.3 (2024): 1989-2047.\n10.Abba Ari, Ado Adamou, et al. \"IoT-5G and B5G/6G resource allocation\nand network slicing orchestration using learning algorithms.\" IET\nNetworks 14.1 (2025): e70002.\n11.Cheng, Sheng-Tzong, et al. \"On self-adaptive 5G network slice QoS\nmanagement system: a deep reinforcement learning approach.\" Wireless\nNetworks 29.3 (2023): 1269-1279.\n12.Raeisi, Mostafa, and Abu B. Sesay. \"Power control of 5G-connected\nvehicular network using PPO-based deep reinforcement learning\nalgorithm.\" IEEE Access 12 (2024): 96387-96403.\n13.Yan, Peihao, et al. \"Near-Real-Time Resource Slicing for QoS\nOptimization in 5G O-RAN Using Deep Reinforcement\nLearning.\" IEEE Transactions on Networking 34 (2025): 1596-1611.\n14.Yağcıoğlu, Mert. \"Enhanced Deep Reinforcement Learning-Driven\nAdaptive Network Slicing and Resource Allocation for URLLC in 5G\nNetworks.\" Journal of Network and Systems Management 34.1 (2026):\n33.\n15.Huang, Renlang, et al. \"Toward scalable and efficient hierarchical deep\nreinforcement learning for 5G RAN slicing.\" IEEE Transactions on\nGreen Communications and Networking 7.4 (2023): 2153-2162.\nTime\nSlot\nRadio\nUtilization\n(%)\nBandwidth\nUtilization\n(%)\nComputing\nUtilization\n(%)\nOverall\nUtilization (%)\nT1 82.46 79.38 76.25 79.36\nT2 84.13 81.02 78.47 81.21\nT3 86.75 83.56 80.14 83.48\nT4 88.24 85.33 82.68 85.42\nT5 89.67 86.91 84.05 86.88\nT6 91.12 88.47 85.94 88.51\nT7 92.38 89.75 87.21 89.78\nT8 93.64 91.08 88.56 91.09\nT9 94.27 92.14 89.83 92.08\nT10 95.03 93.26 90.71 93.00"
+          },
+          {
+            "chunk_id": "f2ca9e2c867e6840f1d06b61be52f671fd25b9793b5a4a98ccc34f8d9c5af2c6",
+            "evidence_type": "full_text",
+            "page": 2,
+            "parser": "pypdf",
+            "requirement_ids": [],
+            "retrieval_score": 0.4066265821456909,
+            "schema_version": "2",
+            "section": "Unknown",
+            "source_id": "arXiv:2605.03345v1",
+            "subsection": "",
+            "text": "d\neffective slicing policies, outperforming both random and\nADMM-based benchmarks in terms of network utility and QoS\nassurance, while also exhibiting stronger robustness under\nvarying traffic conditions and network congestion.\nIII. METHODOLOGIES\nA.Constrained Markov Decision Process\nTo ensure that slice-level QoS guarantees are explicitly\nenforced rather than treated as soft heuristics, the proposed\nmechanism formulates 5G slicing control as a constrained\nsequential decision problem. The objective in Equation 1 is to\nmaximize long-term service utility while keeping resource\nconsumption and QoS violations within admissible limits.\nwhere denotes the state space, the action space, and the state-\ntransition kernel. The term is the immediate reward, is the -th\nconstraint cost, is the discount factor, and is the admissible\nbound of the corresponding constraint.\nThe first modeling step is to jointly describe radio,\nbandwidth, and computing resources, because end-to-end QoS\nin network slicing cannot be guaranteed by optimizing only\none resource domain. For this reason, the slice-level allocation\nis defined as the aggregation of user-level decisions across\nmultiple resource dimensions, shown in Equation 2.\nwhere is the amount of resource allocated to user in slice at\nslot , while is the corresponding slice-level budget. The\nsymbols , , and represent radio, bandwidth, and computing\nresources, respectively. Function is the active user set of slice .\nA bottleneck-based service model is then introduced in\nEquation 3 to characterize the fact that end-to-end throughput\nis jointly limited by wireless transmission, backhaul capacity,\nand computation availability. This is essential because a large\nwireless rate alone does not imply a high effective service rate\nwhen transport or computing becomes the bottleneck.\nwhere is the effective end-to-end service rate of user , and is\nthe achievable wireless transmission rate. The variable denotes\nthe allocated bandwidth resource, is the assigned computing\nresource, and is the per-bit computing demand of the\ncorresponding service.\nTo capture latency-sensitive slice behavior, the delay model\nmust include both queueing and service effects. A compact\nend-to-end latency expression is therefore adopted as Equation\n4.\nwhere is the service rate in resource domain , is the traffic\narrival rate, and is the packet or task size. The constant is"
+          },
+          {
+            "chunk_id": "0a68d4229b04f6a8deff79af92a9f28d2d0796d3246495ab5d6017fcb21a1e9c",
+            "evidence_type": "full_text",
+            "page": 2,
+            "parser": "pypdf",
+            "requirement_ids": [],
+            "retrieval_score": 0.37468934059143066,
+            "schema_version": "2",
+            "section": "Unknown",
+            "source_id": "arXiv:2605.03345v1",
+            "subsection": "",
+            "text": "From a broader systems perspective, Abba Ari et al. [10]\nexamined the evolution from IoT-5G to B5G/6G and reviewed\nhow learning algorithms are being used for resource allocation\nand network slicing orchestration in next-generation intelligent\nnetworks.\nBeyond survey work, several studies have proposed DRL-\ndriven control mechanisms for specific QoS-sensitive network\nfunctions. Cheng et al. [11] developed a self-adaptive QoS\nmanagement system for the 5G core network, in which user\nbehavior and service-level agreements are exploited to generate\ndynamic QoS marking rules, and deep reinforcement learning\nis used to adapt these rules over time as traffic behavior\nevolves. In another line of work, Raeisi and Sesay [12]\ninvestigated uplink power control for 5G-connected vehicular\nnetworks in mmWave bands between connected autonomous\nvehicles and roadside units. Their method adopts a proximal\npolicy optimization (PPO)-based modified actor-critic\narchitecture with a deep neural network to minimize\ntransmission power and co-channel interference while meeting\ntarget uplink capacity, and the authors reported better\nperformance than 3GPP-based power control in dynamic road\nenvironments.\nYan et al. [13] proposed xSlice, in which QoS optimization\nis formulated as a regret-minimization problem subject to\nthroughput, latency, and reliability requirements. Their actor-\ncritic framework further integrates a graph convolutional\nnetwork to encode RAN information and accommodate a\ndynamic number of traffic sessions. In a URLLC-oriented\nscenario, Yağcıoğlu [14] introduced the DQN-ASRA\nframework, which unifies slice prediction and dynamic\nresource allocation into a single decision-making process for\npredictive network slicing.\nHuang et al. [15] investigated the problem of scalable and\nefficient resource allocation for 5G RAN slicing and proposed\na hierarchical deep reinforcement learning framework to\naddress the growing complexity of heterogeneous slice services\nand large-scale user populations. Experimental results showed\nthat the proposed framework was able to learn stable and\neffective slicing policies, outperforming both random and\nADMM-based benchmarks in terms of network utility and QoS\nassurance, while also exhibiting stronger robustness under\nvarying traffic conditions and network congestion.\nIII. METHODOLOGIES\nA.Constrained Markov Decision Process\nTo ensure that"
+          },
+          {
+            "chunk_id": "1e29e8675dbeb18d954b2430f4b6047d04a878eb937d459ba10010b8bf70a3d8",
+            "evidence_type": "full_text",
+            "page": 4,
+            "parser": "pypdf",
+            "requirement_ids": [],
+            "retrieval_score": 0.3894132375717163,
+            "schema_version": "2",
+            "section": "Unknown",
+            "source_id": "arXiv:2605.03345v1",
+            "subsection": "",
+            "text": "It can be observed that, as the traffic load gradually\nincreases from low to very high levels, the utilization of all\nthree resource types shows an overall upward trend, indicating\nthat the system is able to adapt its resource allocation strategy\naccording to changing service demands.\nV. CONCLUSION\nIn conclusion, this study addresses the QoS assurance\nproblem in 5G network slicing by developing a hierarchical\nmulti-objective optimization mechanism based on deep\nreinforcement learning and PPO, achieving coordinated\nimprovements in latency, throughput, reliability, fairness, and\nresource utilization. In future work, the framework can be\nfurther extended toward 6G-oriented scenarios by integrating\nfederated learning, digital twins, and cross-domain\ncollaborative control to enhance real-time adaptability,\ngeneralization capability, and practical deployability.\n\nNotice: This work has been submitted to IEEE MLISE 2026\nfor possible publication. Copyright may be transferred without\nnotice.\nREFERENCES\n1.Serôdio, Carlos, et al. \"The 6G ecosystem as support for IoE and private\nnetworks: Vision, requirements, and challenges.\" Future Internet 15.11\n(2023): 348.\n2.Rafique, Wajid, et al. \"A survey on beyond 5g network slicing for smart\ncities applications.\" IEEE Communications Surveys & Tutorials 27.1\n(2024): 595-628.\n3.Sefati, Seyed Salar, and Simona Halunga. \"Ultra-reliability and low-\nlatency communications on the internet of things based on 5G network:\nliterature review, classification, and future research view.\""
+          }
+        ],
+        "evidence_requirement_id": "slice_allocation",
+        "evidence_status": "full_text",
+        "freshness": "year",
+        "full_text_available": true,
+        "full_text_chunks_used": 7,
+        "full_text_indexed": true,
+        "index_status": "COMMITTED",
+        "index_truncated": false,
+        "language": null,
+        "page_type": null,
+        "parent_source_id": null,
+        "pdf_url": "https://arxiv.org/pdf/2605.03345v1",
+        "planned_source_type": "academic",
+        "preferred_domains": [
+          "ieeexplore.ieee.org",
+          "sciencedirect.com"
+        ],
+        "primary_category": "cs.NI",
+        "provider": "arxiv",
+        "published": "2026-05-05T04:03:49+00:00",
+        "published_at": "2026-05-05T04:03:49+00:00",
+        "purpose": "Retrieve evidence on standard 5G slice management and dynamic bandwidth allocation mechanisms during traffic spikes.",
+        "query_contexts": [
+          {
+            "evidence_requirement_id": "slice_allocation",
+            "freshness": "year",
+            "hypothesis_id": null,
+            "preferred_domains": [
+              "ieeexplore.ieee.org",
+              "sciencedirect.com"
+            ],
+            "purpose": "Retrieve evidence on standard 5G slice management and dynamic bandwidth allocation mechanisms during traffic spikes.",
+            "query": "5G network slicing bandwidth allocation dynamic traffic spike management",
+            "search_intent": "goal",
+            "source_type": "academic",
+            "sub_question": "What are the standard 5G slice bandwidth allocation mechanisms?"
+          }
+        ],
+        "rerank_score": 0.6073254960222687,
+        "reserved_requirement_ids": [
+          "slice_allocation"
+        ],
+        "retrieval_query": "5G network slicing bandwidth allocation dynamic traffic spike management",
+        "rrf_score": 0.015625,
+        "search_query": "5G network slicing bandwidth allocation dynamic traffic spike management",
+        "search_score": null,
+        "selected_chunk_ids": [
+          "53744ee2ed06313d99df10474809dd6c244d105ad06178f1864475872b712559",
+          "1f3c7ed3d0898fc6c2a41e3f7567df3913488cdbcf64588b5cafc439571be9ec",
+          "5f93c041e15390d4f71981854f8e4484d58778bd30fae07611b27483f0285a31",
+          "f0204a47e368cc09bbfa94786863078e05b4ddf54268d078ca470a9d5ae65c3f",
+          "f2ca9e2c867e6840f1d06b61be52f671fd25b9793b5a4a98ccc34f8d9c5af2c6",
+          "0a68d4229b04f6a8deff79af92a9f28d2d0796d3246495ab5d6017fcb21a1e9c",
+          "1e29e8675dbeb18d954b2430f4b6047d04a878eb937d459ba10010b8bf70a3d8"
+        ],
+        "source": "arxiv",
+        "source_authority": null,
+        "source_family": "academic",
+        "source_id": "arXiv:2605.03345v1",
+        "source_type": "academic",
+        "strict_gate_rejection_reason": "retained_committed_full_text_passage",
+        "strict_gate_retained": true,
+        "sub_question": "What are the standard 5G slice bandwidth allocation mechanisms?",
+        "summary": "With the increasing diversity of 5G service types and the intensifying dynamic fluctuations of network load, achieve differentiated quality of service assurance in a network slicing environment has become a key issue in resource management. To address this problem, this paper proposes a deep reinforcement learning mechanism for 5G network slicing quality of service assurance based on the traditional proximal policy optimization actor-critic framework. First, the slicing resource allocation is modeled as a constrained Markov decision process, jointly considering the collaborative optimization of bandwidth, computing, and wireless resources. Meanwhile, a graph attention network and bidirectional long short-term memory are introduced to extract topological correlations and temporal service features, combined with an adaptive Lagrangian penalty and dynamic reward shaping mechanism, to comprehensively optimize delay, throughput, reliability, fairness, and slice isolation performance. Experimental results show that the proposed method outperforms existing baseline models in terms of quality of service satisfaction rate, delay control, resource utilization, and convergence stability.",
+        "title": "QoS Assurance Mechanism for 5G Network Slicing Based on the Deep Reinforcement Learning PPO Algorithm",
+        "updated_at": "2026-05-05T04:03:49+00:00",
+        "url": "https://arxiv.org/abs/2605.03345v1",
+        "venue": "cs.NI"
+      }
+    ],
+    "evolution_strategy": "combination",
+    "feasibility_review": null,
+    "id": "E4548",
+    "is_active": true,
+    "novelty_review": null,
+    "parent_ids": [
+      "G4759",
+      "G4429"
+    ],
+    "references": [],
+    "reflection_report": null,
+    "review_comments": [
+      "The hypothesis is strong, well-structured, and highly testable. It proposes a specific architectural innovation (dual-mode with GAT-Lagrangian sync) that logically addresses the tension between scalability and global optimality. The alignment with the goal is excellent. The novelty is moderate as it combines known techniques (PPO, GAT, Lagrangian methods, spike detection) in a new configuration. Feasibility is high as it relies on standard RL and network simulation tools. The main weakness is the reliance on a single source that describes a centralized system, meaning the specific advantages of the proposed distributed architecture must be justified through the theoretical rationale rather than direct empirical evidence from the provided text. The quantitative targets make it rigorously falsifiable."
+    ],
+    "review_reference_ids": [],
+    "text": "Hypothesis: A closed-loop 5G slicing framework that combines local PPO agents with a centralized GAT-based coordinator using Lagrangian multiplier synchronization, and which switches between a continuous adaptation mode and a spike-triggered fast reallocation mode based on statistical detection, will achieve a time-to-recovery improvement of at least 20% and maintain a global QoS satisfaction rate within 3% of the centralized optimal baseline during traffic spikes, compared to a purely continuous centralized PPO-CMDP system.\n\nRationale: This hypothesis synthesizes the scalability and constraint-handling strengths of the distributed PPO-CMDP approach (Parent G4759) with the responsiveness benefits of explicit spike detection (Parent G4429). It resolves the contradiction in Parent G4759 regarding 'independent' agents by retaining a centralized Graph Attention Network (GAT) layer that processes global topological state to synchronize Lagrangian multipliers, ensuring constraint consistency without requiring full state sharing for every local decision. It addresses the single-agent limitation of Parent G4429 by embedding the spike detection trigger within a multi-agent architecture. The GAT component, highlighted in the source evidence, ensures that inter-slice dependencies are captured, mitigating the loss of global context identified in the review of the distributed approach. The hybrid mode allows the system to operate efficiently in steady states (continuous PPO) while reacting rapidly to anomalies (spike-triggered reallocation), directly targeting the research goal of dynamic bandwidth allocation during spikes.\n\nFeasibility: Implement a discrete-event simulation of a 5G core network with multiple slices. The baseline is a centralized PPO-CMDP using GAT and BiLSTM for state observation. The proposed system consists of local PPO agents that observe local slice metrics and receive synchronized Lagrangian multipliers from a central GAT coordinator. A statistical spike detector monitors aggregate traffic; upon detection, the system enters a 'fast mode' where the coordinator prioritizes bandwidth reallocation actions from local agents. Compare time-to-recovery, throughput variance, and QoS satisfaction rate. Rejection criterion: If the proposed system does not show a statistically significant (p < 0.05) improvement in time-to-recovery over the baseline, or if the QoS satisfaction rate deviates by more than 3% from the centralized optimal, the hypothesis is rejected.",
+    "title": "Hybrid Event-Triggered Distributed PPO with GAT-Informed Lagrangian Synchronization"
+  },
+  "evidence_source_ids": [
+    "arXiv:2605.03345v1"
+  ],
+  "evidence_sources": [
+    {
+      "abstract": "With the increasing diversity of 5G service types and the intensifying dynamic fluctuations of network load, achieve differentiated quality of service assurance in a network slicing environment has become a key issue in resource management. To address this problem, this paper proposes a deep reinforcement learning mechanism for 5G network slicing quality of service assurance based on the traditional proximal policy optimization actor-critic framework. First, the slicing resource allocation is modeled as a constrained Markov decision process, jointly considering the collaborative optimization of bandwidth, computing, and wireless resources. Meanwhile, a graph attention network and bidirectional long short-term memory are introduced to extract topological correlations and temporal service features, combined with an adaptive Lagrangian penalty and dynamic reward shaping mechanism, to comprehensively optimize delay, throughput, reliability, fairness, and slice isolation performance. Experimental results show that the proposed method outperforms existing baseline models in terms of quality of service satisfaction rate, delay control, resource utilization, and convergence stability.",
+      "acquisition_attempted": false,
+      "acquisition_result": "cached_committed",
+      "arxiv_id": "2605.03345v1",
+      "arxiv_url": "https://arxiv.org/abs/2605.03345v1",
+      "author": null,
+      "authors": [
+        "Qingyang Li"
+      ],
+      "canonical_url": "https://arxiv.org/abs/2605.03345v1",
+      "chunk_count": null,
+      "chunk_id": null,
+      "chunk_index": null,
+      "chunk_rerank_score": null,
+      "content": "",
+      "content_extracted": null,
+      "document_rerank_score": null,
+      "document_type": "academic_paper",
+      "doi": null,
+      "domain": "arxiv.org",
+      "evidence_mode": "full_text",
+      "evidence_refs": [
+        {
+          "chunk_id": "abstract:arXiv:2605.03345v1",
+          "evidence_type": "abstract_only",
+          "page": null,
+          "section": "Abstract",
+          "source_id": "arXiv:2605.03345v1"
+        },
+        {
+          "chunk_id": "53744ee2ed06313d99df10474809dd6c244d105ad06178f1864475872b712559",
+          "evidence_type": "full_text",
+          "page": 1,
+          "parser": "pypdf",
+          "requirement_ids": [
+            "slice_allocation"
+          ],
+          "retrieval_score": 0.40411776304244995,
+          "schema_version": "2",
+          "section": "Unknown",
+          "source_id": "arXiv:2605.03345v1",
+          "subsection": "",
+          "text": "domains,\nwhile different slices compete for limited capacity and may\ninterfere with each other if isolation is insufficient.\nII. RELATED WORK\nRecent studies on 5G network slicing have first established\nthe broader research landscape from the perspectives of\nadmission control, vertical applications, and intelligent\norchestration.\nKhani et al. [8] presented a survey on slice admission\ncontrol in 5G cloud radio access networks and argued that\nconventional SAC methods are insufficient for highly dynamic\nand heterogeneous wireless environments. In parallel, Hamdi et\nal. [9] provided a comprehensive survey of learning-based\nnetwork slicing techniques for the Internet of Vehicles (IoV),\ncovering terrestrial, aerial, and marine deployment domains,\nV2X datasets, implementation tools, and future opportunities\nfor machine learning-enabled slicing in vehicular scenarios.\nXXX-X-XXXX-XXXX-X/XX/$XX.00 ©20XX IEEE"
+        },
+        {
+          "chunk_id": "1f3c7ed3d0898fc6c2a41e3f7567df3913488cdbcf64588b5cafc439571be9ec",
+          "evidence_type": "full_text",
+          "page": 1,
+          "parser": "pypdf",
+          "requirement_ids": [],
+          "retrieval_score": 0.38662219047546387,
+          "schema_version": "2",
+          "section": "Unknown",
+          "source_id": "arXiv:2605.03345v1",
+          "subsection": "",
+          "text": "QoS Assurance Mechanism for 5G Network Slicing\nBased on the Deep Reinforcement Learning PPO\nAlgorithm\nQingyang Li*\nDepartment of Computer Science\nUniversity of California\nLos Angeles, USA\nqyli63@g.ucla.edu\nAbstract—With the increasing diversity of 5G service types\nand the intensifying dynamic fluctuations of network load,\nachieve differentiated quality of service assurance in a network\nslicing environment has become a key issue in resource\nmanagement. To address this problem, this paper proposes a\ndeep reinforcement learning mechanism for 5G network slicing\nquality of service assurance based on the traditional proximal\npolicy optimization actor–critic framework. First, the slicing\nresource allocation is modeled as a constrained Markov decision\nprocess, jointly considering the collaborative optimization of\nbandwidth, computing, and wireless resources. Meanwhile, a\ngraph attention network and bidirectional long short-term\nmemory are introduced to extract topological correlations and\ntemporal service features, combined with an adaptive\nLagrangian penalty and dynamic reward shaping mechanism, to\ncomprehensively optimize delay, throughput, reliability, fairness,\nand slice isolation performance. Experimental results show that\nthe proposed method outperforms existing baseline models in\nterms of quality of service satisfaction rate, delay control,\nresource utilization, and convergence stability.\nKeywords—5G Network Slicing, QoS Assurance, Deep\nReinforcement Learning, Proximal Policy Optimization, Resource\nAllocation\nI. INTRODUCTION\nThe transition from conventional mobile communication\nsystems to 5G has shifted network design from best-effort\nconnectivity toward service-oriented capability provisioning\n[1]. In this context, network slicing has emerged as one of the\ncore enabling technologies of 5G, because it allows multiple\nlogical networks with different performance characteristics to\ncoexist on a shared physical infrastructure [2]. According to\n3GPP, a network slice is a logical network that provides\nspecific network capabilities and network characteristics for\ndifferent service requirements, which makes it particularly\nsuitable for vertical applications such as enhanced broadband\naccess, industrial automation, and massive Internet of Things\nconnectivity. As a result, how to guarantee differentiated\nQuality of Service (QoS) for multiple slices under shared and"
+        },
+        {
+          "chunk_id": "5f93c041e15390d4f71981854f8e4484d58778bd30fae07611b27483f0285a31",
+          "evidence_type": "full_text",
+          "page": 1,
+          "parser": "pypdf",
+          "requirement_ids": [],
+          "retrieval_score": 0.45826321840286255,
+          "schema_version": "2",
+          "section": "Unknown",
+          "source_id": "arXiv:2605.03345v1",
+          "subsection": "",
+          "text": "rent service requirements, which makes it particularly\nsuitable for vertical applications such as enhanced broadband\naccess, industrial automation, and massive Internet of Things\nconnectivity. As a result, how to guarantee differentiated\nQuality of Service (QoS) for multiple slices under shared and\ntime-varying resources has become a central issue in 5G\nnetwork management and orchestration.\nFrom the perspective of service requirements, 5G is\nexpected to support three representative usage scenarios:\nenhanced Mobile Broadband (eMBB), Ultra-Reliable and\nLow-Latency Communications (URLLC), and massive\nMachine-Type Communications (mMTC) [3]. These scenarios\ndiffer significantly in user-experienced data rate, latency,\nreliability, mobility support, and connection density. Because\nthese service categories impose fundamentally different QoS\nobjectives, a uniform or static resource allocation strategy can\nhardly satisfy all slice demands simultaneously in practical 5G\nenvironments [4].\nThe QoS problem in 5G network slicing is further\ncomplicated by the architecture of the 5G system itself [5]. In\nthe 5G core, QoS is organized around the concept of QoS\nFlows, and flow-level markings and parameters are used to\nmap service requirements to differentiated forwarding and\nscheduling behaviors across the network [6]. This means that\nQoS assurance is not merely a matter of reserving bandwidth.\nInstead, it requires coordinated control over multiple\ndimensions. Consequently, slice-level QoS assurance must be\ntreated as a cross-layer and system-level optimization problem\nrather than a single-domain scheduling task.\nAlthough network slicing provides a flexible framework for\nservice customization, achieving stable QoS guarantees in real\ndeployments remains difficult [7]. On the one hand, wireless\nchannels, user mobility, traffic bursts, and session arrivals\ncontinuously change the network state, which makes optimal\nresource decisions highly dynamic and time-dependent. On the\nother hand, the resources consumed by slices are tightly\ncoupled across radio access, transport, and core/cloud domains,\nwhile different slices compete for limited capacity and may\ninterfere with each other if isolation is insufficient.\nII. RELATED WORK\nRecent studies on 5G network slicing have first established\nthe broader research landscape from the perspectives of\nadmission control, vertical applications,"
+        },
+        {
+          "chunk_id": "f0204a47e368cc09bbfa94786863078e05b4ddf54268d078ca470a9d5ae65c3f",
+          "evidence_type": "full_text",
+          "page": 4,
+          "parser": "pypdf",
+          "requirement_ids": [],
+          "retrieval_score": 0.3884952664375305,
+          "schema_version": "2",
+          "section": "Unknown",
+          "source_id": "arXiv:2605.03345v1",
+          "subsection": "",
+          "text": "Wajid, et al. \"A survey on beyond 5g network slicing for smart\ncities applications.\" IEEE Communications Surveys & Tutorials 27.1\n(2024): 595-628.\n8.Khani, Mohsen, et al. \"Slice admission control in 5G cloud radio access\nnetwork using deep reinforcement learning: A survey.\" International\nJournal of Communication Systems 37.13 (2024): e5857.\n9.Hamdi, Wafa, et al. \"Network slicing-based learning techniques for IoV\nin 5G and beyond networks.\" IEEE Communications Surveys &\nTutorials 26.3 (2024): 1989-2047.\n10.Abba Ari, Ado Adamou, et al. \"IoT-5G and B5G/6G resource allocation\nand network slicing orchestration using learning algorithms.\" IET\nNetworks 14.1 (2025): e70002.\n11.Cheng, Sheng-Tzong, et al. \"On self-adaptive 5G network slice QoS\nmanagement system: a deep reinforcement learning approach.\" Wireless\nNetworks 29.3 (2023): 1269-1279.\n12.Raeisi, Mostafa, and Abu B. Sesay. \"Power control of 5G-connected\nvehicular network using PPO-based deep reinforcement learning\nalgorithm.\" IEEE Access 12 (2024): 96387-96403.\n13.Yan, Peihao, et al. \"Near-Real-Time Resource Slicing for QoS\nOptimization in 5G O-RAN Using Deep Reinforcement\nLearning.\" IEEE Transactions on Networking 34 (2025): 1596-1611.\n14.Yağcıoğlu, Mert. \"Enhanced Deep Reinforcement Learning-Driven\nAdaptive Network Slicing and Resource Allocation for URLLC in 5G\nNetworks.\" Journal of Network and Systems Management 34.1 (2026):\n33.\n15.Huang, Renlang, et al. \"Toward scalable and efficient hierarchical deep\nreinforcement learning for 5G RAN slicing.\" IEEE Transactions on\nGreen Communications and Networking 7.4 (2023): 2153-2162.\nTime\nSlot\nRadio\nUtilization\n(%)\nBandwidth\nUtilization\n(%)\nComputing\nUtilization\n(%)\nOverall\nUtilization (%)\nT1 82.46 79.38 76.25 79.36\nT2 84.13 81.02 78.47 81.21\nT3 86.75 83.56 80.14 83.48\nT4 88.24 85.33 82.68 85.42\nT5 89.67 86.91 84.05 86.88\nT6 91.12 88.47 85.94 88.51\nT7 92.38 89.75 87.21 89.78\nT8 93.64 91.08 88.56 91.09\nT9 94.27 92.14 89.83 92.08\nT10 95.03 93.26 90.71 93.00"
+        },
+        {
+          "chunk_id": "f2ca9e2c867e6840f1d06b61be52f671fd25b9793b5a4a98ccc34f8d9c5af2c6",
+          "evidence_type": "full_text",
+          "page": 2,
+          "parser": "pypdf",
+          "requirement_ids": [],
+          "retrieval_score": 0.4066265821456909,
+          "schema_version": "2",
+          "section": "Unknown",
+          "source_id": "arXiv:2605.03345v1",
+          "subsection": "",
+          "text": "d\neffective slicing policies, outperforming both random and\nADMM-based benchmarks in terms of network utility and QoS\nassurance, while also exhibiting stronger robustness under\nvarying traffic conditions and network congestion.\nIII. METHODOLOGIES\nA.Constrained Markov Decision Process\nTo ensure that slice-level QoS guarantees are explicitly\nenforced rather than treated as soft heuristics, the proposed\nmechanism formulates 5G slicing control as a constrained\nsequential decision problem. The objective in Equation 1 is to\nmaximize long-term service utility while keeping resource\nconsumption and QoS violations within admissible limits.\nwhere denotes the state space, the action space, and the state-\ntransition kernel. The term is the immediate reward, is the -th\nconstraint cost, is the discount factor, and is the admissible\nbound of the corresponding constraint.\nThe first modeling step is to jointly describe radio,\nbandwidth, and computing resources, because end-to-end QoS\nin network slicing cannot be guaranteed by optimizing only\none resource domain. For this reason, the slice-level allocation\nis defined as the aggregation of user-level decisions across\nmultiple resource dimensions, shown in Equation 2.\nwhere is the amount of resource allocated to user in slice at\nslot , while is the corresponding slice-level budget. The\nsymbols , , and represent radio, bandwidth, and computing\nresources, respectively. Function is the active user set of slice .\nA bottleneck-based service model is then introduced in\nEquation 3 to characterize the fact that end-to-end throughput\nis jointly limited by wireless transmission, backhaul capacity,\nand computation availability. This is essential because a large\nwireless rate alone does not imply a high effective service rate\nwhen transport or computing becomes the bottleneck.\nwhere is the effective end-to-end service rate of user , and is\nthe achievable wireless transmission rate. The variable denotes\nthe allocated bandwidth resource, is the assigned computing\nresource, and is the per-bit computing demand of the\ncorresponding service.\nTo capture latency-sensitive slice behavior, the delay model\nmust include both queueing and service effects. A compact\nend-to-end latency expression is therefore adopted as Equation\n4.\nwhere is the service rate in resource domain , is the traffic\narrival rate, and is the packet or task size. The constant is"
+        },
+        {
+          "chunk_id": "0a68d4229b04f6a8deff79af92a9f28d2d0796d3246495ab5d6017fcb21a1e9c",
+          "evidence_type": "full_text",
+          "page": 2,
+          "parser": "pypdf",
+          "requirement_ids": [],
+          "retrieval_score": 0.37468934059143066,
+          "schema_version": "2",
+          "section": "Unknown",
+          "source_id": "arXiv:2605.03345v1",
+          "subsection": "",
+          "text": "From a broader systems perspective, Abba Ari et al. [10]\nexamined the evolution from IoT-5G to B5G/6G and reviewed\nhow learning algorithms are being used for resource allocation\nand network slicing orchestration in next-generation intelligent\nnetworks.\nBeyond survey work, several studies have proposed DRL-\ndriven control mechanisms for specific QoS-sensitive network\nfunctions. Cheng et al. [11] developed a self-adaptive QoS\nmanagement system for the 5G core network, in which user\nbehavior and service-level agreements are exploited to generate\ndynamic QoS marking rules, and deep reinforcement learning\nis used to adapt these rules over time as traffic behavior\nevolves. In another line of work, Raeisi and Sesay [12]\ninvestigated uplink power control for 5G-connected vehicular\nnetworks in mmWave bands between connected autonomous\nvehicles and roadside units. Their method adopts a proximal\npolicy optimization (PPO)-based modified actor-critic\narchitecture with a deep neural network to minimize\ntransmission power and co-channel interference while meeting\ntarget uplink capacity, and the authors reported better\nperformance than 3GPP-based power control in dynamic road\nenvironments.\nYan et al. [13] proposed xSlice, in which QoS optimization\nis formulated as a regret-minimization problem subject to\nthroughput, latency, and reliability requirements. Their actor-\ncritic framework further integrates a graph convolutional\nnetwork to encode RAN information and accommodate a\ndynamic number of traffic sessions. In a URLLC-oriented\nscenario, Yağcıoğlu [14] introduced the DQN-ASRA\nframework, which unifies slice prediction and dynamic\nresource allocation into a single decision-making process for\npredictive network slicing.\nHuang et al. [15] investigated the problem of scalable and\nefficient resource allocation for 5G RAN slicing and proposed\na hierarchical deep reinforcement learning framework to\naddress the growing complexity of heterogeneous slice services\nand large-scale user populations. Experimental results showed\nthat the proposed framework was able to learn stable and\neffective slicing policies, outperforming both random and\nADMM-based benchmarks in terms of network utility and QoS\nassurance, while also exhibiting stronger robustness under\nvarying traffic conditions and network congestion.\nIII. METHODOLOGIES\nA.Constrained Markov Decision Process\nTo ensure that"
+        },
+        {
+          "chunk_id": "1e29e8675dbeb18d954b2430f4b6047d04a878eb937d459ba10010b8bf70a3d8",
+          "evidence_type": "full_text",
+          "page": 4,
+          "parser": "pypdf",
+          "requirement_ids": [],
+          "retrieval_score": 0.3894132375717163,
+          "schema_version": "2",
+          "section": "Unknown",
+          "source_id": "arXiv:2605.03345v1",
+          "subsection": "",
+          "text": "It can be observed that, as the traffic load gradually\nincreases from low to very high levels, the utilization of all\nthree resource types shows an overall upward trend, indicating\nthat the system is able to adapt its resource allocation strategy\naccording to changing service demands.\nV. CONCLUSION\nIn conclusion, this study addresses the QoS assurance\nproblem in 5G network slicing by developing a hierarchical\nmulti-objective optimization mechanism based on deep\nreinforcement learning and PPO, achieving coordinated\nimprovements in latency, throughput, reliability, fairness, and\nresource utilization. In future work, the framework can be\nfurther extended toward 6G-oriented scenarios by integrating\nfederated learning, digital twins, and cross-domain\ncollaborative control to enhance real-time adaptability,\ngeneralization capability, and practical deployability.\n\nNotice: This work has been submitted to IEEE MLISE 2026\nfor possible publication. Copyright may be transferred without\nnotice.\nREFERENCES\n1.Serôdio, Carlos, et al. \"The 6G ecosystem as support for IoE and private\nnetworks: Vision, requirements, and challenges.\" Future Internet 15.11\n(2023): 348.\n2.Rafique, Wajid, et al. \"A survey on beyond 5g network slicing for smart\ncities applications.\" IEEE Communications Surveys & Tutorials 27.1\n(2024): 595-628.\n3.Sefati, Seyed Salar, and Simona Halunga. \"Ultra-reliability and low-\nlatency communications on the internet of things based on 5G network:\nliterature review, classification, and future research view.\""
+        }
+      ],
+      "evidence_requirement_id": "slice_allocation",
+      "evidence_status": "full_text",
+      "freshness": "year",
+      "full_text_available": true,
+      "full_text_chunks_used": 7,
+      "full_text_indexed": true,
+      "index_status": "COMMITTED",
+      "index_truncated": false,
+      "language": null,
+      "page_type": null,
+      "parent_source_id": null,
+      "pdf_url": "https://arxiv.org/pdf/2605.03345v1",
+      "planned_source_type": "academic",
+      "preferred_domains": [
+        "ieeexplore.ieee.org",
+        "sciencedirect.com"
+      ],
+      "primary_category": "cs.NI",
+      "provider": "arxiv",
+      "published": "2026-05-05T04:03:49+00:00",
+      "published_at": "2026-05-05T04:03:49+00:00",
+      "purpose": "Retrieve evidence on standard 5G slice management and dynamic bandwidth allocation mechanisms during traffic spikes.",
+      "query_contexts": [
+        {
+          "evidence_requirement_id": "slice_allocation",
+          "freshness": "year",
+          "hypothesis_id": null,
+          "preferred_domains": [
+            "ieeexplore.ieee.org",
+            "sciencedirect.com"
+          ],
+          "purpose": "Retrieve evidence on standard 5G slice management and dynamic bandwidth allocation mechanisms during traffic spikes.",
+          "query": "5G network slicing bandwidth allocation dynamic traffic spike management",
+          "search_intent": "goal",
+          "source_type": "academic",
+          "sub_question": "What are the standard 5G slice bandwidth allocation mechanisms?"
+        }
+      ],
+      "rerank_score": 0.6073254960222687,
+      "reserved_requirement_ids": [
+        "slice_allocation"
+      ],
+      "retrieval_query": "5G network slicing bandwidth allocation dynamic traffic spike management",
+      "rrf_score": 0.015625,
+      "search_query": "5G network slicing bandwidth allocation dynamic traffic spike management",
+      "search_score": null,
+      "selected_chunk_ids": [
+        "53744ee2ed06313d99df10474809dd6c244d105ad06178f1864475872b712559",
+        "1f3c7ed3d0898fc6c2a41e3f7567df3913488cdbcf64588b5cafc439571be9ec",
+        "5f93c041e15390d4f71981854f8e4484d58778bd30fae07611b27483f0285a31",
+        "f0204a47e368cc09bbfa94786863078e05b4ddf54268d078ca470a9d5ae65c3f",
+        "f2ca9e2c867e6840f1d06b61be52f671fd25b9793b5a4a98ccc34f8d9c5af2c6",
+        "0a68d4229b04f6a8deff79af92a9f28d2d0796d3246495ab5d6017fcb21a1e9c",
+        "1e29e8675dbeb18d954b2430f4b6047d04a878eb937d459ba10010b8bf70a3d8"
+      ],
+      "source": "arxiv",
+      "source_authority": null,
+      "source_family": "academic",
+      "source_id": "arXiv:2605.03345v1",
+      "source_type": "academic",
+      "strict_gate_rejection_reason": "retained_committed_full_text_passage",
+      "strict_gate_retained": true,
+      "sub_question": "What are the standard 5G slice bandwidth allocation mechanisms?",
+      "summary": "With the increasing diversity of 5G service types and the intensifying dynamic fluctuations of network load, achieve differentiated quality of service assurance in a network slicing environment has become a key issue in resource management. To address this problem, this paper proposes a deep reinforcement learning mechanism for 5G network slicing quality of service assurance based on the traditional proximal policy optimization actor-critic framework. First, the slicing resource allocation is modeled as a constrained Markov decision process, jointly considering the collaborative optimization of bandwidth, computing, and wireless resources. Meanwhile, a graph attention network and bidirectional long short-term memory are introduced to extract topological correlations and temporal service features, combined with an adaptive Lagrangian penalty and dynamic reward shaping mechanism, to comprehensively optimize delay, throughput, reliability, fairness, and slice isolation performance. Experimental results show that the proposed method outperforms existing baseline models in terms of quality of service satisfaction rate, delay control, resource utilization, and convergence stability.",
+      "title": "QoS Assurance Mechanism for 5G Network Slicing Based on the Deep Reinforcement Learning PPO Algorithm",
+      "updated_at": "2026-05-05T04:03:49+00:00",
+      "url": "https://arxiv.org/abs/2605.03345v1",
+      "venue": "cs.NI"
+    }
+  ],
+  "llm_evaluation": {
+    "judge": {
+      "provider": "local",
+      "model": "qwen/qwen3.8-27b",
+      "base_url": "http://100.117.90.5:1234/v1/"
+    },
+    "passed": false,
+    "metrics": [
+      {
+        "name": "Goal alignment",
+        "status": "completed",
+        "score": 1.0,
+        "threshold": 0.7,
+        "passed": true,
+        "reason": "The hypothesis directly addresses the goal by specifying a closed-loop, multi-agent AI framework for 5G slicing that uses local PPO agents, a GAT-based coordinator, and spike-triggered fast reallocation during traffic spikes. It also defines measurable intended outcomes, including time-to-recovery improvement and QoS satisfaction relative to a centralized baseline. A minor shortcoming is that bandwidth allocation is implied through slicing and reallocation rather than explicitly named in the hypothesis statement, but the alignment remains strong."
+      },
+      {
+        "name": "Scientific testability",
+        "status": "completed",
+        "score": 1.0,
+        "threshold": 0.7,
+        "passed": true,
+        "reason": "The response clearly identifies the intervention as a hybrid closed-loop 5G slicing framework using local PPO agents, a centralized GAT coordinator, Lagrangian synchronization, and spike-triggered fast reallocation. It specifies measurable outcomes, including at least a 20% time-to-recovery improvement, QoS satisfaction within 3% of a centralized optimal baseline, and throughput variance. It also defines a comparison condition against a purely continuous centralized PPO-CMDP system and provides a falsifiable rejection criterion based on statistical significance (p < 0.05) and QoS deviation, allowing a researcher to design a concrete experiment."
+      },
+      {
+        "name": "Evidence support",
+        "status": "completed",
+        "score": 0.2,
+        "threshold": 0.7,
+        "passed": false,
+        "reason": "The response anchors several components in the supplied evidence, including PPO/CMDP, GAT+BiLSTM, adaptive Lagrangian penalty, and 5G slicing QoS under dynamic load. However, it makes major unsupported extrapolations: distributed local PPO agents, centralized GAT Lagrangian synchronization, spike-triggered fast reallocation, statistical detection, a 20% time-to-recovery improvement, and a 3% QoS bound are not supported by the retrieval context. It also cites Parent G4759 and G4429, which are not present in the supplied evidence, weakening the evidentiary grounding."
+      }
+    ]
+  }
+}

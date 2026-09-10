@@ -1,8 +1,7 @@
-"""Hypothesis meta-review agent.
+"""Research meta-review agent.
 
-Synthesizes insights from all reviews and proximity topology to identify
-recurring patterns, generate high-level critiques, and produce actionable
-next-step recommendations for the research session.
+Synthesizes hypothesis reviews when the selected research mode uses them and
+evidence-led planning outputs when it does not.
 """
 
 from __future__ import annotations
@@ -80,6 +79,170 @@ Tournament records: {json.dumps(matches, ensure_ascii=False)}
         return {}
 
 
+_MODE_PLAN_FIELDS: dict[str, tuple[str, ...]] = {
+    "comparative": (
+        "competing_candidates",
+        "competing_explanations",
+        "comparison_dimensions",
+    ),
+    "exploratory": ("research_questions", "topic_dimensions", "missing_evidence"),
+    "literature_review": (
+        "themes",
+        "controversies",
+        "evidence_dimensions",
+        "areas_of_agreement",
+        "areas_of_disagreement",
+        "literature_gaps",
+    ),
+    "due_diligence": (
+        "claims",
+        "risks",
+        "counterclaims",
+        "primary_source_checks",
+        "missing_evidence",
+    ),
+}
+
+
+def _bounded_strings(value: object, limit: int = 8) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [redact_secrets(str(item).strip())[:1000] for item in value if str(item).strip()][:limit]
+
+
+def _finding_summaries(value: object, limit: int = 8) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    findings = []
+    for item in value:
+        if not isinstance(item, dict) or not str(item.get("claim") or "").strip():
+            continue
+        findings.append(
+            {
+                "claim": redact_secrets(str(item["claim"]).strip())[:1500],
+                "source_ids": _bounded_strings(item.get("source_ids"), limit=12),
+                "evidence_refs": list(item.get("evidence_refs") or ())[:12],
+            }
+        )
+        if len(findings) >= limit:
+            break
+    return findings
+
+
+def summarize_evidence_led_research(
+    context: ContextMemory,
+    research_goal: Optional[ResearchGoal] = None,
+) -> dict[str, Any]:
+    """Build a mode-specific overview without inventing hypothesis outputs."""
+
+    research_type = str(getattr(context, "research_type", "exploratory"))
+    raw_plan = getattr(context, "research_plan", {}) or {}
+    plan = raw_plan if isinstance(raw_plan, dict) else {}
+    raw_synthesis = getattr(context, "last_literature_synthesis", {}) or {}
+    synthesis = raw_synthesis if isinstance(raw_synthesis, dict) else {}
+
+    field_names = _MODE_PLAN_FIELDS.get(
+        research_type,
+        ("sub_questions", "evidence_requirements", "missing_evidence"),
+    )
+    plan_focus = {field: values for field in field_names if (values := _bounded_strings(plan.get(field)))}
+    established = _finding_summaries(synthesis.get("established_findings"))
+    contradictions = _finding_summaries(synthesis.get("contradictions"))
+    knowledge_gaps = _bounded_strings(synthesis.get("knowledge_gaps"))
+    warnings = _bounded_strings(synthesis.get("warnings"))
+    rationale = redact_secrets(str(synthesis.get("analytical_rationale") or "").strip())[:2000]
+    source_ids = sorted(
+        {source_id for finding in (*established, *contradictions) for source_id in finding["source_ids"]}
+    )
+
+    critiques = [
+        f"The {research_type.replace('_', ' ')} review retained its mode-specific research structure "
+        "without manufacturing hypothesis candidates."
+    ]
+    if plan_focus:
+        focus_counts = ", ".join(f"{field.replace('_', ' ')}: {len(values)}" for field, values in plan_focus.items())
+        critiques.append(f"Plan coverage retained {focus_counts}.")
+    else:
+        critiques.append("The retained research plan lacks the mode-specific fields needed for a complete review.")
+
+    if established or contradictions or knowledge_gaps:
+        critiques.append(
+            f"The evidence synthesis contains {len(established)} established finding(s), "
+            f"{len(contradictions)} contradiction(s), and {len(knowledge_gaps)} unresolved gap(s) "
+            f"across {len(source_ids)} cited source(s)."
+        )
+    else:
+        critiques.append("No source-grounded literature synthesis is available yet; conclusions remain premature.")
+    if warnings:
+        critiques.append("Evidence limitations remain: " + "; ".join(warnings[:3]))
+
+    next_steps: list[str] = []
+    if research_type == "comparative":
+        dimensions = plan_focus.get("comparison_dimensions", [])
+        candidates = plan_focus.get("competing_candidates", [])
+        if candidates and dimensions:
+            next_steps.append(
+                "Compare " + ", ".join(candidates[:3]) + " consistently across " + ", ".join(dimensions[:3]) + "."
+            )
+    elif research_type == "exploratory":
+        next_steps.extend(f"Investigate unresolved exploratory gap: {item}" for item in knowledge_gaps[:3])
+        next_steps.extend(
+            f"Gather evidence for planned gap: {item}"
+            for item in plan_focus.get("missing_evidence", [])[: max(0, 3 - len(next_steps))]
+        )
+    elif research_type == "literature_review":
+        gaps = plan_focus.get("literature_gaps", []) or knowledge_gaps
+        next_steps.extend(f"Resolve literature gap: {item}" for item in gaps[:3])
+    elif research_type == "due_diligence":
+        next_steps.extend(
+            f"Complete primary-source check: {item}" for item in plan_focus.get("primary_source_checks", [])[:2]
+        )
+        next_steps.extend(
+            f"Close missing-evidence item: {item}"
+            for item in plan_focus.get("missing_evidence", [])[: max(0, 3 - len(next_steps))]
+        )
+
+    if not next_steps:
+        next_steps.extend(f"Investigate unresolved evidence gap: {item}" for item in knowledge_gaps[:3])
+    if not next_steps:
+        next_steps.append("Complete the outstanding evidence requirements before drawing a final conclusion.")
+
+    if context.meta_review_feedback:
+        previous_steps = (context.meta_review_feedback[-1].get("research_overview") or {}).get(
+            "suggested_next_steps"
+        ) or []
+        if previous_steps:
+            next_steps.append(f"[Continuing from prior cycle] {str(previous_steps[0])[:1000]}")
+
+    mode_summary = {
+        "research_goal": str(
+            plan.get("research_goal") or (research_goal.description if research_goal is not None else "")
+        ),
+        "research_type": research_type,
+        "plan_focus": plan_focus,
+        "established_findings": established,
+        "contradictions": contradictions,
+        "knowledge_gaps": knowledge_gaps,
+        "analytical_rationale": rationale,
+        "source_ids": source_ids,
+    }
+    overview = {
+        "synthesis_mode": "mode_aware",
+        "research_type": research_type,
+        "meta_review_critique": critiques,
+        "research_overview": {
+            # Retain the historical key for API/report compatibility while
+            # making clear that this mode produces no hypothesis ranking.
+            "top_ranked_hypotheses": [],
+            "suggested_next_steps": next_steps,
+            "mode_summary": mode_summary,
+        },
+    }
+    context.meta_review_feedback.append(overview)
+    logger.info("Mode-aware meta-review complete for %s.", research_type)
+    return overview
+
+
 class MetaReviewAgent:
     def summarize_and_feedback(
         self,
@@ -102,6 +265,9 @@ class MetaReviewAgent:
             ``outliers``, ``exemplars``, ``near_duplicates``, ``diversity_score``).
             When provided, richer topology-aware critiques are generated.
         """
+        if not context.uses_hypothesis_pipeline():
+            return summarize_evidence_led_research(context, research_goal)
+
         active_hypotheses = context.get_active_hypotheses()
         active_ids = {h.hypothesis_id for h in active_hypotheses}
         # ----------------------------------------------------------------

@@ -85,6 +85,7 @@ class EvidenceDocument:
     rrf_score: float | None = None
     full_text_available: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    provider_rrf_score: float | None = None
 
     @property
     def source_type(self) -> EvidenceType:
@@ -112,7 +113,12 @@ class EvidenceDocument:
         return source_id.casefold()
 
     def with_rrf_score(self, score: float) -> "EvidenceDocument":
-        return replace(self, rrf_score=score)
+        """Compatibility wrapper for the explicitly named provider/query score."""
+
+        return self.with_provider_rrf_score(score)
+
+    def with_provider_rrf_score(self, score: float) -> "EvidenceDocument":
+        return replace(self, rrf_score=score, provider_rrf_score=score)
 
 
 # Compatibility alias for integrations using the previous provider-neutral name.
@@ -162,6 +168,7 @@ def academic_evidence_from_result(
     authors = tuple(str(author).strip() for author in (result.get("authors") or ()) if str(author).strip())
     content = str(result.get("content") or "").strip()
     canonical_url = canonicalize_url(url)
+    provider_rrf_score = result.get("provider_rrf_score", result.get("rrf_score"))
     return EvidenceDocument(
         source_id=_source_id_from_academic_result(result, provider),
         source_family="academic",
@@ -186,8 +193,10 @@ def academic_evidence_from_result(
         evidence_requirement_id=str(result.get("evidence_requirement_id") or "").strip() or None,
         search_score=(float(result["search_score"]) if isinstance(result.get("search_score"), (int, float)) else None),
         rerank_score=(float(result["rerank_score"]) if isinstance(result.get("rerank_score"), (int, float)) else None),
+        rrf_score=float(provider_rrf_score) if isinstance(provider_rrf_score, (int, float)) else None,
         full_text_available=bool(result.get("full_text_available") or result.get("full_text_indexed") or content),
         metadata=dict(result),
+        provider_rrf_score=float(provider_rrf_score) if isinstance(provider_rrf_score, (int, float)) else None,
     )
 
 
@@ -240,6 +249,7 @@ def web_evidence_from_result(
     updated = result.get("updated_at") or result.get("updated") or published
     score = result.get("search_score", result.get("score"))
     content = str(result.get("content") or result.get("raw_content") or result.get("abstract") or "").strip()
+    provider_rrf_score = result.get("provider_rrf_score", result.get("rrf_score"))
     return EvidenceDocument(
         source_id=source_id,
         source_family="web",
@@ -266,10 +276,12 @@ def web_evidence_from_result(
         evidence_requirement_id=str(result.get("evidence_requirement_id") or "").strip() or None,
         search_score=float(score) if isinstance(score, (int, float)) else None,
         rerank_score=(float(result["rerank_score"]) if isinstance(result.get("rerank_score"), (int, float)) else None),
+        rrf_score=float(provider_rrf_score) if isinstance(provider_rrf_score, (int, float)) else None,
         full_text_available=bool(
             result.get("full_text_available") or result.get("content_extracted") or result.get("raw_content")
         ),
         metadata=dict(result),
+        provider_rrf_score=float(provider_rrf_score) if isinstance(provider_rrf_score, (int, float)) else None,
     )
 
 

@@ -85,7 +85,8 @@ elo_k_factor: 32
 # pairwise tournament debates. A smaller, faster model reduces latency when many
 # comparisons run in parallel.
 # ranking_llm_model: "qwen/qwen3.6-35b-a3b"
-ranking_llm_model: null
+ranking_llm_model: qwen/qwen3.8-27b
+# set ranking model to "null" to use the main llm_model for pairwise tournament debates. A smaller, faster model reduces latency when many comparisons run in parallel.
 
 ranking:
   proximity_guided_matching: true
@@ -126,6 +127,14 @@ supervisor:
     min_audit_score: 70.0
     require_successful_evolution: true
     min_hypothesis_clusters: 2
+
+# Durable research-session checkpoints are separate from the shared paper/
+# embedding indexes and from immutable per-run audit reports. A null directory
+# stores checkpoints under <results>/research_state and follows
+# CO_SCIENTIST_RUNS_DIR when tests or deployments relocate results.
+research_state:
+  enabled: true
+  directory: null
 
 # Keep evidence-directed autonomous research, but bound its nested loop. The
 # outer Supervisor already performs iterative reflection and evolution, so
@@ -211,9 +220,19 @@ paper_library:
   persist_directory: "chroma_db"
   pdf_directory: "app/paper"
   collection_name: "research_papers"
-  index_schema_version: "2"
-  parser_version: "pypdf-1"
-  chunking_version: "page-boundary-2"
+  # Schema 4 adds canonical source/version identity and content-addressed chunk
+  # and embedding-cache identities while retaining the Phase B text model.
+  index_schema_version: "4"
+  parser_backend: "pypdf"
+  parser_version: "pypdf-structured-2"
+  chunking_version: "section-paragraph-sentence-3"
+  retrieval_template_version: "intrinsic-context-1"
+  # The registry and parse/chunk artifacts are shared across model-specific
+  # Chroma collections. Incremental writes reuse matching stored vectors.
+  source_registry_filename: "paper_source_registry.json"
+  chunk_artifact_directory: "paper_chunk_artifacts"
+  incremental_indexing_enabled: true
+  embedding_reuse_enabled: true
   candidate_download_limit: 8
   # Each explicit evidence requirement gets bounded candidate failover within
   # the global per-enrichment acquisition budget.
@@ -223,6 +242,22 @@ paper_library:
   chunk_size_chars: 2400
   chunk_overlap_chars: 300
   top_k_chunks: 12
+  # Dense and BM25 search each retrieve a broader passage pool. Their rankings
+  # are fused with passage-level RRF before cross-query requirement reservation.
+  hybrid_retrieval_enabled: true
+  lexical_retrieval_enabled: true
+  dense_candidate_factor: 3
+  lexical_candidate_factor: 3
+  passage_rrf_k: 60
+  query_rrf_k: 60
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  # Selected chunks may add linked siblings from the same source/parent. Added
+  # context is separately bounded and the total still obeys max_prompt_chars.
+  context_expansion_enabled: true
+  context_neighbor_window: 1
+  context_parent_chunk_limit: 2
+  context_expansion_max_chars: 4000
   max_prompt_chars: 14000
   max_pdf_bytes: 25000000
   download_timeout_seconds: 30
@@ -235,6 +270,9 @@ paper_library:
     - "pdfs.semanticscholar.org"
     - "link.springer.com"
     - "api.springernature.com"
+    # Nature Research journals use www.nature.com for PDF downloads.
+    - "www.nature.com"
+    - "nature.com"
     # Direct scholarly PDFs observed through supplementary web search.
     # Keep this as an explicit host allowlist so web results cannot trigger
     # downloads from arbitrary or internal network locations.
@@ -265,7 +303,7 @@ validation:
 # then participates in expanded-query retrieval when direct retrieval is insufficient.
 # Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).
 semantic_scholar:
-  enabled: true
+  enabled: False
   results_per_query: 10
 
 # Springer Nature academic search (Open Access & Meta API). It follows the same

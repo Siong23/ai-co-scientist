@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 import arxiv
 import requests
 
+from app.utils import redact_secrets
+
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 15
@@ -100,6 +102,8 @@ class ArxivSearchTool:
         self.client = arxiv.Client(page_size=max_results, num_retries=0)
         self.client._session = _TimeoutSession()
         self.last_error_status: int | None = None
+        self.last_error_kind = ""
+        self.last_error_detail = ""
 
     def search_papers(
         self,
@@ -123,6 +127,8 @@ class ArxivSearchTool:
         if max_results is None:
             max_results = self.max_results
         self.last_error_status = None
+        self.last_error_kind = ""
+        self.last_error_detail = ""
 
         # Build search query with category filter if provided
         search_query = build_arxiv_query(query)
@@ -189,7 +195,9 @@ class ArxivSearchTool:
 
         except Exception as e:
             self.last_error_status = getattr(e, "status", None)
-            logger.error(f"ArXiv search failed for query '{query}': {e}", exc_info=True)
+            self.last_error_kind = "timeout" if isinstance(e, requests.Timeout) else "provider_error"
+            self.last_error_detail = redact_secrets(str(e))
+            logger.warning("ArXiv search failed for query %r: %s", redact_secrets(query), self.last_error_detail)
             return []
 
     def search_by_author(self, author_name: str, max_results: Optional[int] = None) -> List[Dict]:

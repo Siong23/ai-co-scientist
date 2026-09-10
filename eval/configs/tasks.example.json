@@ -1,0 +1,18 @@
+{
+  "tasks": [
+    {
+      "id": "openran_01",
+      "goal": "Develop a real-time anomaly detector for Open-RAN architectures that spots and blocks malicious, rogue network apps.",
+      "criteria": ["Explain observable telemetry and app attribution.", "Specify containment and measure latency, false blocking and service impact."],
+      "literature": [],
+      "runs": [{"path": "../../results/runs/REPLACE_OPENRAN_RUN.json", "condition": "co-scientist"}]
+    },
+    {
+      "id": "solar_01",
+      "goal": "Develop new methods for increasing the efficiency of solar panels.",
+      "criteria": ["Specify a measurable efficiency outcome, baseline and controlled experiment."],
+      "literature": [],
+      "runs": [{"path": "../../results/runs/REPLACE_SOLAR_RUN.json", "condition": "co-scientist"}]
+    }
+  ]
+}

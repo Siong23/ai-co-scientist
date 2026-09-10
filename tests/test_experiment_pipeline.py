@@ -23,12 +23,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.agents_modules.code_generation_agent import CodeGenerationAgent
+from app.config import load_config
 from app.experiments.experiment_orchestrator import ExperimentOrchestrator
 from app.experiments.experiment_runner import ExperimentRunner
 from app.data.dataset_manager import DatasetManager
-from app.config import load_config
 from app.utils import call_llm
-
 
 VALID_SPECIFICATION = {
     "dataset": {
@@ -147,10 +146,14 @@ def test_code_generation_agent_extracts_fenced_python_response():
     )
 
 
-def test_code_generation_agent_uses_dedicated_model_by_default():
+def test_code_generation_agent_uses_dedicated_model_by_default(monkeypatch):
+    from app.agents_modules.code_generation_agent import config
+
+    monkeypatch.setitem(config, "llm_model", "research-model")
+    monkeypatch.setitem(config, "code_generation_model", "code-model")
     agent = CodeGenerationAgent()
 
-    assert agent.model == "qwen/qwen3.8-27b"
+    assert agent.model == "code-model"
 
 
 def test_code_repair_prompt_is_bounded(monkeypatch):
@@ -909,11 +912,11 @@ def test_lmstudio_native_chat_endpoint_is_reachable():
     reachable and can accept a request payload.
     """
 
+    import requests
+
     from app.utils import (
         get_lmstudio_native_chat_url,
     )
-
-    import requests
 
     native_url = (
         get_lmstudio_native_chat_url()

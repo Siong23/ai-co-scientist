@@ -13,6 +13,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 from ..config import config
 from ..models import ContextMemory, ResearchGoal
+from ..research_modes import research_type_requires_hypotheses
 from ..utils import logger, redact_secrets
 from .generation_helpers import _call_llm
 
@@ -37,7 +38,7 @@ SUPERVISOR_ACTIONS: tuple[SupervisorAction, ...] = (
 )
 
 _ACTION_DESCRIPTIONS: dict[str, str] = {
-    "GENERATE": "Discover literature evidence and generate new candidate hypotheses.",
+    "GENERATE": "Discover literature evidence and produce mode-appropriate research outputs.",
     "REFLECT": "Perform scientific reflection (novelty, feasibility, safety) and route hypotheses.",
     "RANK": "Conduct pairwise tournament matches to establish or refine Elo rankings.",
     "EVOLVE": "Apply strategic mutations and recombinations to top-ranked hypotheses.",
@@ -45,6 +46,17 @@ _ACTION_DESCRIPTIONS: dict[str, str] = {
     "META_REVIEW": "Synthesize global cross-hypothesis critique and strategic research directions.",
     "FINALIZE": "Conclude the exploration cycle and finalize research outputs.",
 }
+
+
+def _mode_state(context: ContextMemory, research_goal: ResearchGoal) -> tuple[str, bool]:
+    """Resolve explicit goal modes before the first planning pass has run."""
+
+    retained_plan = getattr(context, "research_plan", {}) or {}
+    resolved_goal_type = getattr(research_goal, "resolved_research_type", None)
+    if not retained_plan and resolved_goal_type and not context.hypotheses:
+        research_type = str(resolved_goal_type)
+        return research_type, research_type_requires_hypotheses(research_type)
+    return str(getattr(context, "research_type", "hypothesis_testing")), context.uses_hypothesis_pipeline()
 
 
 @dataclass
@@ -128,7 +140,17 @@ def assess_supervisor_state(
             top_elo_delta = max(top_scores) - min(top_scores)
             ratings_converged = top_elo_delta <= convergence_threshold
 
+    research_type, hypothesis_pipeline_enabled = _mode_state(context, research_goal)
+    synthesis_status = str(
+        (getattr(context, "last_generation_diagnostics", {}).get("literature_synthesis") or {}).get("status") or ""
+    )
     return {
+        "research_type": research_type,
+        "hypothesis_pipeline_enabled": hypothesis_pipeline_enabled,
+        "literature_synthesis_ready": synthesis_status in {"completed", "warning"},
+        "resume_requires_evidence_refresh": bool(
+            (getattr(context, "resume_state", {}) or {}).get("requires_evidence_refresh")
+        ),
         "total_hypotheses": len(all_hypos),
         "active_hypotheses_count": len(active_hypos),
         "accepted_count": len(accepted_hypos),
@@ -161,6 +183,38 @@ def evaluate_finalization_readiness(
     research_goal: ResearchGoal,
 ) -> dict[str, Any]:
     """Return an auditable quality gate for concluding a research cycle."""
+    research_type, hypothesis_pipeline_enabled = _mode_state(context, research_goal)
+    if not hypothesis_pipeline_enabled:
+        diagnostics = getattr(context, "last_generation_diagnostics", {}) or {}
+        retrieval_status = str((diagnostics.get("evidence_retrieval") or {}).get("status") or "")
+        synthesis_status = str((diagnostics.get("literature_synthesis") or {}).get("status") or "")
+        reasons = []
+        if not getattr(context, "research_plan", None):
+            reasons.append("A compatible research plan has not been retained.")
+        if retrieval_status != "completed":
+            reasons.append("Evidence retrieval has not completed successfully.")
+        if synthesis_status not in {"completed", "warning"}:
+            reasons.append("Literature synthesis has not completed successfully.")
+        return {
+            "ready": not reasons,
+            "reasons": reasons,
+            "research_type": research_type,
+            "hypothesis_pipeline_enabled": False,
+            "accepted_count": 0,
+            "required_accepted_count": 0,
+            "completed_matches": 0,
+            "required_completed_matches": 0,
+            "finalist_ids": [],
+            "unranked_finalist_ids": [],
+            "missing_evidence_ids": [],
+            "low_confidence_finalist_ids": [],
+            "unsupported_claim_finalist_ids": [],
+            "failed_audit_finalist_ids": [],
+            "successful_evolution": False,
+            "cluster_count": 0,
+            "required_cluster_count": 0,
+        }
+
     gate_config = config.get("supervisor", {}).get("finalization", {})
     min_accepted = max(1, int(gate_config.get("min_accepted_hypotheses", 2)))
     min_accepted = min(min_accepted, max(1, int(research_goal.num_hypotheses)))
@@ -294,6 +348,8 @@ def build_supervisor_planning_prompt(
         "You are the autonomous Supervisor Agent for the AI Co-Scientist research system.\n"
         "Your task is to analyze the current hypothesis exploration state and decide the SINGLE next best action.\n\n"
         f"RESEARCH GOAL:\n{research_goal.description}\n\n"
+        f"RESEARCH TYPE:\n{state.get('research_type', 'hypothesis_testing')}\n"
+        f"Hypothesis pipeline enabled: {state.get('hypothesis_pipeline_enabled', True)}\n\n"
         "CURRENT EXPLORATION STATE:\n"
         f"- Active hypotheses: {state.get('active_hypotheses_count', 0)} (Total created: {state.get('total_hypotheses', 0)})\n"
         f"- Reflection accepted: {state.get('accepted_count', 0)}, Need revision: {state.get('revise_count', 0)}, Unreviewed: {state.get('unreviewed_count', 0)}\n"
@@ -303,19 +359,23 @@ def build_supervisor_planning_prompt(
         f"{state.get('ratings_converged', False)}; top Elo delta: {state.get('top_elo_delta')}\n"
         f"{diversity_info}"
         f"- Evolution attempts: {state.get('evolution_attempts', 0)}\n"
+        f"- Restored state requires fresh evidence: {state.get('resume_requires_evidence_refresh', False)}\n"
         f"- Actions already executed in this session: {', '.join(state.get('actions_taken', [])) or 'None'}\n"
         f"- Steps remaining in compute budget: {state.get('steps_remaining', 1)}\n\n"
         f"AVAILABLE ACTIONS:\n{action_list}\n\n"
         "DECISION GUIDELINES:\n"
-        "1. If there are 0 active hypotheses, choose GENERATE.\n"
-        "2. If unreviewed hypotheses exist, choose REFLECT before ranking or evolving them.\n"
-        "3. If accepted hypotheses exist but haven't been compared in tournaments, choose RANK.\n"
-        "4. If accepted candidates exist and diversity is low (diversity_score < 0.35), choose GENERATE or EVOLVE.\n"
-        "5. If strong accepted hypotheses exist and haven't been evolved, choose EVOLVE.\n"
-        "6. If hypotheses are evolved, REFLECT and RANK them to determine their quality.\n"
-        "7. If multiple hypotheses exist and proximity hasn't run, choose PROXIMITY to prune duplicates.\n"
-        "8. When budget is almost exhausted (steps remaining <= 1) or research is well explored, choose META_REVIEW.\n"
-        "9. If META_REVIEW has finished and budget is done, choose FINALIZE.\n\n"
+        "1. If restored state requires fresh evidence, choose GENERATE before every downstream action.\n"
+        "2. If the hypothesis pipeline is disabled, GENERATE evidence once, then META_REVIEW and FINALIZE; "
+        "never choose REFLECT, RANK, EVOLVE, or PROXIMITY.\n"
+        "3. If there are 0 active hypotheses in a hypothesis-driven mode, choose GENERATE.\n"
+        "4. If unreviewed hypotheses exist, choose REFLECT before ranking or evolving them.\n"
+        "5. If accepted hypotheses exist but haven't been compared in tournaments, choose RANK.\n"
+        "6. If accepted candidates exist and diversity is low (diversity_score < 0.35), choose GENERATE or EVOLVE.\n"
+        "7. If strong accepted hypotheses exist and haven't been evolved, choose EVOLVE.\n"
+        "8. If hypotheses are evolved, REFLECT and RANK them to determine their quality.\n"
+        "9. If multiple hypotheses exist and proximity hasn't run, choose PROXIMITY to prune duplicates.\n"
+        "10. Near the budget limit or when research is well explored, choose META_REVIEW.\n"
+        "11. If META_REVIEW has finished and budget is done, choose FINALIZE.\n\n"
         "Return ONLY a JSON object with this exact schema:\n"
         "```json\n"
         "{\n"
@@ -381,6 +441,28 @@ def decide_action_heuristically(
     ratings_converged = bool(state.get("ratings_converged", False))
     convergence_config = config.get("supervisor", {}).get("convergence", {})
     max_ranking_batches = max(1, int(convergence_config.get("max_ranking_batches_before_evolution", 2)))
+
+    if state.get("resume_requires_evidence_refresh"):
+        return SupervisorDecision(
+            action="GENERATE",
+            reasoning="Restored state needs fresh transient evidence before any downstream action.",
+        )
+
+    if not state.get("hypothesis_pipeline_enabled", True):
+        if not state.get("literature_synthesis_ready"):
+            return SupervisorDecision(
+                action="GENERATE",
+                reasoning="This research mode needs an evidence plan and literature synthesis before review.",
+            )
+        if "META_REVIEW" not in actions:
+            return SupervisorDecision(
+                action="META_REVIEW",
+                reasoning="Synthesizing the mode-specific questions, themes, claims, risks, and evidence gaps.",
+            )
+        return SupervisorDecision(
+            action="FINALIZE",
+            reasoning="Mode-specific evidence synthesis is complete; hypothesis-only agents are not applicable.",
+        )
 
     # 1. No hypotheses -> Generate
     if active_count == 0:
@@ -485,14 +567,30 @@ class SupervisorPlanner:
             proximity_data=proximity_data,
         )
 
+        # A persisted session stores provenance rather than source bodies. Do
+        # not allow either heuristic or model planning to reuse missing
+        # transient evidence in downstream stages.
+        if state.get("resume_requires_evidence_refresh"):
+            return SupervisorDecision(
+                action="GENERATE",
+                reasoning="Restored state needs fresh transient evidence before any downstream action.",
+            )
+
         if mode == "heuristic":
             return decide_action_heuristically(state, research_goal)
 
         # Attempt LLM-based planning
         try:
-            prompt = build_supervisor_planning_prompt(state, research_goal)
+            available_actions: Sequence[str] = SUPERVISOR_ACTIONS
+            if not state.get("hypothesis_pipeline_enabled", True):
+                available_actions = ("GENERATE", "META_REVIEW", "FINALIZE")
+            prompt = build_supervisor_planning_prompt(
+                state,
+                research_goal,
+                available_actions=available_actions,
+            )
             response = _call_llm(prompt, temperature=0.2)
-            decision = parse_supervisor_decision(response)
+            decision = parse_supervisor_decision(response, available_actions=available_actions)
             if decision is not None:
                 return decision
         except Exception as exc:

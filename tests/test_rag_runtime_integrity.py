@@ -9,7 +9,7 @@ import numpy as np
 from langchain_core.documents import Document
 
 from app.agents_modules.generation import GenerationAgent
-from app.agents_modules.generation_helpers import EvidenceCoverage
+from app.agents_modules.generation_helpers import AbstractScreeningResult, EvidenceCoverage
 from app.agents_modules.supervisor import SupervisorAgent
 from app.models import ContextMemory, Hypothesis, PairwiseDecision, ResearchGoal
 from app.paper_library import ChromaPaperLibrary, IndexIntegrityReport, PaperChunk
@@ -172,6 +172,23 @@ def test_corrective_full_text_path_reaches_complete_coverage_with_failover(tmp_p
         agentic_research_enabled=False,
     )
 
+    def screen_corrective_abstracts(_goal, candidates, *_args, **_kwargs):
+        return (
+            tuple(
+                AbstractScreeningResult(
+                    source_id=candidate["source_id"],
+                    decision="ACCEPT",
+                    relevance_score=8.0,
+                    reason="Relevant to the missing traffic-spike requirement.",
+                    evidence_requirement_ids=("spikes",),
+                    full_text_needed=True,
+                    full_text_questions=("What traffic-spike measurements were reported?",),
+                )
+                for candidate in candidates
+            ),
+            None,
+        )
+
     with (
         patch.object(agent, "_plan_and_retrieve_initial", return_value=(plan, None, [scope])),
         patch.object(
@@ -187,6 +204,10 @@ def test_corrective_full_text_path_reaches_complete_coverage_with_failover(tmp_p
                 (["arXiv:scope"], None, incomplete, None),
                 (["arXiv:scope", "arXiv:spike-working"], None, complete, None),
             ],
+        ),
+        patch(
+            "app.agents_modules.generation.call_llm_for_abstract_screening",
+            side_effect=screen_corrective_abstracts,
         ),
         patch("app.agents.call_llm", side_effect=[synthesis, generated]),
     ):
