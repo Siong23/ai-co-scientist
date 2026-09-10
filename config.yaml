@@ -85,7 +85,7 @@ elo_k_factor: 32
 # pairwise tournament debates. A smaller, faster model reduces latency when many
 # comparisons run in parallel.
 # ranking_llm_model: "qwen/qwen3.6-35b-a3b"
-ranking_llm_model: qwen/qwen3.5-9b
+ranking_llm_model: qwen/qwen3.8-27b
 # set ranking model to "null" to use the main llm_model for pairwise tournament debates. A smaller, faster model reduces latency when many comparisons run in parallel.
 
 ranking:
