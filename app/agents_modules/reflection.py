@@ -101,7 +101,7 @@ class ReflectionAgent:
             # evidence, review history, and tournament provenance.  A REVISE
             # recommendation is consumed by Evolution, which creates a child.
 
-            logger.info(
+            logger.debug(
                 "Reviewed hypothesis: %s, Novelty: %s, Feasibility: %s",
                 h.hypothesis_id,
                 h.novelty_review,
@@ -113,7 +113,7 @@ class ReflectionAgent:
                 review_one(hypothesis)
             return
 
-        logger.info("Reviewing %d hypotheses with %d workers.", len(pending), max_workers)
+        logger.debug("Reviewing %d hypotheses with %d workers.", len(pending), max_workers)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             list(executor.map(review_one, pending))
 
@@ -139,7 +139,7 @@ class ReflectionAgent:
                     if validate_evolution_candidate(candidate, [hypo], "feasibility"):
                         return None
                     child = create_evolved_hypothesis(candidate, [hypo], "feasibility")
-                    logger.info("Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id)
+                    logger.debug("Revised hypothesis %s after REVISE verdict.", hypo.hypothesis_id)
                     return child
             except Exception as exc:
                 logger.warning(

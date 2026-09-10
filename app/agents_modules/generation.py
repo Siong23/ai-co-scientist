@@ -774,7 +774,7 @@ class GenerationAgent:
             if callable(record_gate):
                 record_gate(source_id_value, retained=retained, reason=rejection_reason)
         self.last_evidence_gate_diagnostics = gate_diagnostics
-        logger.info(
+        logger.debug(
             "Evidence gate retained %d/%d source(s): web sources require "
             "extracted content; academic sources require indexed full text.",
             len(retained_documents),
@@ -1421,7 +1421,7 @@ Your refined contribution:
                 )
                 break
 
-            logger.info(
+            logger.debug(
                 "Agentic research action=%s target=%s queries=%s reason=%s",
                 decision.action,
                 decision.target,
@@ -1492,7 +1492,7 @@ Your refined contribution:
                 break
 
             if not action_documents:
-                logger.info(
+                logger.debug(
                     "Agentic retrieval returned no documents for action %s; proceeding to generation.",
                     decision.action,
                 )
@@ -1509,7 +1509,7 @@ Your refined contribution:
             )
 
             if not prepared_action_documents:
-                logger.info(
+                logger.debug(
                     "Agentic retrieval produced no generation-eligible documents for action %s.",
                     decision.action,
                 )
@@ -1525,7 +1525,7 @@ Your refined contribution:
             merged_documents = merged_documents[: self.agentic_max_sources]
 
             if len(merged_documents) <= len(current_documents):
-                logger.info("Agentic retrieval added no new evidence after deduplication; proceeding to generation.")
+                logger.debug("Agentic retrieval added no new evidence after deduplication; proceeding to generation.")
                 break
 
             candidate_context = format_documents_for_prompt(merged_documents)
@@ -1756,7 +1756,8 @@ Your refined contribution:
             }
             for aspect in query_plan.explicit_requirements
         ]
-        logger.info(
+        logger.info("Research planning completed")
+        logger.debug(
             "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s "
             "provisional_hypotheses=%s exploration_directions=%s",
             query_plan.queries,
@@ -1765,6 +1766,7 @@ Your refined contribution:
             query_plan.provisional_hypotheses,
             query_plan.exploration_directions,
         )
+        logger.info("Evidence retrieval started")
 
         expanded_retrieval_attempted = False
 
@@ -1828,7 +1830,7 @@ Your refined contribution:
                 max_total_chars=self.max_grading_context_chars,
             )
 
-            logger.info(
+            logger.debug(
                 "Evidence grading context sources=%d chars=%d budget=%d",
                 len(documents_for_grading),
                 len(candidate_context),
@@ -1895,7 +1897,7 @@ Your refined contribution:
                 )
                 relevant_source_ids = []
             else:
-                logger.info(
+                logger.debug(
                     "RAG candidate count=%d relevance suggestions=%s",
                     len(documents_for_grading),
                     relevant_source_ids,
@@ -2043,7 +2045,7 @@ Your refined contribution:
                 missing_aspects[0].description if len(missing_aspects) == 1 else research_goal.description
             )
 
-            logger.info(
+            logger.debug(
                 "Corrective retrieval round %d for missing explicit requirements=%s queries=%s",
                 corrective_round + 1,
                 coverage.missing_aspect_ids,
@@ -2156,6 +2158,7 @@ Your refined contribution:
             "source_count": len(context.last_retrieved_sources),
             "detail": "Validated evidence passed relevance, coverage, and source-eligibility gates.",
         }
+        logger.info("Evidence retrieval completed")
         context.last_generation_diagnostics["literature_synthesis"] = {
             "status": "running",
         }
@@ -2538,12 +2541,13 @@ Your refined contribution:
                 hypothesis.audit_score = audit_report.get("weighted_score")
                 hypothesis.audit_verdict = audit_report.get("verdict")
 
-            logger.info(
+            logger.debug(
                 "Generated RAG-grounded hypothesis: %s",
                 hypothesis.to_dict(),
             )
             new_hypos.append(hypothesis)
 
+        logger.info("Hypothesis generation completed")
         context.last_generation_diagnostics["hypothesis_generation"] = {
             "status": "completed" if new_hypos else "failed",
             "candidate_count": len(new_hypos),

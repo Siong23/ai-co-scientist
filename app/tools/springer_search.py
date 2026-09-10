@@ -85,7 +85,7 @@ class SpringerSearchTool:
                 if usable_papers:
                     self.last_error_status = None
                     self.last_error_kind = ""
-                    logger.info(
+                    logger.debug(
                         "Springer Nature returned %d usable paper(s) for query %r.",
                         len(usable_papers),
                         query,

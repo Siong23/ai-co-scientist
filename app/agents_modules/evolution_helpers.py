@@ -518,7 +518,7 @@ def combine_hypotheses(hypoA: Hypothesis, hypoB: Hypothesis) -> Hypothesis:
     # Keep the combined text plain and structured so downstream code can process it safely.
     combined_text = f"Combination of:<br>1. {hypoA.text}<br>2. {hypoB.text}"
 
-    logger.info("Combining hypotheses %s and %s into %s", hypoA.hypothesis_id, hypoB.hypothesis_id, new_id)
+    logger.debug("Combining hypotheses %s and %s into %s", hypoA.hypothesis_id, hypoB.hypothesis_id, new_id)
     new_hypothesis = Hypothesis(new_id, combined_title, combined_text)
     new_hypothesis.parent_ids = [hypoA.hypothesis_id, hypoB.hypothesis_id]
     new_hypothesis.evolution_strategy = "combination_fallback"

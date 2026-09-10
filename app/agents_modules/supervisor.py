@@ -406,6 +406,7 @@ class SupervisorAgent:
             details=_reflection_details(active_hypos),
             elapsed_seconds=time.perf_counter() - phase_started,
         )
+        logger.info("Reflection completed")
         return reflection_routing
 
     def step_ranking(
@@ -469,6 +470,7 @@ class SupervisorAgent:
             details=_ranking_details(ranking_results),
             elapsed_seconds=time.perf_counter() - phase_started,
         )
+        logger.info("Ranking completed")
         return ranking_results
 
     def step_evolution(
@@ -518,6 +520,7 @@ class SupervisorAgent:
                 details=_evolution_details(evolution_attempts),
                 elapsed_seconds=time.perf_counter() - phase_started,
             )
+        logger.info("Evolution completed")
         return evolved_hypotheses or []
 
     def step_proximity(
@@ -578,6 +581,7 @@ class SupervisorAgent:
             f"Mapped {len(nodes)} hypotheses and {len(edges)} relationships.",
             elapsed_seconds=time.perf_counter() - phase_started,
         )
+        logger.info("Proximity completed")
         return proximity_result
 
     def step_meta_review(
@@ -616,6 +620,7 @@ class SupervisorAgent:
             details=_meta_review_details(overview),
             elapsed_seconds=time.perf_counter() - phase_started,
         )
+        logger.info("Meta review completed")
         return overview
 
     # -------------------------------------------------------------------------

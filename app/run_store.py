@@ -19,6 +19,12 @@ from .utils import redact_secrets, logger
 DEFAULT_RESULTS_DIR = Path("results")
 RUNS_DIR_ENV = "CO_SCIENTIST_RUNS_DIR"
 
+# Stamped into every rendered report so ensure_report() can tell a report built
+# by the current template from one left over by an older version. Bump the
+# version whenever render_report()'s output changes in a way that should
+# invalidate reports already on disk.
+REPORT_TEMPLATE_MARKER = "<!-- co-scientist-report-template: v1 -->"
+
 SECRET_PATTERNS = [
     re.compile(r"sk-or-v1-[A-Za-z0-9_-]+"),
     re.compile(r"sk-proj-[A-Za-z0-9_-]+"),
@@ -245,6 +251,7 @@ def render_report(run: Dict[str, Any]) -> str:
 
     html_parts = [
         "<!doctype html>",
+        REPORT_TEMPLATE_MARKER,
         '<html lang="en">',
         "<head>",
         '<meta charset="utf-8">',
@@ -587,12 +594,12 @@ def _experiment_report_section(
         or experiment_result.get("stderr_path")
     )
 
-    logger.info(
+    logger.debug(
         "Final stdout_path: %r",
         stdout_path,
     )
 
-    logger.info(
+    logger.debug(
         "Final stderr_path: %r",
         stderr_path,
     )
@@ -649,32 +656,32 @@ def _experiment_report_section(
     # Debug logging
     # ------------------------------------------------------------
 
-    logger.info(
+    logger.debug(
         "Experiment report execution keys: %s",
         list(experiment_execution.keys()),
     )
 
-    logger.info(
+    logger.debug(
         "Experiment report runner execution keys: %s",
         list(runner_execution.keys()),
     )
 
-    logger.info(
+    logger.debug(
         "stdout_path from experiment_result: %r",
         stdout_path,
     )
 
-    logger.info(
+    logger.debug(
         "stderr_path from experiment_result: %r",
         stderr_path,
     )
 
-    logger.info(
+    logger.debug(
         "resolved stdout path: %r",
         resolve_file_path(stdout_path),
     )
 
-    logger.info(
+    logger.debug(
         "resolved stderr path: %r",
         resolve_file_path(stderr_path),
     )
@@ -814,7 +821,39 @@ def write_report(run: Dict[str, Any]) -> Path:
     return report_path
 
 
+def _report_is_reusable(report_path: Path, run_path: Path) -> bool:
+    """True when an existing report file can stand in for a fresh render."""
+    try:
+        report_stat = report_path.stat()
+        run_stat = run_path.stat()
+    except OSError:
+        return False
+
+    # A run JSON is an immutable audit snapshot, so a report written after it is
+    # still an accurate rendering of that run.
+    if not report_stat.st_size or report_stat.st_mtime < run_stat.st_mtime:
+        return False
+
+    # Reject reports left over from an older report template.
+    try:
+        with report_path.open("r", encoding="utf-8") as handle:
+            head = handle.read(len(REPORT_TEMPLATE_MARKER) + 128)
+    except OSError:
+        return False
+    return REPORT_TEMPLATE_MARKER in head
+
+
 def ensure_report(run_id: str) -> Path:
+    """Return the run's HTML report, rendering it only when necessary.
+
+    Run History refreshes call this once per listed run. Re-rendering every past
+    report on each refresh is wasted work, so an existing report that is newer
+    than its (immutable) run JSON and carries the current template marker is
+    reused as-is.
+    """
+    report_path = get_reports_dir() / f"{Path(run_id).name}.html"
+    if _report_is_reusable(report_path, get_run_path(run_id)):
+        return report_path
     return write_report(load_run(run_id))
 
 
