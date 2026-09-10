@@ -24,6 +24,12 @@ from .evidence import (
     coerce_evidence,
     evidence_from_result,
 )
+from .research_modes import (
+    ResearchType,
+    normalize_research_type,
+    research_type_allows_hypotheses,
+    research_type_requires_hypotheses,
+)
 from .search_backoff import guarded_search
 from .tools.arxiv_search import ArxivSearchTool
 from .tools.elsevier_search import ElsevierSearchTool
@@ -63,6 +69,88 @@ class ProvisionalHypothesis:
     role: HypothesisRole
     statement: str
     goal_quote: str
+
+
+@dataclass(frozen=True)
+class ResearchPlan:
+    """Mode-aware output from the research-planning stage."""
+
+    research_goal: str
+    research_type: ResearchType
+    key_entities: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    sub_questions: tuple[str, ...] = ()
+    evidence_requirements: tuple[str, ...] = ()
+    freshness_requirement: str = ""
+    ambiguities: tuple[str, ...] = ()
+    search_strategy: str = ""
+    provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
+    competing_candidates: tuple[str, ...] = ()
+    competing_explanations: tuple[str, ...] = ()
+    comparison_dimensions: tuple[str, ...] = ()
+    research_questions: tuple[str, ...] = ()
+    topic_dimensions: tuple[str, ...] = ()
+    themes: tuple[str, ...] = ()
+    controversies: tuple[str, ...] = ()
+    evidence_dimensions: tuple[str, ...] = ()
+    areas_of_agreement: tuple[str, ...] = ()
+    areas_of_disagreement: tuple[str, ...] = ()
+    literature_gaps: tuple[str, ...] = ()
+    claims: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
+    counterclaims: tuple[str, ...] = ()
+    primary_source_checks: tuple[str, ...] = ()
+    missing_evidence: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "research_type", normalize_research_type(self.research_type))
+
+    @property
+    def hypothesis_pipeline_enabled(self) -> bool:
+        if research_type_requires_hypotheses(self.research_type):
+            return True
+        return research_type_allows_hypotheses(self.research_type) and bool(self.provisional_hypotheses)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe plan without losing mode-specific structure."""
+
+        return {
+            "research_goal": self.research_goal,
+            "research_type": self.research_type,
+            "key_entities": list(self.key_entities),
+            "constraints": list(self.constraints),
+            "sub_questions": list(self.sub_questions),
+            "evidence_requirements": list(self.evidence_requirements),
+            "freshness_requirement": self.freshness_requirement,
+            "ambiguities": list(self.ambiguities),
+            "search_strategy": self.search_strategy,
+            "provisional_hypotheses": [
+                {
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "role": hypothesis.role,
+                    "statement": hypothesis.statement,
+                    "goal_quote": hypothesis.goal_quote,
+                }
+                for hypothesis in self.provisional_hypotheses
+            ],
+            "competing_candidates": list(self.competing_candidates),
+            "competing_explanations": list(self.competing_explanations),
+            "comparison_dimensions": list(self.comparison_dimensions),
+            "research_questions": list(self.research_questions),
+            "topic_dimensions": list(self.topic_dimensions),
+            "themes": list(self.themes),
+            "controversies": list(self.controversies),
+            "evidence_dimensions": list(self.evidence_dimensions),
+            "areas_of_agreement": list(self.areas_of_agreement),
+            "areas_of_disagreement": list(self.areas_of_disagreement),
+            "literature_gaps": list(self.literature_gaps),
+            "claims": list(self.claims),
+            "risks": list(self.risks),
+            "counterclaims": list(self.counterclaims),
+            "primary_source_checks": list(self.primary_source_checks),
+            "missing_evidence": list(self.missing_evidence),
+            "hypothesis_pipeline_enabled": self.hypothesis_pipeline_enabled,
+        }
 
 
 SearchRoute = Literal["academic", "web", "official", "news", "all"]
@@ -124,6 +212,8 @@ class SearchQueryPlan:
     explicit_requirements: tuple[EvidenceAspect, ...] = ()
     exploration_directions: tuple[str, ...] = ()
     provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
+    research_type: ResearchType | str = "hypothesis_testing"
+    research_plan: ResearchPlan | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -135,6 +225,22 @@ class SearchQueryPlan:
                 if isinstance(query, SearchQuery) or str(query).strip()
             ),
         )
+        normalized_type = normalize_research_type(
+            self.research_plan.research_type if self.research_plan is not None else self.research_type
+        )
+        object.__setattr__(self, "research_type", normalized_type)
+        if self.research_plan is not None and not self.provisional_hypotheses:
+            object.__setattr__(
+                self,
+                "provisional_hypotheses",
+                self.research_plan.provisional_hypotheses,
+            )
+
+    @property
+    def hypothesis_pipeline_enabled(self) -> bool:
+        if self.research_plan is not None:
+            return self.research_plan.hypothesis_pipeline_enabled
+        return research_type_requires_hypotheses(self.research_type)
 
     @property
     def query_texts(self) -> tuple[str, ...]:

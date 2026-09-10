@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.models import ResearchGoal
 from app.run_store import (
     _final_hypotheses,
@@ -81,6 +83,25 @@ def test_save_run_persists_json_and_redacts_secrets(tmp_path, monkeypatch):
     assert run["run_id"] == "run-test"
     assert FAKE_KEY not in serialized
     assert "***REDACTED***" in serialized
+
+
+def test_saved_run_snapshot_cannot_be_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
+    arguments = {
+        "research_goal": ResearchGoal(description="Immutable audit history"),
+        "cycle_details": {"iteration": 1, "steps": {}},
+        "status": "done",
+        "references_html": "",
+        "results_html": "",
+        "run_id": "run-immutable",
+    }
+
+    save_run(**arguments)
+
+    with pytest.raises(FileExistsError):
+        save_run(**{**arguments, "status": "replacement"})
+    saved = json.loads((tmp_path / "runs" / "run-immutable.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "done"
 
 
 def test_save_run_persists_experiment_result(tmp_path, monkeypatch):

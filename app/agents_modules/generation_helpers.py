@@ -18,8 +18,14 @@ from ..models import EvidenceClaim
 from ..rag_retriever import (
     EvidenceAspect,
     ProvisionalHypothesis,
+    ResearchPlan,
     SearchQuery,
     SearchQueryPlan,
+)
+from ..research_modes import (
+    normalize_research_type,
+    research_type_allows_hypotheses,
+    research_type_requires_hypotheses,
 )
 from ..utils import logger
 
@@ -397,6 +403,7 @@ def call_llm_for_search_queries(
     research_goal: str,
     model: str | None = None,
     query_count: int = 5,
+    research_type: str = "auto",
     research_planner_prompt: str | None = None,
     query_rewriter_prompt: str | None = None,
     query_fidelity_validator: (Callable[[SearchQueryPlan], tuple[bool, str]] | None) = None,
@@ -406,7 +413,8 @@ def call_llm_for_search_queries(
     Executes a two-stage LLM workflow:
       Stage 1: Research Planner analyzes the user's research goal and outputs a
                structured plan containing key entities, constraints, sub-questions,
-               evidence requirements, and 3 provisional hypotheses (primary, alternative, null).
+               evidence requirements, mode-specific structures, and optional
+               retrieval hypotheses when scientifically appropriate.
       Stage 2: Query Rewriter takes the structured plan and converts sub-questions
                into routed search queries (academic, web, official, news) with
                targeted search intents (goal, support, counterevidence, prior_art).
@@ -437,10 +445,16 @@ def call_llm_for_search_queries(
             raise ValueError("Expected a JSON object.")
         return payload
 
+    requested_type = str(research_type or "auto").strip().casefold().replace("-", "_").replace(" ", "_")
+    fixed_research_type = None if requested_type == "auto" else normalize_research_type(requested_type)
+    resolved_research_type = fixed_research_type or normalize_research_type("")
     provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
+    structured_research_plan: ResearchPlan | None = None
 
     def parse_provisional_hypotheses(
         payload: dict,
+        *,
+        required: bool,
     ) -> tuple[ProvisionalHypothesis, ...]:
         raw_hypotheses = payload.get("provisional_hypotheses")
         if not isinstance(raw_hypotheses, list):
@@ -481,11 +495,11 @@ def call_llm_for_search_queries(
                 )
             )
 
-        if seen_roles != {"primary", "alternative", "null"}:
+        if required and seen_roles != {"primary", "alternative", "null"}:
             raise ValueError("Expected one goal-anchored primary, alternative, and null provisional hypothesis.")
         return tuple(hypotheses)
 
-    def parse_research_plan(response: str) -> dict:
+    def parse_research_plan(response: str) -> ResearchPlan:
         payload = parse_json_object(response)
         string_fields = (
             "research_goal",
@@ -505,8 +519,101 @@ def call_llm_for_search_queries(
             not isinstance(payload.get(field), list) for field in list_fields
         ):
             raise ValueError("Research Planner returned an incomplete plan schema.")
-        parse_provisional_hypotheses(payload)
-        return payload
+        plan_research_type = fixed_research_type or normalize_research_type(payload.get("research_type"))
+        parsed_hypotheses = parse_provisional_hypotheses(
+            payload,
+            required=research_type_requires_hypotheses(plan_research_type),
+        )
+        if parsed_hypotheses and not research_type_allows_hypotheses(plan_research_type):
+            raise ValueError(f"Research type {plan_research_type!r} must not fabricate provisional hypotheses.")
+
+        def values(field: str, fallback: tuple[str, ...] = ()) -> tuple[str, ...]:
+            raw_values = payload.get(field)
+            if raw_values is None:
+                return fallback
+            if not isinstance(raw_values, list):
+                raise ValueError(f"Research Planner field {field!r} must be an array.")
+            return tuple(dict.fromkeys(item.strip() for item in raw_values if isinstance(item, str) and item.strip()))
+
+        sub_questions = values("sub_questions")
+        competing_candidates = values("competing_candidates")
+        competing_explanations = values("competing_explanations")
+        comparison_dimensions = values("comparison_dimensions")
+        research_questions = values("research_questions", sub_questions)
+        topic_dimensions = values("topic_dimensions")
+        themes = values("themes")
+        evidence_dimensions = values("evidence_dimensions")
+        claims = values("claims")
+        risks = values("risks")
+        counterclaims = values("counterclaims")
+        primary_source_checks = values("primary_source_checks")
+        missing_evidence = values("missing_evidence")
+
+        if plan_research_type == "comparative" and (
+            len((*competing_candidates, *competing_explanations)) < 2 or not comparison_dimensions
+        ):
+            raise ValueError(
+                "Comparative planning requires at least two competing candidates or explanations "
+                "and comparison_dimensions."
+            )
+        if plan_research_type == "exploratory" and (
+            not research_questions or not topic_dimensions or not missing_evidence
+        ):
+            raise ValueError(
+                "Exploratory planning requires research_questions, topic_dimensions, and missing_evidence."
+            )
+        areas_of_agreement = values("areas_of_agreement")
+        areas_of_disagreement = values("areas_of_disagreement")
+        literature_gaps = values("literature_gaps")
+        if plan_research_type == "literature_review" and (
+            not themes
+            or not evidence_dimensions
+            or not areas_of_agreement
+            or not areas_of_disagreement
+            or not literature_gaps
+        ):
+            raise ValueError(
+                "Literature-review planning requires themes, evidence_dimensions, "
+                "areas_of_agreement, areas_of_disagreement, and literature_gaps."
+            )
+        if plan_research_type == "due_diligence" and (
+            not claims or not risks or not counterclaims or not primary_source_checks or not missing_evidence
+        ):
+            raise ValueError(
+                "Due-diligence planning requires claims, risks, counterclaims, primary_source_checks, "
+                "and missing_evidence."
+            )
+
+        return ResearchPlan(
+            # The original request remains authoritative even when the planner
+            # paraphrases its research_goal field.
+            research_goal=research_goal.strip(),
+            research_type=plan_research_type,
+            key_entities=values("key_entities"),
+            constraints=values("constraints"),
+            sub_questions=sub_questions,
+            evidence_requirements=values("evidence_requirements"),
+            freshness_requirement=str(payload["freshness_requirement"]).strip(),
+            ambiguities=values("ambiguities"),
+            search_strategy=str(payload["search_strategy"]).strip(),
+            provisional_hypotheses=parsed_hypotheses,
+            competing_candidates=competing_candidates,
+            competing_explanations=competing_explanations,
+            comparison_dimensions=comparison_dimensions,
+            research_questions=research_questions,
+            topic_dimensions=topic_dimensions,
+            themes=themes,
+            controversies=values("controversies"),
+            evidence_dimensions=evidence_dimensions,
+            areas_of_agreement=areas_of_agreement,
+            areas_of_disagreement=areas_of_disagreement,
+            literature_gaps=literature_gaps,
+            claims=claims,
+            risks=risks,
+            counterclaims=counterclaims,
+            primary_source_checks=primary_source_checks,
+            missing_evidence=missing_evidence,
+        )
 
     def parse_response(response: str) -> SearchQueryPlan:
         payload = parse_json_object(response)
@@ -683,15 +790,13 @@ def call_llm_for_search_queries(
         )
         if len(exploration_directions) > 5:
             raise ValueError("Expected no more than 5 exploration directions.")
-        if provisional_hypotheses and query_count >= 3:
+        if structured_research_plan is not None and query_count >= 3:
             search_intents = {query.search_intent for query in normalized_queries}
             required_intents = {"support", "counterevidence", "prior_art"}
             missing_intents = required_intents - search_intents
             if missing_intents:
-                # Synthesize targeted queries for missing intents instead of
-                # discarding all valid queries.  The primary hypothesis
-                # anchors prior_art; the null hypothesis anchors
-                # counterevidence.
+                # Synthesize targeted queries instead of discarding a valid
+                # plan. Hypothesis-free modes stay anchored to the goal.
                 primary = next(
                     (h for h in provisional_hypotheses if h.role == "primary"),
                     provisional_hypotheses[0] if provisional_hypotheses else None,
@@ -700,29 +805,27 @@ def call_llm_for_search_queries(
                     (h for h in provisional_hypotheses if h.role == "null"),
                     None,
                 )
+                synthesized_queries: list[SearchQuery] = []
+                sole_requirement_id = explicit_requirements[0].aspect_id if len(explicit_requirements) == 1 else None
                 for intent in sorted(missing_intents):
                     anchor = primary
                     if intent == "prior_art" and primary:
-                        query_text = (
-                            primary.statement[:80].rstrip()
-                            + " existing methods prior work"
-                        )
+                        query_text = primary.statement[:80].rstrip() + " existing methods prior work"
                         sub_q = f"What prior work exists on: {primary.statement[:60]}?"
                     elif intent == "counterevidence":
                         anchor = null_hyp or primary
-                        if not anchor:
-                            continue
-                        query_text = (
-                            anchor.statement[:80].rstrip()
-                            + " limitations challenges failures"
-                        )
-                        sub_q = f"What evidence challenges: {anchor.statement[:60]}?"
+                        anchor_text = anchor.statement if anchor else research_goal
+                        query_text = anchor_text[:80].rstrip() + " limitations challenges contradictory evidence"
+                        sub_q = f"What evidence challenges: {anchor_text[:60]}?"
                     elif intent == "support" and primary:
-                        query_text = (
-                            primary.statement[:80].rstrip()
-                            + " experimental evidence validation"
-                        )
+                        query_text = primary.statement[:80].rstrip() + " experimental evidence validation"
                         sub_q = f"What evidence supports: {primary.statement[:60]}?"
+                    elif intent == "prior_art":
+                        query_text = research_goal[:80].rstrip() + " existing literature prior art"
+                        sub_q = "What prior work addresses the research goal?"
+                    elif intent == "support":
+                        query_text = research_goal[:80].rstrip() + " empirical evidence primary sources"
+                        sub_q = "What evidence supports claims relevant to the research goal?"
                     else:
                         continue
                     synthesized = SearchQuery(
@@ -730,10 +833,44 @@ def call_llm_for_search_queries(
                         sub_question=sub_q,
                         purpose=f"Synthesized {intent} query for missing intent",
                         source_type="academic",
+                        evidence_requirement_id=sole_requirement_id,
                         hypothesis_id=anchor.hypothesis_id if anchor else None,
                         search_intent=intent,
                     )
-                    normalized_queries.append(synthesized)
+                    synthesized_queries.append(synthesized)
+
+                # Stay within the configured query budget. Prefer filling free
+                # slots; otherwise replace generic goal-intent queries while
+                # carrying their requirement reference forward.
+                replaceable = [
+                    index
+                    for index in range(len(normalized_queries) - 1, -1, -1)
+                    if normalized_queries[index].search_intent == "goal"
+                ]
+                for synthesized in synthesized_queries:
+                    if len(normalized_queries) < query_count:
+                        normalized_queries.append(synthesized)
+                        continue
+                    if not replaceable:
+                        raise ValueError(
+                            "Query plan omitted required support, counterevidence, or prior-art intents "
+                            "and left no generic query within the query budget to replace."
+                        )
+                    index = replaceable.pop(0)
+                    replaced = normalized_queries[index]
+                    normalized_queries[index] = SearchQuery(
+                        query=synthesized.query,
+                        sub_question=synthesized.sub_question,
+                        purpose=synthesized.purpose,
+                        source_type=synthesized.source_type,
+                        preferred_domains=synthesized.preferred_domains,
+                        freshness=synthesized.freshness,
+                        evidence_requirement_id=(
+                            replaced.evidence_requirement_id or synthesized.evidence_requirement_id
+                        ),
+                        hypothesis_id=synthesized.hypothesis_id,
+                        search_intent=synthesized.search_intent,
+                    )
                 logger.info(
                     "Synthesized %d queries for missing intents: %s",
                     len(missing_intents),
@@ -746,11 +883,16 @@ def call_llm_for_search_queries(
             explicit_requirements=tuple(explicit_requirements),
             exploration_directions=exploration_directions,
             provisional_hypotheses=provisional_hypotheses,
+            research_type=resolved_research_type,
+            research_plan=structured_research_plan,
         )
 
     planner_prompt = f"""
 USER RESEARCH GOAL
 {research_goal}
+
+REQUESTED RESEARCH TYPE
+{fixed_research_type or "auto (infer one supported research type)"}
 """.strip()
     planner_response = _call_llm(
         planner_prompt,
@@ -785,8 +927,9 @@ USER RESEARCH GOAL
                     + "\n\nYour previous response was invalid because: "
                     + str(planner_error)
                     + ". Recreate the complete plan as compact valid JSON. "
-                    "Use the exact required schema, exactly three provisional "
-                    "hypotheses, and the list-size limits in the system prompt.",
+                    "Use the exact required schema, the mode-specific planning "
+                    "fields, and the list-size limits in the system prompt. Include "
+                    "primary/alternative/null hypotheses only when the mode requires them.",
                     temperature=0.0,
                     model=model,
                     system_prompt=research_planner_prompt,
@@ -796,8 +939,16 @@ USER RESEARCH GOAL
                 if planner_response.startswith("Error:"):
                     return None, f"Query rewriting failed: Research planning repair failed: {planner_response}"
             try:
-                research_plan = parse_research_plan(planner_response)
-                provisional_hypotheses = parse_provisional_hypotheses(research_plan)
+                structured_research_plan = parse_research_plan(planner_response)
+                research_plan = structured_research_plan.to_dict()
+                planner_declared_type = str(first_payload.get("research_type") or "").strip()
+                if planner_declared_type and planner_declared_type != structured_research_plan.research_type:
+                    # Keep the original planner label visible to the rewriter
+                    # for backward compatibility, while the typed mode remains
+                    # the sole control value used by the application.
+                    research_plan["planner_declared_research_type"] = planner_declared_type
+                resolved_research_type = structured_research_plan.research_type
+                provisional_hypotheses = structured_research_plan.provisional_hypotheses
                 break
             except (json.JSONDecodeError, ValueError) as exc:
                 planner_error = exc

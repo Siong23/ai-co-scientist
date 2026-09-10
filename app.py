@@ -17,6 +17,7 @@ from app.experiments.experiment_orchestrator import (
     ExperimentOrchestrator,
 )
 from app.models import ContextMemory, ResearchGoal
+from app.research_state import LocalJSONResearchStateStore, ResearchStateError
 from app.research_trace import format_research_trace_html, merge_trace_event, normalize_trace_event
 from app.run_store import (
     _escape,
@@ -44,13 +45,24 @@ from app.utils import (
 global_context = ContextMemory()
 supervisor = SupervisorAgent()
 current_research_goal: Optional[ResearchGoal] = None
+research_state_store = LocalJSONResearchStateStore(
+    root_dir=(config.get("research_state", {}) or {}).get("directory") or None
+)
 available_models: List[str] = []
 CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
 CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "1800"))
 EXPERIMENT_DATASET_PATH = os.getenv("EXPERIMENT_DATASET_PATH", "")
-EXPERIMENT_DEVICE = os.getenv("EXPERIMENT_DEVICE", "cpu",)
-EXPERIMENT_TIMEOUT_SECONDS = int(os.getenv("EXPERIMENT_TIMEOUT_SECONDS", "3600",))
+EXPERIMENT_DEVICE = os.getenv(
+    "EXPERIMENT_DEVICE",
+    "cpu",
+)
+EXPERIMENT_TIMEOUT_SECONDS = int(
+    os.getenv(
+        "EXPERIMENT_TIMEOUT_SECONDS",
+        "3600",
+    )
+)
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 _cycle_run_lock = threading.Lock()
 
@@ -151,6 +163,8 @@ def delete_history_run(selected_run_id: Optional[str]) -> Tuple[str, str, Dict[s
 
 def load_history_run(selected_run_id: Optional[str]) -> Tuple[Any, ...]:
     """Load a saved run into the main view without making an LLM call."""
+    global current_research_goal, global_context
+
     if not selected_run_id:
         return (gr.skip(),) * 12
 
@@ -165,6 +179,10 @@ def load_history_run(selected_run_id: Optional[str]) -> Tuple[Any, ...]:
     description = goal_data.get("description") or ""
     loaded_goal = ResearchGoal(
         description=description,
+        preferences=goal_data.get("preferences")
+        or "Novelty, feasibility, scientific validity, practical applicability, clarity, and potential impact.",
+        idea_attributes=goal_data.get("idea_attributes")
+        or "novelty, feasibility, correctness, utility, specificity, and originality",
         constraints=goal_data.get("constraints") or {},
         llm_model=goal_data.get("llm_model"),
         query_rewrite_model=goal_data.get("query_rewrite_model"),
@@ -173,17 +191,36 @@ def load_history_run(selected_run_id: Optional[str]) -> Tuple[Any, ...]:
         reflection_temperature=goal_data.get("reflection_temperature"),
         elo_k_factor=goal_data.get("elo_k_factor"),
         top_k_hypotheses=goal_data.get("top_k_hypotheses"),
+        research_type=goal_data.get("research_type") or goal_data.get("resolved_research_type") or "auto",
+        research_id=goal_data.get("research_id"),
     )
+    resumed = False
+    resume_warning = ""
+    research_id = str(goal_data.get("research_id") or "").strip()
+    state_enabled = bool((config.get("research_state", {}) or {}).get("enabled", True))
+    if state_enabled and research_id:
+        try:
+            if research_state_store.exists(research_id):
+                resumed_session = research_state_store.load(research_id)
+                loaded_goal = resumed_session.research_goal
+                current_research_goal = loaded_goal
+                global_context = resumed_session.context
+                resumed = True
+        except (ResearchStateError, OSError, ValueError) as exc:
+            resume_warning = (
+                f"\n\nA research-state checkpoint exists but could not be resumed safely: {redact_secrets(str(exc))}"
+            )
     model_choices = list(available_models)
     if loaded_goal.llm_model and loaded_goal.llm_model not in model_choices:
         model_choices.append(loaded_goal.llm_model)
 
     stored_status = run.get("status") or "No status was recorded for this run."
-    status = f"Loaded saved run {run.get('run_id', selected_run_id)}.\n\n{stored_status}"
+    load_action = "Resumed current research session associated with" if resumed else "Loaded saved run"
+    status = f"{load_action} {run.get('run_id', selected_run_id)}.\n\n{stored_status}{resume_warning}"
     cycle_details = run.get("cycle_details") or {}
     trace = cycle_details.get("research_trace") or []
     return (
-        description,
+        loaded_goal.description,
         status,
         format_research_trace_html(trace, elapsed_seconds=cycle_details.get("execution_time")),
         run.get("results_html") or "<p>No results were recorded for this run.</p>",
@@ -222,11 +259,43 @@ def set_research_goal(
         return "❌ Error: Please enter a research goal.", ""
 
     try:
+        normalized_description = description.strip()
+        requested_model = (
+            llm_model
+            if llm_model and llm_model != "-- Select Model --"
+            else config.get("llm_model", "google/gemini-flash-1.5")
+        )
+        same_session = bool(
+            current_research_goal
+            and global_context.research_id
+            and global_context.research_id == current_research_goal.research_id
+            and current_research_goal.description == normalized_description
+            and current_research_goal.llm_model == requested_model
+            and current_research_goal.num_hypotheses == num_hypotheses
+            and current_research_goal.generation_temperature == generation_temperature
+            and current_research_goal.reflection_temperature == reflection_temperature
+            and current_research_goal.elo_k_factor == elo_k_factor
+            and current_research_goal.top_k_hypotheses == top_k_hypotheses
+        )
+        if same_session:
+            logger.info(
+                "Continuing research session %s at cycle %d.",
+                current_research_goal.research_id,
+                global_context.iteration_number + 1,
+            )
+            status_msg = (
+                "✅ Continuing existing research session!\n\n"
+                f"{to_bold('Goal:')} {normalized_description}\n"
+                f"{to_bold('Research ID:')} {current_research_goal.research_id}\n"
+                f"{to_bold('Next cycle:')} {global_context.iteration_number + 1}"
+            )
+            return status_msg, "Existing research state retained."
+
         # Create research goal with settings
         current_research_goal = ResearchGoal(
-            description=description.strip(),
+            description=normalized_description,
             constraints={},
-            llm_model=llm_model if llm_model and llm_model != "-- Select Model --" else None,
+            llm_model=requested_model,
             num_hypotheses=num_hypotheses,
             generation_temperature=generation_temperature,
             reflection_temperature=reflection_temperature,
@@ -235,7 +304,10 @@ def set_research_goal(
         )
 
         # Reset context
-        global_context = ContextMemory()
+        global_context = ContextMemory(
+            research_id=current_research_goal.research_id,
+            research_type=current_research_goal.resolved_research_type or "hypothesis_testing",
+        )
 
         logger.info(f"Research goal set: {description}")
         logger.info(f"Settings: model={current_research_goal.llm_model}, num={current_research_goal.num_hypotheses}")
@@ -275,6 +347,19 @@ def format_experiment_results_html(
 
     import html as html_lib
 
+    if experiment_result.get("status") == "skipped_for_research_type":
+        research_type = html_lib.escape(str(experiment_result.get("research_type") or "this research mode"))
+        reason = html_lib.escape(
+            str(experiment_result.get("reason") or "No hypothesis candidate was available to test.")
+        )
+        return f"""
+        <div style="margin-top: 20px; padding: 15px; border: 2px solid #17a2b8; border-radius: 8px;">
+            <h2>🧪 Automated Experiment Skipped</h2>
+            <p><strong>Research type:</strong> {research_type}</p>
+            <p>{reason}</p>
+        </div>
+        """
+
     if not experiment_result.get(
         "success",
         False,
@@ -284,10 +369,7 @@ def format_experiment_results_html(
             [],
         )
 
-        error_items = "".join(
-            f"<li>{html_lib.escape(str(error))}</li>"
-            for error in errors
-        )
+        error_items = "".join(f"<li>{html_lib.escape(str(error))}</li>" for error in errors)
 
         return f"""
         <div style="
@@ -321,7 +403,6 @@ def format_experiment_results_html(
     metrics = {}
 
     if isinstance(execution, dict):
-
         outputs = execution.get(
             "outputs",
             {},
@@ -346,13 +427,9 @@ def format_experiment_results_html(
         "Unknown",
     )
 
-    hypothesis_title = selected.get(
-        "title"
-    ) or "Untitled Hypothesis"
+    hypothesis_title = selected.get("title") or "Untitled Hypothesis"
 
-    hypothesis_id = selected.get(
-        "hypothesis_id"
-    ) or "Unknown"
+    hypothesis_id = selected.get("hypothesis_id") or "Unknown"
 
     accuracy = metrics.get(
         "accuracy",
@@ -473,60 +550,71 @@ def execute_cycle(
         # Automated Experiment Pipeline
         # ================================================
 
+        hypothesis_pipeline_enabled = context.uses_hypothesis_pipeline()
         print("\n" + "=" * 60)
         print("AI CO-SCIENTIST WORKFLOW COMPLETED")
-        print("STARTING AUTOMATED EXPERIMENT PIPELINE")
+        print(
+            "STARTING AUTOMATED EXPERIMENT PIPELINE"
+            if hypothesis_pipeline_enabled
+            else "AUTOMATED EXPERIMENT NOT APPLICABLE TO THIS RESEARCH MODE"
+        )
         print("=" * 60)
 
-        print("\n[2/2] Running automated deep-learning experiment...")
-
-        logger.info(
-            "Starting automated experiment pipeline."
-        )
+        if hypothesis_pipeline_enabled:
+            print("\n[2/2] Running automated deep-learning experiment...")
+            logger.info("Starting automated experiment pipeline.")
+        else:
+            print("\n[2/2] Skipping hypothesis-dependent automated experiment.")
+            logger.info(
+                "Skipping automated experiment for research type %s without hypotheses.",
+                context.research_type,
+            )
 
         capture_progress(
             {
                 "step": "experiment",
-                "status": "running",
+                "status": "running" if hypothesis_pipeline_enabled else "completed",
                 "title": "Automated Experiment",
                 "summary": (
-                    "Selecting the best hypothesis and "
-                    "starting the PyTorch experiment."
+                    "Selecting the best hypothesis and starting the PyTorch experiment."
+                    if hypothesis_pipeline_enabled
+                    else (
+                        f"Skipped for {context.research_type}: this research plan has no hypothesis candidate to test."
+                    )
                 ),
                 "details": [],
             }
         )
 
-        dataset_path = (
-            EXPERIMENT_DATASET_PATH
-            if EXPERIMENT_DATASET_PATH
-            else None
-        )
+        dataset_path = EXPERIMENT_DATASET_PATH if EXPERIMENT_DATASET_PATH else None
 
-        experiment_orchestrator = (
-            ExperimentOrchestrator(
+        if hypothesis_pipeline_enabled:
+            experiment_orchestrator = ExperimentOrchestrator(
                 dataset_name="5G-NIDD",
                 dataset_path=dataset_path,
                 device=EXPERIMENT_DEVICE,
             )
-        )
-
-        experiment_result = (
-            experiment_orchestrator.run_experiment(
+            experiment_result = experiment_orchestrator.run_experiment(
                 context=context,
                 research_goal=research_goal,
                 execute_generated_code=True,
-                timeout_seconds=(
-                    EXPERIMENT_TIMEOUT_SECONDS
-                ),
+                timeout_seconds=(EXPERIMENT_TIMEOUT_SECONDS),
             )
-        )
+        else:
+            experiment_result = {
+                "success": False,
+                "status": "skipped_for_research_type",
+                "skipped": True,
+                "research_type": context.research_type,
+                "reason": "No hypothesis candidate exists in this research mode.",
+                "errors": [],
+            }
 
-        cycle_details[
-            "experiment_result"
-        ] = experiment_result
+        cycle_details["experiment_result"] = experiment_result
 
-        if experiment_result.get(
+        if experiment_result.get("status") == "skipped_for_research_type":
+            pass
+        elif experiment_result.get(
             "success",
             False,
         ):
@@ -537,25 +625,18 @@ def execute_cycle(
                     "step": "experiment",
                     "status": "completed",
                     "title": "Automated Experiment",
-                    "summary": (
-                        "PyTorch experiment completed "
-                        "successfully."
-                    ),
+                    "summary": ("PyTorch experiment completed successfully."),
                     "details": [],
                 }
             )
 
         else:
-            experiment_errors = (
-                experiment_result.get(
-                    "errors",
-                    [],
-                )
+            experiment_errors = experiment_result.get(
+                "errors",
+                [],
             )
 
-            print(
-                "\n✗ AUTOMATED EXPERIMENT FAILED"
-            )
+            print("\n✗ AUTOMATED EXPERIMENT FAILED")
 
             for error in experiment_errors:
                 print(f"  - {error}")
@@ -565,14 +646,8 @@ def execute_cycle(
                     "step": "experiment",
                     "status": "error",
                     "title": "Automated Experiment",
-                    "summary": (
-                        "The experiment pipeline completed "
-                        "with errors."
-                    ),
-                    "details": [
-                        str(error)
-                        for error in experiment_errors
-                    ],
+                    "summary": ("The experiment pipeline completed with errors."),
+                    "details": [str(error) for error in experiment_errors],
                 }
             )
 
@@ -601,9 +676,12 @@ def execute_cycle(
         # Format results for display (also logs final rankings)
         results_html = format_cycle_results(cycle_details, log_file=log_file)
 
-        experiment_result = cycle_details.get("experiment_result", {},)
+        experiment_result = cycle_details.get(
+            "experiment_result",
+            {},
+        )
 
-        experiment_results_html = (format_experiment_results_html(experiment_result))
+        experiment_results_html = format_experiment_results_html(experiment_result)
 
         results_html += experiment_results_html
 
@@ -686,8 +764,23 @@ def execute_cycle(
         }
 
 
-def persist_cycle_result(research_goal: ResearchGoal, cycle_result: Dict[str, Any]) -> Tuple[str, str, str]:
+def persist_cycle_result(
+    research_goal: ResearchGoal,
+    cycle_result: Dict[str, Any],
+    context: Optional[ContextMemory] = None,
+) -> Tuple[str, str, str]:
     """Persist an accepted cycle result and return Gradio output values."""
+    state_warning = ""
+    if context is not None and bool((config.get("research_state", {}) or {}).get("enabled", True)):
+        context.research_id = research_goal.research_id
+        try:
+            research_state_store.save(research_goal, context)
+        except (ResearchStateError, OSError, ValueError) as exc:
+            state_warning = "\n⚠️ The run report was saved, but its resumable research checkpoint could not be updated."
+            logger.warning(
+                "Research-state checkpoint could not be saved: %s",
+                redact_secrets(str(exc)),
+            )
     saved_run = save_run(
         research_goal=research_goal,
         cycle_details=cycle_result["cycle_details"],
@@ -698,7 +791,11 @@ def persist_cycle_result(research_goal: ResearchGoal, cycle_result: Dict[str, An
         experiment_result=cycle_result["cycle_details"].get("experiment_result"),
     )
     report_path = write_report(saved_run)
-    status_msg = f"{cycle_result['status']}\n{to_bold('Run ID:')} {saved_run['run_id']}\n{to_bold('Report:')} {report_file_url(report_path)}"
+    status_msg = (
+        f"{cycle_result['status']}{state_warning}\n"
+        f"{to_bold('Run ID:')} {saved_run['run_id']}\n"
+        f"{to_bold('Report:')} {report_file_url(report_path)}"
+    )
     return status_msg, cycle_result["results_html"], cycle_result["references_html"]
 
 
@@ -712,6 +809,7 @@ def run_cycle() -> Tuple[str, str, str]:
     return persist_cycle_result(
         current_research_goal,
         execute_cycle(current_research_goal, global_context, supervisor),
+        global_context,
     )
 
 
@@ -985,7 +1083,7 @@ def run_cycle_with_progress(
     cycle_result.setdefault("cycle_details", {})["research_trace"] = final_trace
     if current_research_goal is run_goal:
         global_context = run_context
-    status, results, references = persist_cycle_result(run_goal, cycle_result)
+    status, results, references = persist_cycle_result(run_goal, cycle_result, run_context)
     total_elapsed = cycle_result.get("cycle_details", {}).get("execution_time", time.monotonic() - started)
     yield status, results, references, format_research_trace_html(final_trace, elapsed_seconds=total_elapsed)
 
@@ -1025,8 +1123,18 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             </div>
             """
 
-    # Process steps in order
     steps = cycle_details.get("steps", {})
+    finalization = cycle_details.get("finalization", {})
+    hypothesis_pipeline_enabled = not (
+        isinstance(finalization, dict) and finalization.get("hypothesis_pipeline_enabled") is False
+    )
+    generation_plan = steps.get("generation", {}).get("query_plan", {})
+    research_type = (
+        (finalization.get("research_type") if isinstance(finalization, dict) else None)
+        or (generation_plan.get("research_type") if isinstance(generation_plan, dict) else None)
+        or "hypothesis_testing"
+    )
+    # Process steps in order
     generation_sources = steps.get("generation", {}).get("sources", [])
     if not isinstance(generation_sources, list):
         generation_sources = []
@@ -1171,7 +1279,16 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                         )
                     html += "</ul>"
                 html += "</details>"
-            html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
+            if hypotheses:
+                html += f"<p><strong>Generated {len(hypotheses)} new hypotheses:</strong></p>"
+            elif not hypothesis_pipeline_enabled:
+                html += (
+                    "<p><strong>Mode-specific evidence synthesis completed without "
+                    "fabricating hypotheses.</strong> "
+                    f"Research type: {html_lib.escape(str(research_type))}.</p>"
+                )
+            else:
+                html += "<p><strong>Generated 0 new hypotheses.</strong></p>"
             for i, hypo in enumerate(hypotheses):
                 audit = hypo.get("audit_report", {})
                 audit_html = ""
@@ -1496,7 +1613,26 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
 
         html += "</div>"
     else:
-        if errors:
+        if not hypothesis_pipeline_enabled:
+            meta_review = steps.get("meta_review", {})
+            overview = meta_review.get("research_overview", {}) if isinstance(meta_review, dict) else {}
+            next_steps = overview.get("suggested_next_steps", []) if isinstance(overview, dict) else []
+            next_steps_html = "".join(
+                f"<li>{html_lib.escape(str(item))}</li>" for item in next_steps if str(item).strip()
+            )
+            html += f"""
+            <div style="margin: 20px 0; padding: 15px; border: 2px solid #17a2b8; border-radius: 8px; background-color: #f4fbfd;">
+                <h3>📚 Mode-Specific Research Synthesis</h3>
+                <p>The {html_lib.escape(str(research_type))} plan completed without a hypothesis-ranking stage.</p>
+                {f"<p><strong>Suggested next steps:</strong></p><ul>{next_steps_html}</ul>" if next_steps_html else ""}
+            </div>
+            """
+            if log_file:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(
+                        f"--- Mode-specific synthesis complete ({research_type}); hypothesis ranking not applicable. ---\n"
+                    )
+        elif errors:
             cause = "; ".join(sorted({classify_llm_error(e) for e in errors}))
             no_rank_msg = (
                 f"No hypotheses available for final ranking because generation failed: {html_lib.escape(cause)}. "
@@ -1504,25 +1640,31 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             )
         else:
             no_rank_msg = "No hypotheses available for final ranking. This may indicate an error in the workflow."
-        html += f"""
-        <div style="margin: 20px 0; padding: 15px; border: 2px solid #e74c3c; border-radius: 8px; background-color: #fff5f5;">
-            <h3>🏆 Final Rankings - Top Hypotheses</h3>
-            <p style="color: #e74c3c;">{no_rank_msg}</p>
-        </div>
-        """
-        # Log missing final rankings if log_file is provided
-        if log_file:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write("--- Final Rankings Section: No hypotheses available for final ranking. ---\n")
+
+        if hypothesis_pipeline_enabled:
+            html += f"""
+            <div style="margin: 20px 0; padding: 15px; border: 2px solid #e74c3c; border-radius: 8px; background-color: #fff5f5;">
+                <h3>🏆 Final Rankings - Top Hypotheses</h3>
+                <p style="color: #e74c3c;">{no_rank_msg}</p>
+            </div>
+            """
+            # Log missing final rankings if log_file is provided
+            if log_file:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write("--- Final Rankings Section: No hypotheses available for final ranking. ---\n")
 
     return html
 
 
 def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoal] = None) -> str:
-    """Render validated sources and whether Generation consumed them."""
+    """Render validated sources and how the active research mode consumed them."""
     import html as html_lib
 
     generation_step = cycle_details.get("steps", {}).get("generation", {})
+    finalization = cycle_details.get("finalization", {})
+    hypothesis_pipeline_enabled = not (
+        isinstance(finalization, dict) and finalization.get("hypothesis_pipeline_enabled") is False
+    )
     sources = generation_step.get("sources", [])
     if not isinstance(sources, list) or not sources:
         return "<p>No retrieved evidence was used for generation.</p>"
@@ -1533,6 +1675,8 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
             "<h3>📚 Evidence Retrieval Completed</h3>"
             "<p>Validated evidence was retrieved, but hypothesis generation did not execute.</p>"
         )
+    elif not hypothesis_pipeline_enabled:
+        html = "<h3>📚 Retrieved Evidence Used for Research Synthesis</h3>"
     else:
         html = "<h3>📚 Retrieved Evidence Used for Generation</h3>"
     for source in sources:

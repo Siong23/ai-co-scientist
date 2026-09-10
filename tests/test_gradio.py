@@ -206,6 +206,91 @@ def test_sidebar_selection_restores_saved_goal_results_and_settings(gradio_app_m
     assert restored[11]["selected"] == "current-run"
 
 
+def test_sidebar_selection_resumes_compatible_research_state(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, Hypothesis, ResearchGoal
+    from app.research_state import LocalJSONResearchStateStore
+    from app.run_store import RUNS_DIR_ENV, save_run
+
+    monkeypatch.setenv(RUNS_DIR_ENV, str(tmp_path))
+    store = LocalJSONResearchStateStore(root_dir=tmp_path / "research-state")
+    monkeypatch.setattr(gradio_app_module, "research_state_store", store)
+    monkeypatch.setattr(gradio_app_module, "current_research_goal", None)
+    monkeypatch.setattr(gradio_app_module, "global_context", ContextMemory())
+    goal = ResearchGoal(
+        description="Resume this comparison",
+        research_type="comparative",
+        research_id="research-resume-ui",
+    )
+    context = ContextMemory(research_id=goal.research_id, research_type="comparative")
+    context.research_plan = {
+        "research_type": "comparative",
+        "competing_candidates": ["A", "B"],
+        "comparison_dimensions": ["accuracy"],
+        "hypothesis_pipeline_enabled": True,
+    }
+    context.iteration_number = 2
+    context.add_hypothesis(Hypothesis("H-resumed", "Retained candidate", "A can outperform B."))
+    context.supervisor_state["pending_tasks"] = [{"action": "RANK"}]
+    store.save(goal, context)
+    save_run(
+        research_goal=goal,
+        cycle_details={"iteration": 2, "steps": {}},
+        status="Saved comparison cycle.",
+        references_html="<p>Saved references</p>",
+        results_html="<p>Saved results</p>",
+        run_id="run-resumable",
+    )
+
+    restored = gradio_app_module.load_history_run("run-resumable")
+
+    assert "Resumed current research session associated with run-resumable" in restored[1]
+    assert gradio_app_module.current_research_goal.research_id == "research-resume-ui"
+    assert gradio_app_module.global_context.iteration_number == 2
+    assert "H-resumed" in gradio_app_module.global_context.hypotheses
+    assert gradio_app_module.global_context.supervisor_state["pending_tasks"] == []
+    assert gradio_app_module.global_context.resume_state["suspended_pending_tasks"] == [{"action": "RANK"}]
+
+    resumed_context = gradio_app_module.global_context
+    status, detail = gradio_app_module.set_research_goal(
+        goal.description,
+        goal.llm_model,
+        goal.num_hypotheses,
+        goal.generation_temperature,
+        goal.reflection_temperature,
+        goal.elo_k_factor,
+        goal.top_k_hypotheses,
+    )
+    assert "Continuing existing research session" in status
+    assert detail == "Existing research state retained."
+    assert gradio_app_module.global_context is resumed_context
+
+
+def test_persist_cycle_result_writes_state_and_separate_run_snapshot(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+    from app.research_state import LocalJSONResearchStateStore
+    from app.run_store import RUNS_DIR_ENV
+
+    monkeypatch.setenv(RUNS_DIR_ENV, str(tmp_path))
+    store = LocalJSONResearchStateStore()
+    monkeypatch.setattr(gradio_app_module, "research_state_store", store)
+    goal = ResearchGoal(description="Persist both layers", research_id="research-ui-persist")
+    context = ContextMemory(research_id=goal.research_id)
+    context.iteration_number = 1
+    cycle_result = {
+        "status": "done",
+        "results_html": "<p>result</p>",
+        "references_html": "<p>references</p>",
+        "cycle_details": {"iteration": 1, "steps": {}},
+        "log_file": "",
+    }
+
+    gradio_app_module.persist_cycle_result(goal, cycle_result, context)
+
+    assert store.exists(goal.research_id)
+    assert len(list((tmp_path / "runs").glob("*.json"))) == 1
+    assert len(list((tmp_path / "reports").glob("*.html"))) == 1
+
+
 def test_default_model_is_selected_and_first_choice(gradio_app_module):
     gradio_app_module.available_models = [
         "another/model",
@@ -817,6 +902,7 @@ def test_run_cycle_with_progress_times_out(gradio_app_module, monkeypatch, tmp_p
     assert "Cycle time limit reached" in updates[-1][3]
     run_files = list((tmp_path / "runs").glob("*.json"))
     assert len(run_files) == 1
+    assert not list((tmp_path / "research_state").glob("*.json"))
     assert gradio_app_module.global_context.iteration_number == 0
     time.sleep(0.06)
     assert len(list((tmp_path / "runs").glob("*.json"))) == 1

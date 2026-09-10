@@ -126,6 +126,14 @@ def _meta_review_details(overview: Mapping[str, Any]) -> List[str]:
     return details
 
 
+def _prepare_research_mode(context: ContextMemory, research_goal: ResearchGoal) -> None:
+    """Seed an explicitly selected mode before Generation retains its plan."""
+
+    resolved_type = getattr(research_goal, "resolved_research_type", None)
+    if resolved_type and not getattr(context, "research_plan", None):
+        context.research_type = str(resolved_type)
+
+
 class SupervisorAgent:
     """Orchestrates the Open AI Co-Scientist workflow."""
 
@@ -237,6 +245,14 @@ class SupervisorAgent:
             query_fidelity = []
 
         query_plan_details = {
+            "research_type": (
+                str(query_plan.research_type) if query_plan else str(getattr(context, "research_type", ""))
+            ),
+            "research_plan": (
+                query_plan.research_plan.to_dict()
+                if query_plan and query_plan.research_plan is not None
+                else dict(getattr(context, "research_plan", {}) or {})
+            ),
             "provisional_hypotheses": [
                 {
                     "hypothesis_id": item.hypothesis_id,
@@ -304,6 +320,11 @@ class SupervisorAgent:
         for hypothesis in query_plan_details["provisional_hypotheses"]:
             generation_details.append(
                 f"Provisional {hypothesis['role']} retrieval hypothesis: {hypothesis['statement']}"
+            )
+        if not query_plan_details["provisional_hypotheses"]:
+            generation_details.append(
+                f"Research mode {query_plan_details['research_type']} retained questions/themes without "
+                "fabricating provisional hypotheses."
             )
         if audit_counts:
             audit_summary = ", ".join(f"{name}: {count}" for name, count in sorted(audit_counts.items()))
@@ -608,6 +629,7 @@ class SupervisorAgent:
         progress_callback: Optional[ProgressCallback] = None,
     ) -> Dict[str, Any]:
         """Runs a sequential cycle of hypothesis generation and refinement."""
+        _prepare_research_mode(context, research_goal)
         logger.info("--- Starting Cycle %d ---", context.iteration_number + 1)
         research_trace: List[Dict[str, Any]] = []
         cycle_details: Dict[str, Any] = {
@@ -655,6 +677,29 @@ class SupervisorAgent:
 
         if execution_cancelled():
             cycle_details.setdefault("errors", []).append("Cycle execution stopped at its time limit.")
+            return cycle_details
+
+        if not context.uses_hypothesis_pipeline():
+            self.step_meta_review(
+                context,
+                publish,
+                cycle_details,
+                research_goal=research_goal,
+            )
+            finalization = evaluate_finalization_readiness(context, research_goal)
+            finalization["status"] = "completed" if finalization["ready"] else "incomplete"
+            cycle_details["finalization"] = finalization
+            cycle_details.setdefault("steps", {})["finalization"] = finalization
+            context.supervisor_state["status"] = finalization["status"]
+            context.supervisor_state["pending_tasks"] = []
+            context.supervisor_state["last_finalization"] = dict(finalization)
+            cycle_details["supervisor_state"] = dict(context.supervisor_state)
+            context.iteration_number += 1
+            logger.info(
+                "--- Cycle %d Complete (%s planning mode) ---",
+                context.iteration_number,
+                context.research_type,
+            )
             return cycle_details
 
         # 2. Reflection
@@ -744,6 +789,7 @@ class SupervisorAgent:
         planner_mode: str = "auto",
     ) -> Dict[str, Any]:
         """Runs a dynamic cycle where the Supervisor actively plans and schedules actions."""
+        _prepare_research_mode(context, research_goal)
         logger.info("--- Starting Cycle %d (Dynamic Planning) ---", context.iteration_number + 1)
         research_trace: List[Dict[str, Any]] = []
         supervisor_decisions: List[Dict[str, Any]] = []
@@ -826,10 +872,48 @@ class SupervisorAgent:
             context.supervisor_state["pending_tasks"] = [item.to_dict() for item in task_queue]
             requested_action = decision.action
             finalization_gate = None
+            if not context.uses_hypothesis_pipeline() and decision.action in {
+                "REFLECT",
+                "RANK",
+                "EVOLVE",
+                "PROXIMITY",
+            }:
+                synthesis_status = str(
+                    (context.last_generation_diagnostics.get("literature_synthesis") or {}).get("status") or ""
+                )
+                decision.action = (
+                    "META_REVIEW"
+                    if synthesis_status in {"completed", "warning"}
+                    and "meta_review" not in cycle_details.get("steps", {})
+                    else "FINALIZE"
+                )
+                decision.reasoning = (
+                    f"Research type {context.research_type} has no appropriate hypothesis candidates; "
+                    "routing around hypothesis-only agents."
+                )
+                decision.target_hypothesis_ids = []
             if decision.action == "FINALIZE":
                 finalization_gate = evaluate_finalization_readiness(context, research_goal)
                 if not finalization_gate["ready"]:
-                    if finalization_gate["accepted_count"] < finalization_gate["required_accepted_count"]:
+                    if not context.uses_hypothesis_pipeline():
+                        synthesis_status = str(
+                            (context.last_generation_diagnostics.get("literature_synthesis") or {}).get("status") or ""
+                        )
+                        has_plan = bool(getattr(context, "research_plan", None))
+                        has_meta_review = "meta_review" in cycle_details.get("steps", {})
+                        if synthesis_status in {"completed", "warning"} and has_plan and not has_meta_review:
+                            decision.action = "META_REVIEW"
+                            decision.reasoning = (
+                                "The evidence synthesis is ready, but its mode-specific meta-review must run "
+                                "before finalization."
+                            )
+                        else:
+                            decision.action = "GENERATE"
+                            decision.reasoning = (
+                                "The non-hypothesis finalization gate still lacks a retained plan or fresh "
+                                "evidence synthesis; returning to evidence generation."
+                            )
+                    elif finalization_gate["accepted_count"] < finalization_gate["required_accepted_count"]:
                         decision.action = "GENERATE"
                         decision.reasoning = (
                             "Finalization gate requires more accepted hypotheses; returning to generation."
@@ -852,7 +936,14 @@ class SupervisorAgent:
                 actions_taken = {
                     str(item.get("action", "")).upper() for item in supervisor_decisions if isinstance(item, dict)
                 }
-                if routing["unreviewed"]:
+                if not context.uses_hypothesis_pipeline():
+                    decision.action = "FINALIZE"
+                    decision.reasoning = (
+                        "The bounded evidence-generation attempt is complete; preserving the mode-specific "
+                        "result without scheduling hypothesis-only agents."
+                    )
+                    stopped_reason = "generation_budget_exhausted"
+                elif routing["unreviewed"]:
                     decision.action = "REFLECT"
                     decision.reasoning = (
                         "The bounded Generation batch is complete; reviewing its remaining candidates "
@@ -951,7 +1042,11 @@ class SupervisorAgent:
 
         # If meta-review was never run, perform a final synthesis
         if not execution_cancelled() and "meta_review" not in cycle_details.get("steps", {}):
-            if proximity_result is None and len(context.get_active_hypotheses()) >= 2:
+            if (
+                context.uses_hypothesis_pipeline()
+                and proximity_result is None
+                and len(context.get_active_hypotheses()) >= 2
+            ):
                 proximity_result = self.step_proximity(context, publish, cycle_details, research_goal)
             self.step_meta_review(
                 context, publish, cycle_details, proximity_result=proximity_result, research_goal=research_goal

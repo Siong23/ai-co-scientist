@@ -75,7 +75,12 @@ def research_goal_to_dict(research_goal: Any) -> Dict[str, Any]:
     return sanitize(
         {
             "description": getattr(research_goal, "description", ""),
+            "preferences": getattr(research_goal, "preferences", ""),
+            "idea_attributes": getattr(research_goal, "idea_attributes", ""),
             "constraints": getattr(research_goal, "constraints", {}),
+            "research_id": getattr(research_goal, "research_id", None),
+            "research_type": getattr(research_goal, "research_type", "auto"),
+            "resolved_research_type": getattr(research_goal, "resolved_research_type", None),
             "llm_model": getattr(research_goal, "llm_model", None),
             "query_rewrite_model": getattr(research_goal, "query_rewrite_model", None),
             "num_hypotheses": getattr(research_goal, "num_hypotheses", None),
@@ -115,7 +120,10 @@ def save_run(
     )
     get_runs_dir().mkdir(parents=True, exist_ok=True)
     run_path = get_run_path(run["run_id"])
-    run_path.write_text(json.dumps(run, indent=2, sort_keys=True), encoding="utf-8")
+    # Run JSON is an immutable audit snapshot. Research sessions evolve in the
+    # separate research-state store; reusing a run ID must never rewrite history.
+    with run_path.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(run, indent=2, sort_keys=True))
     return run
 
 
@@ -394,12 +402,17 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
     This section provides clickable Gradio file-serving links so that
     the files can be inspected directly from the run report.
     """
+    if experiment_result.get("status") == "skipped_for_research_type":
+        return (
+            "<section><h2>Automated Experiment</h2>"
+            "<p><strong>Status:</strong> Skipped for research type "
+            f"{_escape(experiment_result.get('research_type') or 'unknown')}</p>"
+            f"<p>{_escape(experiment_result.get('reason') or 'No hypothesis candidate was available to test.')}</p>"
+            "</section>"
+        )
+
     execution = experiment_result.get("execution", {})
-    outputs = (
-        execution.get("outputs", {})
-        if isinstance(execution, dict)
-        else {}
-    )
+    outputs = execution.get("outputs", {}) if isinstance(execution, dict) else {}
 
     if not isinstance(outputs, dict):
         outputs = {}
@@ -441,21 +454,13 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
         ),
     )
 
-    run_directory = experiment_result.get(
-        "run_directory"
-    )
+    run_directory = experiment_result.get("run_directory")
 
-    generated_code_path = experiment_result.get(
-        "generated_code_path"
-    )
+    generated_code_path = experiment_result.get("generated_code_path")
 
-    stdout_path = execution.get(
-        "stdout_path"
-    )
+    stdout_path = execution.get("stdout_path")
 
-    stderr_path = execution.get(
-        "stderr_path"
-    )
+    stderr_path = execution.get("stderr_path")
 
     # ------------------------------------------------------------
     # Helper for creating file links
@@ -465,38 +470,20 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
         label: str,
     ) -> str:
         if not file_path:
-            return (
-                f'<span class="file-missing">'
-                f'{_escape(label)} not available'
-                f'</span>'
-            )
+            return f'<span class="file-missing">{_escape(label)} not available</span>'
 
         path = Path(str(file_path))
 
         if not path.exists():
-            return (
-                f'<span class="file-missing">'
-                f'{_escape(label)} not found'
-                f'</span>'
-            )
+            return f'<span class="file-missing">{_escape(label)} not found</span>'
 
         file_url = report_file_url(path)
 
-        return (
-            f'<a class="file-link" '
-            f'href="{_escape(file_url)}" '
-            f'target="_blank">'
-            f'{_escape(label)}'
-            f'</a>'
-        )
+        return f'<a class="file-link" href="{_escape(file_url)}" target="_blank">{_escape(label)}</a>'
 
     parts = [
         "<section><h2>Automated Experiment</h2>",
-        (
-            "<p><strong>Status:</strong> "
-            f"{_escape('Completed' if experiment_result.get('success') else 'Failed')}"
-            "</p>"
-        ),
+        (f"<p><strong>Status:</strong> {_escape('Completed' if experiment_result.get('success') else 'Failed')}</p>"),
     ]
 
     # ------------------------------------------------------------
@@ -538,33 +525,18 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
         run_path = Path(str(run_directory))
 
         if run_path.exists():
-            parts.append(
-                "<tr>"
-                "<th>Run Directory</th>"
-                f"<td><code>{_escape(run_path)}</code></td>"
-                "</tr>"
-            )
+            parts.append(f"<tr><th>Run Directory</th><td><code>{_escape(run_path)}</code></td></tr>")
 
-    parts.append(
-        "</tbody></table>"
-    )
+    parts.append("</tbody></table>")
 
     # ------------------------------------------------------------
     # Evaluation metrics
     # ------------------------------------------------------------
     if metrics:
-        parts.append(
-            "<h3>Evaluation Metrics</h3>"
-            "<table><tbody>"
-        )
+        parts.append("<h3>Evaluation Metrics</h3><table><tbody>")
 
         for name, value in metrics.items():
-            parts.append(
-                f"<tr>"
-                f"<th>{_escape(name)}</th>"
-                f"<td>{_escape(value)}</td>"
-                f"</tr>"
-            )
+            parts.append(f"<tr><th>{_escape(name)}</th><td>{_escape(value)}</td></tr>")
 
         parts.append("</tbody></table>")
 
@@ -575,9 +547,7 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
         parts.append("<h3>Errors</h3><ul>")
 
         for error in errors:
-            parts.append(
-                f"<li><pre>{_escape(error)}</pre></li>"
-            )
+            parts.append(f"<li><pre>{_escape(error)}</pre></li>")
 
         parts.append("</ul>")
 
@@ -585,26 +555,17 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
     # Visualizations
     # ------------------------------------------------------------
     if visualizations:
-        parts.append(
-            "<h3>Visualizations</h3><div>"
-        )
+        parts.append("<h3>Visualizations</h3><div>")
 
         for visualization in visualizations:
-            visualization_path = Path(
-                str(visualization)
-            )
+            visualization_path = Path(str(visualization))
 
             if not visualization_path.exists():
                 continue
 
-            visualization_url = report_file_url(
-                visualization_path
-            )
+            visualization_url = report_file_url(visualization_path)
 
-            label = _escape(
-                visualization_path.name
-                or visualization
-            )
+            label = _escape(visualization_path.name or visualization)
 
             if visualization_path.suffix.lower() in {
                 ".png",
@@ -613,37 +574,27 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
                 ".svg",
             }:
                 parts.append(
-                    f'<figure>'
+                    f"<figure>"
                     f'<a href="{_escape(visualization_url)}" '
                     f'target="_blank">'
                     f'<img src="{_escape(visualization_url)}" '
                     f'alt="{label}" '
                     f'style="max-width:100%;height:auto">'
-                    f'</a>'
-                    f'<figcaption>{label}</figcaption>'
-                    f'</figure>'
+                    f"</a>"
+                    f"<figcaption>{label}</figcaption>"
+                    f"</figure>"
                 )
             else:
-                parts.append(
-                    f'<p>'
-                    f'<a href="{_escape(visualization_url)}" '
-                    f'target="_blank">'
-                    f'{label}'
-                    f'</a>'
-                    f'</p>'
-                )
+                parts.append(f'<p><a href="{_escape(visualization_url)}" target="_blank">{label}</a></p>')
 
         parts.append("</div>")
 
     else:
-        parts.append(
-            "<p>No visualizations were produced.</p>"
-        )
+        parts.append("<p>No visualizations were produced.</p>")
 
     parts.append("</section>")
 
     return "\n".join(parts)
-
 
 
 def write_report(run: Dict[str, Any]) -> Path:
@@ -687,6 +638,7 @@ def history_html(limit: int = 20) -> str:
 
 def _settings_table(goal: Dict[str, Any]) -> str:
     fields = [
+        "research_type",
         "llm_model",
         "num_hypotheses",
         "generation_temperature",

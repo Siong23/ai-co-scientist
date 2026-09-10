@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from typing import Dict, List, Tuple
 
 from langchain_core.documents import Document
@@ -14,6 +15,8 @@ from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..paper_library import ChromaPaperLibrary
 from ..rag_retriever import (
     EvidenceAspect,
+    ProvisionalHypothesis,
+    ResearchPlan,
     ResearchRetriever,
     SearchQuery,
     SearchQueryPlan,
@@ -21,6 +24,7 @@ from ..rag_retriever import (
     format_documents_for_prompt,
     serialize_documents,
 )
+from ..research_modes import normalize_research_type, research_type_requires_hypotheses
 from ..utils import execution_cancelled, generate_unique_id, logger, redact_secrets
 from .generation_helpers import (
     AbstractScreeningResult,
@@ -65,16 +69,30 @@ Determine:
    fact verification, discovery, or multi-hop research.
 7. What evidence would constitute a satisfactory answer.
 8. Any ambiguity that could materially affect the research.
-9. Three provisional retrieval hypotheses: one plausible primary hypothesis,
-   one materially different alternative explanation, and one null hypothesis
-   or falsifying account. These are search scaffolds only, not conclusions.
-   Anchor each with a verbatim goal_quote of at most 16 words, and keep each
-   statement concise enough to guide retrieval without inventing specifics.
-   Keep the primary hypothesis minimal: do not add an algorithm, mechanism,
-   dataset, metric, protocol, or architecture absent from the user's goal.
-   Put optional mechanisms in search angles instead of assuming them here.
-   Do not automatically reinterpret general concepts (such as "AI") as
-   specific implementations (such as "LLM") unless explicitly requested.
+9. Exactly one research_type from: hypothesis_testing, causal, comparative,
+   exploratory, literature_review, due_diligence.
+10. Mode-specific planning structures using the rules below.
+
+MODE RULES
+
+- hypothesis_testing and causal: include exactly three provisional retrieval
+  hypotheses (primary, materially different alternative, and null/falsifying).
+- comparative: identify at least two total competing candidates or
+  explanations and explicit comparison dimensions. Provisional hypotheses
+  are optional.
+- exploratory: populate research_questions, topic_dimensions, and
+  missing_evidence. Return an empty provisional_hypotheses array.
+- literature_review: prioritize themes, controversies, evidence dimensions,
+  areas_of_agreement, areas_of_disagreement, and literature_gaps. Return an
+  empty provisional_hypotheses array.
+- due_diligence: prioritize claims, risks, counterclaims, primary-source
+  checks, and missing evidence. Return an empty provisional_hypotheses array.
+
+Provisional hypotheses are search scaffolds only, never conclusions. Anchor
+each with a verbatim goal_quote of at most 16 words. Do not add an algorithm,
+mechanism, dataset, metric, protocol, or architecture absent from the goal.
+Do not reinterpret a general concept such as "AI" as a specific implementation
+such as "LLM" unless explicitly requested.
 
 Keep the plan compact: use at most 5 key entities, 5 constraints, 6
 sub-questions, 5 evidence requirements, and 3 ambiguities. Keep every list
@@ -96,6 +114,28 @@ Return only the following JSON:
   "freshness_requirement": "...",
   "ambiguities": [],
   "search_strategy": "...",
+  "provisional_hypotheses": [],
+  "competing_candidates": [],
+  "competing_explanations": [],
+  "comparison_dimensions": [],
+  "research_questions": [],
+  "topic_dimensions": [],
+  "themes": [],
+  "controversies": [],
+  "evidence_dimensions": [],
+  "areas_of_agreement": [],
+  "areas_of_disagreement": [],
+  "literature_gaps": [],
+  "claims": [],
+  "risks": [],
+  "counterclaims": [],
+  "primary_source_checks": [],
+  "missing_evidence": []
+}
+
+For hypothesis_testing or causal only, provisional_hypotheses must instead be:
+
+{
   "provisional_hypotheses": [
     {
       "hypothesis_id": "primary_hypothesis",
@@ -144,9 +184,11 @@ For each research sub-question:
 - Do not combine unrelated sub-questions into one query.
 - Route scholarly literature to academic, general pages to web, first-party
   sources to official, and time-sensitive reporting to news.
-- Treat provisional hypotheses as unverified retrieval scaffolds. Search for
-  supporting evidence, counterevidence, and the closest prior art; never assume
-  a provisional statement is true or present it as evidence.
+- Respect research_type and its mode-specific planning fields. Do not create
+  hypotheses when the Research Planner intentionally returned none.
+- Treat any provisional hypotheses as unverified retrieval scaffolds. Across
+  all modes, retain appropriate searches for supporting evidence,
+  counterevidence, and closest prior art without assuming a claim is true.
 - Do not narrow the primary query to an algorithm, mechanism, dataset, metric,
   or protocol absent from the original request. Such concepts may appear only
   as optional additional queries when needed for recall.
@@ -858,6 +900,7 @@ class GenerationAgent:
     @staticmethod
     def _build_minimal_fallback_plan(
         research_goal: str,
+        research_type: str = "hypothesis_testing",
     ) -> SearchQueryPlan:
         """Keep usable original evidence when LLM query planning fails.
 
@@ -940,10 +983,81 @@ class GenerationAgent:
             ),
         ]
 
+        normalized_research_type = normalize_research_type(research_type)
+        goal_quote = " ".join(normalized_goal.split()[:16])
+        provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
+        if research_type_requires_hypotheses(normalized_research_type):
+            provisional_hypotheses = (
+                ProvisionalHypothesis(
+                    hypothesis_id="primary_hypothesis",
+                    role="primary",
+                    statement="Evidence supports the central relationship stated in the research goal.",
+                    goal_quote=goal_quote,
+                ),
+                ProvisionalHypothesis(
+                    hypothesis_id="alternative_hypothesis",
+                    role="alternative",
+                    statement="A materially different explanation better accounts for the stated relationship.",
+                    goal_quote=goal_quote,
+                ),
+                ProvisionalHypothesis(
+                    hypothesis_id="null_hypothesis",
+                    role="null",
+                    statement="Available evidence does not support the central relationship stated in the goal.",
+                    goal_quote=goal_quote,
+                ),
+            )
+
+        comparison_candidates: tuple[str, ...] = ()
+        comparison_match = re.search(
+            r"\bcompare\s+(.+?)\s+(?:with|versus|vs\.?|and)\s+(.+?)(?:[?.]|$)",
+            normalized_goal,
+            flags=re.IGNORECASE,
+        )
+        if comparison_match:
+            comparison_candidates = tuple(value.strip(" ,") for value in comparison_match.groups() if value.strip(" ,"))
+        research_plan = ResearchPlan(
+            research_goal=normalized_goal,
+            research_type=normalized_research_type,
+            sub_questions=tuple(aspect.coverage_description for aspect in explicit_requirements),
+            evidence_requirements=tuple(aspect.coverage_description for aspect in explicit_requirements),
+            provisional_hypotheses=provisional_hypotheses,
+            competing_candidates=(comparison_candidates if normalized_research_type == "comparative" else ()),
+            comparison_dimensions=(
+                ("Requested comparative outcomes and trade-offs",) if normalized_research_type == "comparative" else ()
+            ),
+            research_questions=tuple(aspect.coverage_description for aspect in explicit_requirements),
+            topic_dimensions=(normalized_goal,) if normalized_research_type == "exploratory" else (),
+            themes=(normalized_goal,) if normalized_research_type == "literature_review" else (),
+            evidence_dimensions=(normalized_goal,) if normalized_research_type == "literature_review" else (),
+            areas_of_agreement=("Assess areas of agreement across eligible sources",)
+            if normalized_research_type == "literature_review"
+            else (),
+            areas_of_disagreement=("Assess areas of disagreement across eligible sources",)
+            if normalized_research_type == "literature_review"
+            else (),
+            literature_gaps=("Identify gaps remaining after evidence synthesis",)
+            if normalized_research_type == "literature_review"
+            else (),
+            claims=(normalized_goal,) if normalized_research_type == "due_diligence" else (),
+            risks=("Unverified risks and adverse evidence",) if normalized_research_type == "due_diligence" else (),
+            counterclaims=("Counterclaims and disconfirming evidence",)
+            if normalized_research_type == "due_diligence"
+            else (),
+            primary_source_checks=("Verify material claims against primary sources",)
+            if normalized_research_type == "due_diligence"
+            else (),
+            missing_evidence=("Evidence not recovered by the fallback search",)
+            if normalized_research_type in {"exploratory", "due_diligence"}
+            else (),
+        )
         return SearchQueryPlan(
             queries=tuple(queries),
             required_terms=(),
             explicit_requirements=tuple(explicit_requirements),
+            provisional_hypotheses=provisional_hypotheses,
+            research_type=normalized_research_type,
+            research_plan=research_plan,
         )
 
     @staticmethod
@@ -1359,6 +1473,8 @@ Your refined contribution:
                         required_terms=(),
                         explicit_requirements=query_plan.explicit_requirements,
                         exploration_directions=query_plan.exploration_directions,
+                        research_type=query_plan.research_type,
+                        research_plan=query_plan.research_plan,
                     )
                     action_documents = self._retrieve_scientific_sources(
                         research_goal,
@@ -1502,6 +1618,10 @@ Your refined contribution:
                 research_goal.description,
                 model=getattr(research_goal, "query_rewrite_model", research_goal.llm_model),
                 query_count=self.rag_retriever.query_count,
+                research_type=(
+                    getattr(research_goal, "resolved_research_type", None)
+                    or getattr(research_goal, "research_type", "auto")
+                ),
                 research_planner_prompt=RESEARCH_PLANNER_SYSTEM_PROMPT,
                 query_rewriter_prompt=QUERY_REWRITER_SYSTEM_PROMPT,
                 query_fidelity_validator=lambda plan: self.rag_retriever.validate_query_plan_fidelity(
@@ -1562,6 +1682,9 @@ Your refined contribution:
             "warnings": [],
             "evidence_consumed": False,
         }
+        resume_state = getattr(context, "resume_state", None)
+        if isinstance(resume_state, dict) and resume_state.get("requires_evidence_refresh"):
+            resume_state["status"] = "refreshing"
 
         if execution_cancelled():
             return [], ["Cycle cancelled before hypothesis generation started."]
@@ -1594,9 +1717,45 @@ Your refined contribution:
                 rewrite_error or "Query rewriting failed.",
                 len(candidate_documents),
             )
-            query_plan = self._build_minimal_fallback_plan(research_goal.description)
+            query_plan = self._build_minimal_fallback_plan(
+                research_goal.description,
+                getattr(research_goal, "resolved_research_type", None)
+                or getattr(research_goal, "research_type", "hypothesis_testing"),
+            )
 
         self.rag_retriever.last_query_plan = query_plan
+        context.research_id = getattr(research_goal, "research_id", context.research_id)
+        context.research_type = str(query_plan.research_type)
+        research_goal.resolved_research_type = str(query_plan.research_type)
+        context.research_plan = (
+            query_plan.research_plan.to_dict()
+            if query_plan.research_plan is not None
+            else {
+                "research_goal": research_goal.description,
+                "research_type": query_plan.research_type,
+                "sub_questions": [query.sub_question for query in query_plan.queries if query.sub_question],
+                "evidence_requirements": [aspect.coverage_description for aspect in query_plan.explicit_requirements],
+                "provisional_hypotheses": [
+                    {
+                        "hypothesis_id": hypothesis.hypothesis_id,
+                        "role": hypothesis.role,
+                        "statement": hypothesis.statement,
+                        "goal_quote": hypothesis.goal_quote,
+                    }
+                    for hypothesis in query_plan.provisional_hypotheses
+                ],
+                "hypothesis_pipeline_enabled": query_plan.hypothesis_pipeline_enabled,
+            }
+        )
+        context.sub_questions = list(context.research_plan.get("sub_questions") or ())
+        context.evidence_requirements = [
+            {
+                "id": aspect.aspect_id,
+                "description": aspect.description,
+                "goal_quote": aspect.goal_quote,
+            }
+            for aspect in query_plan.explicit_requirements
+        ]
         logger.info(
             "Query rewriting produced queries=%s required_terms=%s explicit_requirements=%s "
             "provisional_hypotheses=%s exploration_directions=%s",
@@ -1809,6 +1968,8 @@ Your refined contribution:
                         required_terms=(),
                         explicit_requirements=(query_plan.explicit_requirements),
                         exploration_directions=(query_plan.exploration_directions),
+                        research_type=query_plan.research_type,
+                        research_plan=query_plan.research_plan,
                     )
 
                     try:
@@ -1875,6 +2036,8 @@ Your refined contribution:
                 required_terms=(),
                 explicit_requirements=(query_plan.explicit_requirements),
                 exploration_directions=(query_plan.exploration_directions),
+                research_type=query_plan.research_type,
+                research_plan=query_plan.research_plan,
             )
             corrective_rerank_target = (
                 missing_aspects[0].description if len(missing_aspects) == 1 else research_goal.description
@@ -2070,6 +2233,26 @@ Your refined contribution:
 
         synthesis_text = format_literature_synthesis(synthesis)
         assumption_text = format_assumption_assessments(assumptions)
+        context.last_literature_synthesis = asdict(synthesis)
+        if isinstance(resume_state, dict):
+            resume_state["status"] = "active"
+            resume_state["requires_evidence_refresh"] = False
+            resume_state["evidence_refresh_status"] = "refreshed"
+
+        if not query_plan.hypothesis_pipeline_enabled:
+            context.last_hypothesis_audits = []
+            context.last_generation_diagnostics["hypothesis_generation"] = {
+                "status": "skipped_for_research_type",
+                "detail": (
+                    f"Research type {query_plan.research_type} does not require provisional hypotheses. "
+                    "Evidence retrieval and literature synthesis were retained."
+                ),
+            }
+            context.last_generation_diagnostics["evidence_consumed"] = True
+            evidence_funnel = context.last_generation_diagnostics.get("evidence_funnel", {})
+            if isinstance(evidence_funnel, dict):
+                evidence_funnel["generation_consumed_sources"] = len(retrieved_documents)
+            return [], []
 
         coverage_map = "\n".join(
             (f"- {aspect.coverage_description}: " + ", ".join(coverage.aspect_source_ids[aspect.aspect_id]))

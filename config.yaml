@@ -127,6 +127,14 @@ supervisor:
     require_successful_evolution: true
     min_hypothesis_clusters: 2
 
+# Durable research-session checkpoints are separate from the shared paper/
+# embedding indexes and from immutable per-run audit reports. A null directory
+# stores checkpoints under <results>/research_state and follows
+# CO_SCIENTIST_RUNS_DIR when tests or deployments relocate results.
+research_state:
+  enabled: true
+  directory: null
+
 # Keep evidence-directed autonomous research, but bound its nested loop. The
 # outer Supervisor already performs iterative reflection and evolution, so
 # four inner research loops duplicate expensive work before any result appears.

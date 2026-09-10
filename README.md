@@ -22,6 +22,11 @@ Open AI Co-Scientist is an AI-powered system for generating, reviewing, ranking,
 - **Local LLM Integration:** Uses LM Studio's OpenAI-compatible local API, with runtime model selection in the UI.
 - **Interactive Gradio UI:** Easy-to-use interface for research goal input, advanced settings, and results visualization.
 - **References & Literature:** Integrated arXiv search for related papers.
+- **Mode-Aware Research:** Plans hypothesis testing, causal, comparative,
+  exploratory, literature-review, and due-diligence work without fabricating
+  hypotheses for modes that do not need them.
+- **Resumable Research State:** Checkpoints evolving session state separately
+  from the shared evidence index and immutable per-cycle run reports.
 - **Private Inference:** Prompts and model responses stay on the configured local LM Studio server.
 - **Logging:** Each run is logged to a timestamped file in the `results/` directory.
 
@@ -86,7 +91,10 @@ In accordance with LLNL policy on Generative Artificial Intelligence, this proje
 
 ## 🧠 How It Works
 
-The system uses a multi-agent approach:
+The system uses a multi-agent approach. Hypothesis-driven plans run the full
+pipeline below; hypothesis-optional plans retain evidence retrieval and
+literature synthesis, then route directly to a mode-aware meta-review and
+finalization gate.
 
 1. **Generation Agent:** Creates new research hypotheses.
 2. **Reflection Agent:** Reviews and assesses hypotheses for novelty and feasibility.
@@ -94,6 +102,12 @@ The system uses a multi-agent approach:
 4. **Evolution Agent:** Combines top hypotheses to create improved versions.
 5. **Proximity Agent:** Analyzes similarity between hypotheses.
 6. **Meta-Review Agent:** Provides overall critique and suggests next steps.
+
+The Supervisor provides **dynamic orchestration with bounded parallel
+execution**: it chooses and completes one workflow action before replanning,
+while provider searches, reviews, tournament matches, retrieval, and evolution
+may use bounded concurrency inside that action. It is not a distributed task
+queue.
 
 ## 📚 Literature Integration
 
@@ -152,12 +166,35 @@ The three gates have intentionally different jobs:
 Important `config.yaml` groups are `rag` (paper discovery and corrective
 search), `paper_library` (download budget, PDF cache, Chroma schema and prompt
 limits), `evidence_retrieval` (focused-query limits and query-side embedding
-instructions), and `validation` (numeric/entailment checks and per-candidate
+instructions), `research_state` (durable session checkpoints), and `validation` (numeric/entailment checks and per-candidate
 audit context). Collections are isolated by embedding model, index schema, and
 retrieval template. Parser/chunker changes invalidate the shared chunk artifact
 and update the current collection incrementally; embedding-model changes reuse
 the artifact but populate a model-specific collection. Hybrid/BM25 ranking and
 context-expansion settings do not alter stored embeddings.
+
+## 💾 Evidence, Research State, and Reports
+
+Phase E gives each persistence layer one responsibility:
+
+```text
+Global evidence store  → papers, versions, chunks, embeddings, source registry
+Research-state store   → goal, plan, questions, hypotheses, reviews, ratings,
+                         evidence relationships, supervisor state
+Run reports            → immutable per-cycle JSON audit snapshots and HTML views
+```
+
+Research checkpoints use versioned, integrity-checked atomic JSON under
+`results/research_state/` by default. They retain exact claim → chunk → source
+IDs but never duplicate document bodies, chunk text, or embeddings. On resume,
+compatible state is reconstructed; evidence-dependent sessions refresh global
+evidence first, and formerly pending actions are suspended and replanned rather
+than silently replayed. Older saved runs without a checkpoint remain
+display-only.
+
+See [Research state and planning architecture](docs/research-state-and-planning.md)
+for the six planning modes, resume limitations, storage schema, routing rules,
+and the complete Phase A–E pipeline.
 
 ## ⚙️ Technical Details
 
