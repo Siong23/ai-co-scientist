@@ -22,13 +22,8 @@ RESEARCH_TYPES: tuple[ResearchType, ...] = (
     "due_diligence",
 )
 
-HYPOTHESIS_REQUIRED_RESEARCH_TYPES: frozenset[str] = frozenset(
-    {
-        "hypothesis_testing",
-        "causal",
-    }
-)
-HYPOTHESIS_OPTIONAL_RESEARCH_TYPES: frozenset[str] = frozenset({"comparative"})
+HYPOTHESIS_REQUIRED_RESEARCH_TYPES: frozenset[str] = frozenset(RESEARCH_TYPES)
+HYPOTHESIS_OPTIONAL_RESEARCH_TYPES: frozenset[str] = frozenset()
 
 
 def normalize_research_type(

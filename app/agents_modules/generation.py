@@ -75,18 +75,19 @@ Determine:
 
 MODE RULES
 
-- hypothesis_testing and causal: include exactly three provisional retrieval
-  hypotheses (primary, materially different alternative, and null/falsifying).
+Every research_type must include exactly three provisional retrieval
+hypotheses (primary, materially different alternative, and null/falsifying),
+in addition to the mode-specific structures below.
+
+- hypothesis_testing and causal: no further structures are required.
 - comparative: identify at least two total competing candidates or
-  explanations and explicit comparison dimensions. Provisional hypotheses
-  are optional.
+  explanations and explicit comparison dimensions.
 - exploratory: populate research_questions, topic_dimensions, and
-  missing_evidence. Return an empty provisional_hypotheses array.
+  missing_evidence.
 - literature_review: prioritize themes, controversies, evidence dimensions,
-  areas_of_agreement, areas_of_disagreement, and literature_gaps. Return an
-  empty provisional_hypotheses array.
+  areas_of_agreement, areas_of_disagreement, and literature_gaps.
 - due_diligence: prioritize claims, risks, counterclaims, primary-source
-  checks, and missing evidence. Return an empty provisional_hypotheses array.
+  checks, and missing evidence.
 
 Provisional hypotheses are search scaffolds only, never conclusions. Anchor
 each with a verbatim goal_quote of at most 16 words. The goal_quote must be an
@@ -137,7 +138,8 @@ Return only the following JSON:
   "missing_evidence": []
 }
 
-For hypothesis_testing or causal only, provisional_hypotheses must instead be:
+provisional_hypotheses must always be populated with exactly these three
+entries, whatever the research_type:
 
 {
   "provisional_hypotheses": [

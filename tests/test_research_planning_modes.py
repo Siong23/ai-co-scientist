@@ -164,16 +164,11 @@ def _query_payload(goal: str, *, with_hypothesis_ids: bool) -> str:
 )
 def test_mode_specific_plans_preserve_retrieval_controls(mode, mode_field):
     goal = "Assess target evidence"
-    requires_hypotheses = mode in {"hypothesis_testing", "causal"}
-    planner = _planner_payload(
-        mode,
-        goal,
-        hypotheses=_hypotheses(goal) if requires_hypotheses else None,
-    )
+    planner = _planner_payload(mode, goal, hypotheses=_hypotheses(goal))
     fidelity = Mock(return_value=(True, "goal anchored"))
     with patch(
         "app.agents.call_llm",
-        side_effect=[planner, _query_payload(goal, with_hypothesis_ids=requires_hypotheses)],
+        side_effect=[planner, _query_payload(goal, with_hypothesis_ids=True)],
     ):
         plan, error = call_llm_for_search_queries(
             goal,
@@ -192,10 +187,12 @@ def test_mode_specific_plans_preserve_retrieval_controls(mode, mode_field):
         "counterevidence",
         "prior_art",
     }
-    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == (
-        ["primary", "alternative", "null"] if requires_hypotheses else []
-    )
-    assert plan.hypothesis_pipeline_enabled is requires_hypotheses
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == [
+        "primary",
+        "alternative",
+        "null",
+    ]
+    assert plan.hypothesis_pipeline_enabled is True
     if mode_field:
         assert getattr(plan.research_plan, mode_field)
     fidelity.assert_called_once_with(plan)
@@ -203,12 +200,12 @@ def test_mode_specific_plans_preserve_retrieval_controls(mode, mode_field):
 
 def test_comparative_plan_accepts_competing_explanations_without_named_candidates():
     goal = "Compare target explanations"
-    payload = json.loads(_planner_payload("comparative", goal))
+    payload = json.loads(_planner_payload("comparative", goal, hypotheses=_hypotheses(goal)))
     payload["competing_candidates"] = []
     payload["competing_explanations"] = ["explanation A", "explanation B"]
     with patch(
         "app.agents.call_llm",
-        side_effect=[json.dumps(payload), _query_payload(goal, with_hypothesis_ids=False)],
+        side_effect=[json.dumps(payload), _query_payload(goal, with_hypothesis_ids=True)],
     ):
         plan, error = call_llm_for_search_queries(goal, research_type="comparative", query_count=3)
 
@@ -216,25 +213,29 @@ def test_comparative_plan_accepts_competing_explanations_without_named_candidate
     assert plan is not None and plan.research_plan is not None
     assert plan.research_plan.competing_candidates == ()
     assert plan.research_plan.competing_explanations == ("explanation A", "explanation B")
-    assert not plan.hypothesis_pipeline_enabled
+    assert plan.hypothesis_pipeline_enabled
 
 
-def test_exploratory_planner_repairs_fabricated_hypotheses():
+def test_exploratory_planner_repairs_missing_hypotheses():
     goal = "Assess target evidence"
-    fabricated = _planner_payload("exploratory", goal, hypotheses=_hypotheses(goal))
-    corrected = _planner_payload("exploratory", goal)
+    incomplete = _planner_payload("exploratory", goal)
+    corrected = _planner_payload("exploratory", goal, hypotheses=_hypotheses(goal))
     with patch(
         "app.agents.call_llm",
-        side_effect=[fabricated, corrected, _query_payload(goal, with_hypothesis_ids=False)],
+        side_effect=[incomplete, corrected, _query_payload(goal, with_hypothesis_ids=True)],
     ) as llm:
         plan, error = call_llm_for_search_queries(goal, research_type="exploratory", query_count=3)
 
     assert error is None
     assert plan is not None
-    assert plan.provisional_hypotheses == ()
-    assert not plan.hypothesis_pipeline_enabled
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == [
+        "primary",
+        "alternative",
+        "null",
+    ]
+    assert plan.hypothesis_pipeline_enabled
     assert llm.call_count == 3
-    assert "must not fabricate provisional hypotheses" in llm.call_args_list[1].args[0]
+    assert "primary, alternative, and null provisional hypothesis" in llm.call_args_list[1].args[0]
 
 
 def _complete_evidence_mode(context: ContextMemory, mode: str = "exploratory") -> None:
