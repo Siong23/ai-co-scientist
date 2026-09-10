@@ -89,10 +89,14 @@ MODE RULES
   checks, and missing evidence. Return an empty provisional_hypotheses array.
 
 Provisional hypotheses are search scaffolds only, never conclusions. Anchor
-each with a verbatim goal_quote of at most 16 words. Do not add an algorithm,
-mechanism, dataset, metric, protocol, or architecture absent from the goal.
-Do not reinterpret a general concept such as "AI" as a specific implementation
-such as "LLM" unless explicitly requested.
+each with a verbatim goal_quote of at most 16 words. The goal_quote must be an
+exact, contiguous substring copied character-for-character from the user
+request: no ellipsis ("..."), no skipped or reordered words, and no added or
+removed punctuation. If no single contiguous span of 16 words or fewer
+captures the idea, pick a shorter contiguous span instead. Do not add an
+algorithm, mechanism, dataset, metric, protocol, or architecture absent from
+the goal. Do not reinterpret a general concept such as "AI" as a specific
+implementation such as "LLM" unless explicitly requested.
 
 Keep the plan compact: use at most 5 key entities, 5 constraints, 6
 sub-questions, 5 evidence requirements, and 3 ambiguities. Keep every list
