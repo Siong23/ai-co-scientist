@@ -1130,7 +1130,7 @@ class ChromaPaperLibrary:
                 page_content = document.page_content
             enriched.append(Document(page_content=page_content, metadata=metadata))
 
-        logger.info(
+        logger.debug(
             "Chroma paper library indexed %d source(s) and supplied %d selected plus %d expanded full-text chunk(s).",
             len(indexed_source_ids),
             sum(len(items) for items in selected_chunks_by_source.values()),
@@ -1720,7 +1720,7 @@ class ChromaPaperLibrary:
             )
             for superseded_source_id in superseded_source_ids:
                 self._set_manifest_status(superseded_source_id, "SUPERSEDED")
-        logger.info(
+        logger.debug(
             "Indexed %d chunks for %s (embedded=%d, reused=%d, deleted=%d, artifact_cache_hit=%s).",
             len(chunks),
             source_id,

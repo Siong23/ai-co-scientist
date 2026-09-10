@@ -761,7 +761,7 @@ def run_pairwise_debate(
         }[outcome]
         reasoning = f"{decision_label}, but the ranking judge did not provide a parseable justification."
 
-    logger.info(
+    logger.debug(
         "Pairwise ranking response:\n%s",
         response,
     )
@@ -837,7 +837,7 @@ def update_elo(winner: Hypothesis, loser: Hypothesis, k_factor: int):
     expectedB = 1 - expectedA  # Or 1 / (1 + math.pow(10, (ratingA - ratingB) / 400))
     winner.elo_score = ratingA + k_factor * (1 - expectedA)
     loser.elo_score = ratingB + k_factor * (0 - expectedB)  # Loser's score update
-    logger.info(
+    logger.debug(
         "Updated Elo: Winner %s -> %.2f, Loser %s -> %.2f",
         winner.hypothesis_id,
         winner.elo_score,

@@ -1,4 +1,3 @@
-import logging
 import os
 import re
 import threading
@@ -66,10 +65,6 @@ EXPERIMENT_TIMEOUT_SECONDS = int(
 )
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 _cycle_run_lock = threading.Lock()
-
-# Configure logging for Gradio
-logging.basicConfig(level=logging.INFO)
-
 
 def fetch_available_models():
     """Fetch selectable models from the local LM Studio server."""
@@ -563,7 +558,7 @@ def execute_cycle(
 
         if hypothesis_pipeline_enabled:
             print("\n[2/2] Running automated deep-learning experiment...")
-            logger.info("Starting automated experiment pipeline.")
+            logger.debug("Starting automated experiment pipeline.")
         else:
             print("\n[2/2] Skipping hypothesis-dependent automated experiment.")
             logger.info(
@@ -647,7 +642,14 @@ def execute_cycle(
             print("\n✗ AUTOMATED EXPERIMENT FAILED")
 
             for error in experiment_errors:
-                print(f"  - {error}")
+                first_line = str(error).strip().splitlines()[0] if str(error).strip() else str(error)
+                print(f"  - {first_line}")
+
+            execution_logs = experiment_result.get("execution") or {}
+            stdout_log = execution_logs.get("stdout_path")
+            stderr_log = execution_logs.get("stderr_path")
+            if stdout_log or stderr_log:
+                print(f"  (full output: {stdout_log or '-'} , {stderr_log or '-'})")
 
             capture_progress(
                 {
@@ -1460,12 +1462,12 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             nodes = step_data.get("nodes", [])
             edges = step_data.get("edges", [])
 
-            # Debug logging
-            logger.info(
-                f"Proximity data - adjacency_graph keys: {list(adjacency_graph.keys()) if adjacency_graph else 'None'}"
+            logger.debug(
+                "Proximity data - adjacency_graph keys: %s",
+                list(adjacency_graph.keys()) if adjacency_graph else "None",
             )
-            logger.info(f"Proximity data - nodes count: {len(nodes) if nodes else 0}")
-            logger.info(f"Proximity data - edges count: {len(edges) if edges else 0}")
+            logger.debug("Proximity data - nodes count: %d", len(nodes) if nodes else 0)
+            logger.debug("Proximity data - edges count: %d", len(edges) if edges else 0)
 
             if adjacency_graph:
                 num_hypotheses = len(adjacency_graph)
@@ -1500,10 +1502,7 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
                     html += "<p>No proximity data available.</p>"
 
         elif step_name == "meta_review":
-            # Debug: log the actual meta_review data structure
-            import sys
-
-            print("DEBUG: meta_review step_data =", step_data, file=sys.stderr)
+            logger.debug("meta_review step_data = %s", step_data)
             assert isinstance(step_data, dict), "meta_review step_data is not a dict"
             # Accept both direct dict or nested under 'meta_review'
             if "meta_review" in step_data and isinstance(step_data["meta_review"], dict):

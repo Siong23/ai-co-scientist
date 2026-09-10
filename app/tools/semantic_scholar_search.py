@@ -72,7 +72,7 @@ class SemanticScholarSearchTool:
                 response.raise_for_status()
                 raw_papers = response.json().get("data", [])
                 papers = [self._format_paper(paper) for paper in raw_papers if paper.get("abstract")]
-                logger.info(
+                logger.debug(
                     "Semantic Scholar returned %d usable paper(s) for query %r.",
                     len(papers),
                     query,

@@ -63,6 +63,7 @@ from typing import Any, Dict, List, Optional
 from ..agents_modules.code_generation_agent import CodeGenerationAgent
 from .experiment_runner import ExperimentRunner
 from ..data.dataset_manager import DatasetManager
+from ..utils import logger
 
 
 # ============================================================
@@ -1653,6 +1654,7 @@ class ExperimentOrchestrator:
             )
 
         try:
+            logger.info("Training started")
             runner_result = (
                 self.experiment_runner.run_generated_result(
                     generated_result=generated_result,
@@ -1720,6 +1722,7 @@ class ExperimentOrchestrator:
         """
 
         started_at = time.perf_counter()
+        logger.info("Experiment started")
 
         preparation = (
             self.prepare_experiment(

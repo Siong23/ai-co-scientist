@@ -932,7 +932,7 @@ class ResearchRetriever:
                     error_detail = getattr(source, "last_error_detail", "")
                     if not isinstance(error_detail, str):
                         error_detail = ""
-                    logger.info(
+                    logger.debug(
                         "%s search completed queries=%d/%d results=%d status=%s elapsed_ms=%d",
                         source_name,
                         completed,
@@ -1111,7 +1111,7 @@ class ResearchRetriever:
         self._selected_source_ids.update(
             source_id for document in selected if (source_id := str(document.metadata.get("source_id", "")))
         )
-        logger.info(
+        logger.debug(
             "RAG selected %d sources (%d downloadable) from %d entity-matched candidates: %s",
             len(selected),
             sum(self._has_allowed_pdf(document) for document in selected),
@@ -1293,7 +1293,7 @@ class ResearchRetriever:
         )
         evidence = [*academic_documents, *web_chunks]
 
-        logger.info(
+        logger.debug(
             "Web evidence extraction retained %d/%d selected web discovery result(s).",
             sum(document.metadata.get("source_type") == "web" for document in evidence),
             sum(document.metadata.get("source_type") == "web" for document in selected),

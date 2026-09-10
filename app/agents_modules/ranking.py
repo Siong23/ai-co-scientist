@@ -93,13 +93,13 @@ class RankingAgent:
             pairs = pairs[:max_matches]
 
         for h in active_hypotheses:
-            logger.info(
+            logger.debug(
                 "Ranking input: %s | reflection_report=%s",
                 h.hypothesis_id,
                 h.reflection_report is not None,
             )
 
-        logger.info(f"Running tournament with {len(pairs)} pairs.")
+        logger.debug(f"Running tournament with {len(pairs)} pairs.")
 
         # ---- Parallel LLM Debates ----
         def run_match(pair):
@@ -158,7 +158,7 @@ class RankingAgent:
             elif decision.outcome == "TIE":
                 update_elo_tie(hA, hB, k_factor=k_factor)
             elif decision.outcome == "ABSTAIN":
-                logger.info(
+                logger.debug(
                     f"Judge abstained: no clear winner determined between {hA.hypothesis_id} and {hB.hypothesis_id}."
                 )
                 if not decision.reasoning:

@@ -177,7 +177,7 @@ def call_llm_for_reflection(
     model: str | None = None,
 ) -> Dict:
     """Evaluates a hypothesis against strictly provided retrieved sources to prevent hallucinated references."""
-    logger.info("LLM reflection called for hypothesis %s", hypothesis.hypothesis_id)
+    logger.debug("LLM reflection called for hypothesis %s", hypothesis.hypothesis_id)
 
     # Evidence is owned by the hypothesis, not by the latest generation cycle.
     # Using context.last_retrieved_sources here can silently review an older
@@ -252,7 +252,7 @@ def call_llm_for_reflection(
         model=model,
         reasoning="off",
     )
-    logger.info("LLM reflection response for hypothesis: %s", response)
+    logger.debug("LLM reflection response for hypothesis: %s", response)
 
     if response.startswith("Error:"):
         logger.error("LLM reflection call failed: %s", response)
@@ -275,7 +275,7 @@ def call_llm_for_reflection(
 
     review_data = _parse_reflection_response(response, retrieved_sources)
     if review_data is not None:
-        logger.info("Parsed reflection data: %s", review_data)
+        logger.debug("Parsed reflection data: %s", review_data)
         return review_data
 
     logger.warning("Reflection review response did not validate; retrying with a format-only repair prompt.")
@@ -310,7 +310,7 @@ def call_llm_for_reflection(
         model=model,
         reasoning="off",
     )
-    logger.info("LLM reflection repair response for hypothesis: %s", repaired_response)
+    logger.debug("LLM reflection repair response for hypothesis: %s", repaired_response)
 
     if repaired_response.startswith("Error:"):
         logger.error("LLM reflection repair call failed: %s", repaired_response)
@@ -333,7 +333,7 @@ def call_llm_for_reflection(
 
     review_data = _parse_reflection_response(repaired_response, retrieved_sources)
     if review_data is not None:
-        logger.info("Parsed reflection data after repair: %s", review_data)
+        logger.debug("Parsed reflection data after repair: %s", review_data)
         return review_data
 
     logger.error(

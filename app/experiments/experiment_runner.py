@@ -43,6 +43,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..utils import logger
+
 
 class ExperimentRunner:
     """
@@ -892,10 +894,10 @@ class ExperimentRunner:
 
                 attempt += 1
 
-                print(
-                    f"[ExperimentRunner] "
-                    f"Experiment execution attempt "
-                    f"{attempt}/{MAX_EXPERIMENT_ATTEMPTS}"
+                logger.debug(
+                    "Experiment execution attempt %d/%d",
+                    attempt,
+                    MAX_EXPERIMENT_ATTEMPTS,
                 )
 
                 process = subprocess.run(
@@ -936,10 +938,7 @@ class ExperimentRunner:
                         }
                     )
 
-                    print(
-                        "[ExperimentRunner] "
-                        "Experiment completed successfully."
-                    )
+                    logger.info("Experiment completed successfully")
 
                     break
 
@@ -957,10 +956,9 @@ class ExperimentRunner:
 
                     if missing_module not in installed_packages:
 
-                        print(
-                            f"[ExperimentRunner] "
-                            f"Missing dependency detected: "
-                            f"{missing_module}"
+                        logger.warning(
+                            "Missing dependency detected: %s",
+                            missing_module,
                         )
 
                         install_success, install_output = (
@@ -977,13 +975,12 @@ class ExperimentRunner:
 
                             dependency_install_attempts += 1
 
-                            print(
-                                f"[ExperimentRunner] "
-                                f"Successfully installed "
-                                f"'{missing_module}'."
+                            logger.info(
+                                "Installed missing dependency '%s'",
+                                missing_module,
                             )
-
-                            print(install_output)
+                            # Successful pip output is many lines of detail.
+                            logger.debug("pip install output:\n%s", install_output)
 
                             # IMPORTANT:
                             # Run the SAME generated_experiment.py again.
@@ -1037,15 +1034,8 @@ class ExperimentRunner:
                         encoding="utf-8",
                     )
 
-                    print(
-                        "[ExperimentRunner] "
-                        f"LLM repair applied: {repair_message}"
-                    )
-
-                    print(
-                        "[ExperimentRunner] "
-                        "Retrying repaired generated experiment..."
-                    )
+                    logger.warning("LLM repair applied: %s", repair_message)
+                    logger.debug("Retrying repaired generated experiment...")
 
                     continue
 

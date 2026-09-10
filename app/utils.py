@@ -17,12 +17,75 @@ from sklearn.metrics.pairwise import cosine_similarity
 from .config import config
 
 # --- Logging Setup ---
-# Configure a root logger or a specific logger for the app
-# Using a basic configuration here, can be enhanced
-logging.basicConfig(
-    level=config.get("logging_level", logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+# Two separate concerns share this process:
+#   * the terminal, which should show concise pipeline progress only;
+#   * the Gradio UI and the runtime log file, which keep the full detail.
+#
+# The root logger stays at WARNING so third-party libraries (httpx, urllib3,
+# chromadb, sentence_transformers, PIL, ...) never emit INFO chatter to the
+# console. The app's own logger is kept at INFO and given its own console
+# handler, so meaningful workflow progress is still printed. Implementation
+# detail belongs at DEBUG and therefore stays off the terminal by default.
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+# basicConfig installs its console handler at NOTSET, which would still print
+# every record the app logger propagates upward and duplicate each progress
+# line. Pin it to WARNING so root's console only carries problems. File
+# handlers (added later by app/runtime_logging.py) are left alone so the
+# runtime log keeps full detail.
+for _root_handler in logging.getLogger().handlers:
+    if isinstance(_root_handler, logging.StreamHandler) and not isinstance(_root_handler, logging.FileHandler):
+        _root_handler.setLevel(logging.WARNING)
+
+# Known-chatty third-party loggers that install their own handlers or call
+# basicConfig themselves, so root's level alone would not hold them back.
+for _noisy in (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "chromadb",
+    "sentence_transformers",
+    "transformers",
+    "PIL",
+    "matplotlib",
+    "asyncio",
+    "gradio",
+    "filelock",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+
+class _ConsoleProgressFilter(logging.Filter):
+    """Let the app's console handler print progress only.
+
+    WARNING and above are deliberately excluded here: they still reach the
+    terminal through the root handler (with its fuller timestamped format), so
+    filtering them out at this handler is what keeps them from printing twice.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.WARNING
+
+
+_CONSOLE_LOG_LEVEL = getattr(
+    logging,
+    os.getenv("CO_SCIENTIST_CONSOLE_LOG_LEVEL", "INFO").upper(),
+    logging.INFO,
 )
+
 logger = logging.getLogger("aicoscientist")  # Use a specific name for the app logger
+# Stay verbose at the logger itself: records dropped here can never be recovered
+# by a handler, and the runtime log file expects full INFO detail.
+logger.setLevel(min(int(config.get("logging_level", logging.INFO)), _CONSOLE_LOG_LEVEL))
+# propagate stays True so records still reach the root handlers, including the
+# rotating runtime log file added by app/runtime_logging.py.
+if not any(getattr(handler, "_co_scientist_console", False) for handler in logger.handlers):
+    _console_handler = logging.StreamHandler()
+    _console_handler._co_scientist_console = True
+    _console_handler.setLevel(_CONSOLE_LOG_LEVEL)
+    _console_handler.setFormatter(logging.Formatter("%(message)s"))
+    _console_handler.addFilter(_ConsoleProgressFilter())
+    logger.addHandler(_console_handler)
 
 # Optional: Add file handler based on config (if needed globally)
 # log_filename_base = config.get('log_file_name', 'app')
@@ -329,7 +392,7 @@ def call_llm(
                     status_code = getattr(response, "status_code", None)
                     response_text = str(getattr(response, "text", ""))
                     if status_code == 400 and "does not expose reasoning configuration" in response_text:
-                        logger.info(
+                        logger.debug(
                             "LM Studio model %s does not support native reasoning controls; "
                             "falling back to the OpenAI-compatible API.",
                             selected_model,
@@ -404,7 +467,7 @@ def call_llm(
         logger.error("%s", error)
         return error
     finally:
-        logger.info(
+        logger.debug(
             "LLM call completed model=%s prompt_chars=%d max_output_tokens=%s elapsed_ms=%d cancelled=%s",
             selected_model,
             len(prompt),
@@ -519,13 +582,13 @@ def get_sentence_transformer_model():
     if _sentence_transformer_model is None:
         model_name = config.get("sentence_transformer_model", "all-MiniLM-L6-v2")
         if config.get("use_lmstudio_embeddings", False):
-            logger.info(f"Using LM Studio API embeddings for model: {model_name}...")
+            logger.debug(f"Using LM Studio API embeddings for model: {model_name}...")
             _sentence_transformer_model = LMStudioSentenceTransformer(model_name)
         else:
             try:
-                logger.info(f"Loading sentence transformer model: {model_name}...")
+                logger.debug(f"Loading sentence transformer model: {model_name}...")
                 _sentence_transformer_model = SentenceTransformer(model_name)
-                logger.info("Sentence transformer model loaded successfully.")
+                logger.debug("Sentence transformer model loaded successfully.")
             except ImportError:
                 logger.error(
                     "Failed to import sentence_transformers. Please install it: pip install sentence-transformers"
