@@ -60,7 +60,7 @@ EXPERIMENT_DEVICE = os.getenv(
 EXPERIMENT_TIMEOUT_SECONDS = int(
     os.getenv(
         "EXPERIMENT_TIMEOUT_SECONDS",
-        "3600",
+        "600",
     )
 )
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
@@ -621,7 +621,7 @@ def execute_cycle(
             "success",
             False,
         ):
-            print("\n✓ AUTOMATED EXPERIMENT COMPLETED")
+            print("\nAUTOMATED EXPERIMENT COMPLETED")
 
             capture_progress(
                 {
@@ -639,7 +639,7 @@ def execute_cycle(
                 [],
             )
 
-            print("\n✗ AUTOMATED EXPERIMENT FAILED")
+            print("\nAUTOMATED EXPERIMENT FAILED")
 
             for error in experiment_errors:
                 first_line = str(error).strip().splitlines()[0] if str(error).strip() else str(error)

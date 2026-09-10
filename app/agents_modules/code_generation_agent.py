@@ -697,7 +697,12 @@ IMPORTANT RULES:
 ============================================================
 
 69. The generated experiment must be suitable for automated execution on
-    a shared CPU/GPU server.
+    a shared CPU/GPU server, and must complete within a few minutes when
+    CUDA is unavailable and training runs on CPU. When the specified
+    dataset exceeds 200000 rows, draw a stratified random sample of at
+    most 200000 rows from it before splitting, using the recorded random
+    seed, and report both the original and sampled row counts. This
+    subsamples the specified dataset; it never substitutes a different one.
 
 70. Choose a batch size appropriate for the dataset size, model complexity,
     and available hardware.
@@ -724,7 +729,8 @@ IMPORTANT RULES:
 
 78. Do not use an unnecessarily large number of training epochs.
 
-79. Use a reasonable maximum epoch limit.
+79. Use a maximum epoch limit of 15 unless the hypothesis explicitly
+    requires a longer training schedule.
 
 80. Use early stopping based on validation performance when scientifically
     appropriate and when it does not conflict with the experiment
