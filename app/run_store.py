@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 from .research_trace import format_research_trace_html
-from .utils import redact_secrets
+from .utils import redact_secrets, logger
+
 
 DEFAULT_RESULTS_DIR = Path("results")
 RUNS_DIR_ENV = "CO_SCIENTIST_RUNS_DIR"
@@ -26,21 +27,69 @@ SECRET_PATTERNS = [
 ]
 
 
+# ExperimentOrchestrator stores experiment artifacts here:
+# app/experiments/results/runs/
+EXPERIMENT_RESULTS_DIR_ENV = "CO_SCIENTIST_EXPERIMENT_RESULTS_DIR"
+DEFAULT_EXPERIMENT_RESULTS_DIR = Path("app/experiments/results")
+
+
 def get_results_dir() -> Path:
-    return Path(os.getenv(RUNS_DIR_ENV, DEFAULT_RESULTS_DIR))
+    """Return the directory used for AI Co-Scientist run persistence."""
+    return Path(os.getenv(RUNS_DIR_ENV, DEFAULT_RESULTS_DIR)).expanduser()
 
 
 def get_runs_dir() -> Path:
+    """Return the directory containing saved AI Co-Scientist runs."""
     return get_results_dir() / "runs"
 
 
 def get_reports_dir() -> Path:
+    """Return the directory containing generated HTML reports."""
     return get_results_dir() / "reports"
 
 
+def get_experiment_results_dir() -> Path:
+    """
+    Return the root directory containing automated experiment artifacts.
+
+    This matches ExperimentOrchestrator.RESULTS_DIR and can be overridden
+    for deployment/server environments using CO_SCIENTIST_EXPERIMENT_RESULTS_DIR.
+    """
+    return Path(
+        os.getenv(
+            EXPERIMENT_RESULTS_DIR_ENV,
+            DEFAULT_EXPERIMENT_RESULTS_DIR,
+        )
+    ).expanduser()
+
+
+def get_gradio_allowed_paths() -> List[str]:
+    """
+    Return filesystem directories that Gradio is allowed to serve.
+
+    Reports and automated experiment artifacts must both be included because
+    reports contain links to generated code, logs, checkpoints, metrics,
+    and visualizations stored outside the normal report directory.
+    """
+    paths = [
+        get_reports_dir(),
+        get_experiment_results_dir(),
+    ]
+
+    return [
+        str(path.resolve())
+        for path in paths
+    ]
+
+
 def report_file_url(report_path: Path) -> str:
-    """Return a Gradio file-serving URL for a generated report."""
-    return f"/gradio_api/file={quote(report_path.resolve().as_posix())}"
+    """Return a Gradio file-serving URL for a generated report/file."""
+    path = Path(report_path).expanduser().resolve()
+
+    return (
+        f"/gradio_api/file="
+        f"{quote(path.as_posix())}"
+    )
 
 
 def generate_run_id(created_at: Optional[dt.datetime] = None) -> str:
@@ -384,7 +433,9 @@ def render_report(run: Dict[str, Any]) -> str:
     return "\n".join(html_parts)
 
 
-def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
+def _experiment_report_section(
+    experiment_result: Dict[str, Any]
+) -> str:
     """
     Render the automated experiment section of the run report.
 
@@ -399,10 +450,11 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
         - visualizations
 
     The experiment files remain in the experiment run directory.
+
     This section provides clickable Gradio file-serving links so that
     the files can be inspected directly from the run report.
     """
-    if experiment_result.get("status") == "skipped_for_research_type":
+    if isinstance(experiment_result, dict) and experiment_result.get("status") == "skipped_for_research_type":
         return (
             "<section><h2>Automated Experiment</h2>"
             "<p><strong>Status:</strong> Skipped for research type "
@@ -411,75 +463,225 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
             "</section>"
         )
 
-    execution = experiment_result.get("execution", {})
-    outputs = execution.get("outputs", {}) if isinstance(execution, dict) else {}
+    # ------------------------------------------------------------
+    # Extract experiment execution data
+    # ------------------------------------------------------------
+
+    if not isinstance(experiment_result, dict):
+        experiment_result = {}
+
+    # Top-level experiment result
+    experiment_execution = experiment_result.get("execution", {})
+    if not isinstance(experiment_execution, dict):
+        experiment_execution = {}
+
+    # The actual runner result may be nested inside "execution"
+    runner_execution = experiment_execution.get("execution", {})
+    if not isinstance(runner_execution, dict):
+        runner_execution = {}
+
+    # If the nested execution does not exist, fall back to the
+    # top-level execution object.
+    if not runner_execution:
+        runner_execution = experiment_execution
+
+
+    # ------------------------------------------------------------
+    # Extract outputs
+    # ------------------------------------------------------------
+
+    outputs = experiment_execution.get("outputs", {})
+    if not isinstance(outputs, dict):
+        outputs = {}
+
+    if not outputs:
+        outputs = experiment_result.get("outputs", {})
 
     if not isinstance(outputs, dict):
         outputs = {}
 
+
+    # ------------------------------------------------------------
+    # Metrics / errors
+    # ------------------------------------------------------------
+
     metrics = outputs.get("metrics", {})
-    errors = experiment_result.get("errors", [])
-    visualizations = outputs.get("visualizations", [])
 
     if not isinstance(metrics, dict):
         metrics = {}
 
+    errors = (
+        runner_execution.get("errors")
+        or experiment_execution.get("errors")
+        or experiment_result.get("errors", [])
+    )
+
     if not isinstance(errors, list):
         errors = [errors]
+
+
+    visualizations = outputs.get("visualizations", [])
 
     if not isinstance(visualizations, list):
         visualizations = [visualizations]
 
+
     # ------------------------------------------------------------
-    # Execution information
+    # Attempt counts
     # ------------------------------------------------------------
-    if not isinstance(execution, dict):
-        execution = {}
 
-    experiment_attempts = execution.get(
-        "experiment_attempts",
-        experiment_result.get("experiment_attempts", 0),
+    experiment_attempts = (
+        runner_execution.get("experiment_attempts")
+        or runner_execution.get("execution_attempts")
+        or runner_execution.get("attempts")
+        or experiment_execution.get("experiment_attempts")
+        or experiment_execution.get("execution_attempts")
+        or experiment_execution.get("attempts")
+        or experiment_result.get("experiment_attempts")
+        or 0
     )
 
-    repair_attempts = execution.get(
-        "repair_attempts",
-        experiment_result.get("repair_attempts", 0),
+    repair_attempts = (
+        runner_execution.get("repair_attempts")
+        or runner_execution.get("llm_repair_attempts")
+        or experiment_execution.get("repair_attempts")
+        or experiment_execution.get("llm_repair_attempts")
+        or experiment_result.get("repair_attempts")
+        or 0
     )
 
-    dependency_install_attempts = execution.get(
-        "dependency_install_attempts",
-        experiment_result.get(
-            "dependency_install_attempts",
-            0,
-        ),
+    dependency_install_attempts = (
+        runner_execution.get("dependency_install_attempts")
+        or runner_execution.get("dependency_attempts")
+        or experiment_execution.get("dependency_install_attempts")
+        or experiment_execution.get("dependency_attempts")
+        or experiment_result.get("dependency_install_attempts")
+        or 0
     )
 
-    run_directory = experiment_result.get("run_directory")
+    # ------------------------------------------------------------
+    # File paths
+    # ------------------------------------------------------------
 
-    generated_code_path = experiment_result.get("generated_code_path")
+    run_directory = (
+        experiment_result.get("run_directory")
+        or experiment_execution.get("run_directory")
+        or runner_execution.get("run_directory")
+    )
 
-    stdout_path = execution.get("stdout_path")
+    generated_code_path = (
+        experiment_result.get("generated_code_path")
+        or experiment_execution.get("generated_code_path")
+        or runner_execution.get("generated_code_path")
+    )
 
-    stderr_path = execution.get("stderr_path")
+    stdout_path = (
+        runner_execution.get("stdout_path")
+        or experiment_execution.get("stdout_path")
+        or experiment_result.get("stdout_path")
+    )
+
+    stderr_path = (
+        runner_execution.get("stderr_path")
+        or experiment_execution.get("stderr_path")
+        or experiment_result.get("stderr_path")
+    )
+
+    logger.info(
+        "Final stdout_path: %r",
+        stdout_path,
+    )
+
+    logger.info(
+        "Final stderr_path: %r",
+        stderr_path,
+    )
+
+    # ------------------------------------------------------------
+    # File path resolver
+    # ------------------------------------------------------------
+
+    def resolve_file_path(
+        file_path: Any
+    ) -> Optional[Path]:
+
+        if not file_path:
+            return None
+
+        path = Path(str(file_path)).expanduser()
+
+        if not path.is_absolute() and run_directory:
+            path = Path(str(run_directory)) / path
+
+        path = path.resolve()
+
+        if not path.exists() or not path.is_file():
+            return None
+
+        return path
 
     # ------------------------------------------------------------
     # Helper for creating file links
     # ------------------------------------------------------------
+
     def file_link(
         file_path: Any,
         label: str,
     ) -> str:
+
         if not file_path:
             return f'<span class="file-missing">{_escape(label)} not available</span>'
 
-        path = Path(str(file_path))
+        path = resolve_file_path(file_path)
 
-        if not path.exists():
-            return f'<span class="file-missing">{_escape(label)} not found</span>'
+        if path is None:
+            return (
+                f'<span class="file-missing">'
+                f'{_escape(label)} not found'
+                f'</span>'
+            )
 
         file_url = report_file_url(path)
 
         return f'<a class="file-link" href="{_escape(file_url)}" target="_blank">{_escape(label)}</a>'
+
+    # ------------------------------------------------------------
+    # Debug logging
+    # ------------------------------------------------------------
+
+    logger.info(
+        "Experiment report execution keys: %s",
+        list(experiment_execution.keys()),
+    )
+
+    logger.info(
+        "Experiment report runner execution keys: %s",
+        list(runner_execution.keys()),
+    )
+
+    logger.info(
+        "stdout_path from experiment_result: %r",
+        stdout_path,
+    )
+
+    logger.info(
+        "stderr_path from experiment_result: %r",
+        stderr_path,
+    )
+
+    logger.info(
+        "resolved stdout path: %r",
+        resolve_file_path(stdout_path),
+    )
+
+    logger.info(
+        "resolved stderr path: %r",
+        resolve_file_path(stderr_path),
+    )
+
+    # ------------------------------------------------------------
+    # Report
+    # ------------------------------------------------------------
 
     parts = [
         "<section><h2>Automated Experiment</h2>",
@@ -489,6 +691,7 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
     # ------------------------------------------------------------
     # Attempt information
     # ------------------------------------------------------------
+
     parts.append(
         "<h3>Execution Summary</h3>"
         "<table><tbody>"
@@ -504,6 +707,7 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
     # ------------------------------------------------------------
     # Experiment files
     # ------------------------------------------------------------
+
     parts.append(
         "<h3>Experiment Files</h3>"
         "<table><tbody>"
@@ -532,6 +736,7 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
     # ------------------------------------------------------------
     # Evaluation metrics
     # ------------------------------------------------------------
+
     if metrics:
         parts.append("<h3>Evaluation Metrics</h3><table><tbody>")
 
@@ -543,6 +748,7 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
     # ------------------------------------------------------------
     # Errors
     # ------------------------------------------------------------
+
     if errors:
         parts.append("<h3>Errors</h3><ul>")
 
@@ -554,13 +760,16 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
     # ------------------------------------------------------------
     # Visualizations
     # ------------------------------------------------------------
+
     if visualizations:
         parts.append("<h3>Visualizations</h3><div>")
 
         for visualization in visualizations:
-            visualization_path = Path(str(visualization))
+            visualization_path = resolve_file_path(
+                visualization
+            )
 
-            if not visualization_path.exists():
+            if visualization_path is None:
                 continue
 
             visualization_url = report_file_url(visualization_path)
@@ -584,6 +793,7 @@ def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
                     f"<figcaption>{label}</figcaption>"
                     f"</figure>"
                 )
+
             else:
                 parts.append(f'<p><a href="{_escape(visualization_url)}" target="_blank">{label}</a></p>')
 

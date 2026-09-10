@@ -10,7 +10,7 @@ import time
 from unittest.mock import Mock, patch
 
 import pytest
-
+from app.data.dataset_manager import DatasetManager
 
 def test_core_imports():
     import gradio  # noqa: F401
@@ -19,6 +19,7 @@ def test_core_imports():
     from app.models import ContextMemory, ResearchGoal  # noqa: F401
     from app.tools.arxiv_search import ArxivSearchTool  # noqa: F401
     from app.utils import fetch_lmstudio_models, get_lmstudio_base_url, logger  # noqa: F401
+    
 
 
 @pytest.fixture(scope="module")
@@ -747,6 +748,12 @@ def test_advanced_settings_exposes_available_model_choices(gradio_app_module):
 def test_execute_cycle_uses_configured_supervisor_entrypoint(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
 
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+    
     monkeypatch.chdir(tmp_path)
     cycle_supervisor = Mock()
     cycle_supervisor.run.return_value = {
@@ -783,6 +790,12 @@ def test_execute_cycle_surfaces_recovery_warnings(gradio_app_module, monkeypatch
 
 def test_execute_cycle_reports_bounded_quality_gate_without_claiming_timeout(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
 
     monkeypatch.chdir(tmp_path)
     cycle_supervisor = Mock()

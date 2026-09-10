@@ -22,6 +22,7 @@ from app.research_trace import format_research_trace_html, merge_trace_event, no
 from app.run_store import (
     _escape,
     delete_run,
+    get_gradio_allowed_paths,
     get_reports_dir,
     history_html,
     list_runs,
@@ -40,6 +41,7 @@ from app.utils import (
     logger,
     redact_secrets,
 )
+from app.data.dataset_manager import DatasetManager
 
 # Global state for the Gradio app
 global_context = ContextMemory()
@@ -52,7 +54,6 @@ available_models: List[str] = []
 CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
 CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "1800"))
-EXPERIMENT_DATASET_PATH = os.getenv("EXPERIMENT_DATASET_PATH", "")
 EXPERIMENT_DEVICE = os.getenv(
     "EXPERIMENT_DEVICE",
     "cpu",
@@ -586,9 +587,16 @@ def execute_cycle(
             }
         )
 
-        dataset_path = EXPERIMENT_DATASET_PATH if EXPERIMENT_DATASET_PATH else None
-
         if hypothesis_pipeline_enabled:
+            dataset_manager = DatasetManager(
+                dataset_name="5G-NIDD",
+                dataset_path="data/5g_nidd/5g_nidd.csv",
+            )
+
+            dataset_path = dataset_manager.get_latest_dataset()
+
+            print(f"Dataset selected: {dataset_path}")
+
             experiment_orchestrator = ExperimentOrchestrator(
                 dataset_name="5G-NIDD",
                 dataset_path=dataset_path,
@@ -2205,12 +2213,20 @@ if __name__ == "__main__":
 
     reports_dir = get_reports_dir()
     reports_dir.mkdir(parents=True, exist_ok=True)
+
+    allowed_paths = get_gradio_allowed_paths()
+
+    logger.info(
+        "Gradio allowed file paths: %s",
+        allowed_paths,
+    )
+
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
         show_error=True,
-        allowed_paths=[str(reports_dir.resolve())],
+        allowed_paths=allowed_paths,
         theme=getattr(demo, "theme", None),
         css=getattr(demo, "css", None),
     )
