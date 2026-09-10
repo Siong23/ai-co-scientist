@@ -533,7 +533,7 @@ class ProximityAgent:
                     f"<b>{node_id}: {title_text}</b><br>Elo: {elo:.1f} | {cluster_label}{dup_flag}<br><br>{snippet}"
                 )
 
-        logger.info(
+        logger.debug(
             "Built proximity graph: %d nodes, %d edges, %d clusters, %d outliers, %d near-duplicates, diversity: %.3f",
             len(active_hypotheses),
             len(edges),

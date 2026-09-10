@@ -239,7 +239,7 @@ def summarize_evidence_led_research(
         },
     }
     context.meta_review_feedback.append(overview)
-    logger.info("Mode-aware meta-review complete for %s.", research_type)
+    logger.debug("Mode-aware meta-review complete for %s.", research_type)
     return overview
 
 
@@ -457,7 +457,7 @@ class MetaReviewAgent:
         # Top-ranked hypotheses
         # ----------------------------------------------------------------
         best_hypotheses = sorted(active_hypotheses, key=lambda h: h.elo_score, reverse=True)[:3]
-        logger.info(
+        logger.debug(
             "Top hypotheses for meta-review: %s",
             [h.hypothesis_id for h in best_hypotheses],
         )
@@ -480,5 +480,5 @@ class MetaReviewAgent:
             },
         }
         context.meta_review_feedback.append(overview)
-        logger.info("Meta-review complete with %d critique(s).", len(comment_summary))
+        logger.debug("Meta-review complete with %d critique(s).", len(comment_summary))
         return overview

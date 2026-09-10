@@ -222,7 +222,7 @@ def _parse_generation_response(response: str) -> List[Dict]:
                 "'source_ids' fields, or an object with an 'error' string."
             )
             raise ValueError(error_message)
-        logger.info("Parsed generated hypotheses: %s", hypotheses_data)
+        logger.debug("Parsed generated hypotheses: %s", hypotheses_data)
         return hypotheses_data
     except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError(str(exc)) from exc
@@ -260,7 +260,7 @@ def _recover_incomplete_generation(
             max_tokens=_output_token_limit("generation", 4096),
             reasoning="off",
         )
-        logger.info(
+        logger.debug(
             "LLM generation recovery response for candidate %d: %s",
             candidate_number,
             response,
@@ -301,7 +301,7 @@ def call_llm_for_generation(
     prompt: str, num_hypotheses: int = 3, temperature: float = 0.7, model: str | None = None
 ) -> List[Dict]:
     """Call the LLM and make one format-repair attempt when JSON is malformed."""
-    logger.info(
+    logger.debug(
         "LLM generation called with prompt: %s, num_hypotheses: %d, temperature: %.2f",
         prompt,
         num_hypotheses,
@@ -328,7 +328,7 @@ def call_llm_for_generation(
         max_tokens=_output_token_limit("generation", 4096),
         reasoning="off",
     )
-    logger.info("LLM generation response: %s", response)
+    logger.debug("LLM generation response: %s", response)
 
     if response.startswith("Error:"):
         logger.error("LLM generation call failed: %s", response)
@@ -374,7 +374,7 @@ def call_llm_for_generation(
         max_tokens=_output_token_limit("format_repair", 4096),
         reasoning="off",
     )
-    logger.info("LLM generation format-repair response: %s", repaired_response)
+    logger.debug("LLM generation format-repair response: %s", repaired_response)
     if repaired_response.startswith("Error:"):
         logger.error("LLM generation format-repair call failed: %s", repaired_response)
         return [{"title": "Error", "text": repaired_response}]
@@ -871,7 +871,7 @@ def call_llm_for_search_queries(
                         hypothesis_id=synthesized.hypothesis_id,
                         search_intent=synthesized.search_intent,
                     )
-                logger.info(
+                logger.debug(
                     "Synthesized %d queries for missing intents: %s",
                     len(missing_intents),
                     sorted(missing_intents),
@@ -1434,7 +1434,7 @@ Retrieved sources:
             available_source_ids,
         )
 
-        logger.info(
+        logger.debug(
             "Evidence relevance grader selected %d/%d sources: %s",
             len(selected_ids),
             len(available_source_ids),
@@ -2075,7 +2075,7 @@ Requirements:
                 )
             )
 
-    logger.info(
+    logger.debug(
         "Hypothesis audit completed: %d candidate(s), %d passed, %d rejected.",
         len(audits),
         sum(1 for audit in audits if audit["passed"]),
@@ -2243,7 +2243,7 @@ Retrieved sources:
             gap_queries=gap_queries,
             reason=reason,
         )
-        logger.info(
+        logger.debug(
             "Evidence coverage sufficient=%s missing=%s map=%s reason=%s",
             coverage.sufficient,
             coverage.missing_aspect_ids,
@@ -2557,7 +2557,7 @@ Verified retrieved sources:
                 )
             )
 
-        logger.info(
+        logger.debug(
             "Assumption analysis produced %d assumption(s): %s",
             len(assessments),
             [(item.assumption_id, item.status, item.critical) for item in assessments],
@@ -2802,7 +2802,7 @@ Known sources available for OPEN_URL or FIND_IN_PAGE:
             reason=reason or "No additional rationale supplied.",
             source_ids=source_ids,
         )
-        logger.info(
+        logger.debug(
             "Research action step=%d/%d action=%s target=%s queries=%s source_ids=%s",
             step + 1,
             max_steps,
@@ -3214,7 +3214,7 @@ Malformed response:
             analytical_rationale=analytical_rationale,
             warnings=synthesis_warnings,
         )
-        logger.info(
+        logger.debug(
             "Literature synthesis produced %d findings, %d contradictions, and %d gaps.",
             len(synthesis.established_findings),
             len(synthesis.contradictions),
@@ -3860,7 +3860,7 @@ Retrieved evidence:
             aspect_evidence_refs=aspect_evidence_refs,
             stage="full_text",
         )
-        logger.info(
+        logger.debug(
             "Full-text evidence coverage sufficient=%s missing=%s refs=%s",
             coverage.sufficient,
             coverage.missing_aspect_ids,

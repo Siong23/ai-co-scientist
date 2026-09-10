@@ -102,7 +102,7 @@ class TavilySearchTool:
                 for result in results
                 if result.get("url") and (result.get("content") or result.get("raw_content"))
             ]
-            logger.info("Tavily returned %d usable result(s) for query %r.", len(evidence), query)
+            logger.debug("Tavily returned %d usable result(s) for query %r.", len(evidence), query)
             return evidence
         except Exception as exc:
             self.last_error_status = self.last_error_status or getattr(
@@ -158,7 +158,7 @@ class TavilySearchTool:
                 for result in response.json().get("results", [])
                 if result.get("url") and str(result.get("raw_content") or "").strip()
             }
-            logger.info(
+            logger.debug(
                 "Tavily extracted bounded content from %d/%d selected URL(s).",
                 len(extracted),
                 len(selected_urls),

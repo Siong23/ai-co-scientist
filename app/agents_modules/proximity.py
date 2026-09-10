@@ -306,7 +306,7 @@ class ProximityAgent:
             threshold,
         )
 
-        logger.info(
+        logger.debug(
             "Identified %d clusters from %d hypotheses.",
             len(set(clusters.values())),
             len(clusters),

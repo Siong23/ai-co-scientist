@@ -60,7 +60,7 @@ class ElsevierSearchTool:
             usable_papers = [paper for paper in papers if paper.get("abstract")]
             from ..utils import logger
 
-            logger.info("Elsevier Scopus returned %d usable paper(s) for query %r.", len(usable_papers), query)
+            logger.debug("Elsevier Scopus returned %d usable paper(s) for query %r.", len(usable_papers), query)
             return usable_papers
         except Exception as exc:
             from ..utils import logger, redact_secrets

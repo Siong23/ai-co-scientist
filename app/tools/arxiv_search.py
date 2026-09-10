@@ -144,7 +144,7 @@ class ArxivSearchTool:
             sort_criterion = arxiv.SortCriterion.SubmittedDate
 
         # Log search parameters
-        logger.info(
+        logger.debug(
             f"ArXiv search initiated - Query: '{query}', Max Results: {max_results}, "
             f"Categories: {categories}, Sort: {sort_by}"
         )
@@ -170,7 +170,7 @@ class ArxivSearchTool:
             search_time = (time.time() - start_time) * 1000  # Convert to ms
 
             # Enhanced logging with performance metrics
-            logger.info(
+            logger.debug(
                 f"ArXiv search completed - Found {len(papers)} papers for query: '{query}' in {search_time:.2f}ms"
             )
 
@@ -189,7 +189,7 @@ class ArxivSearchTool:
                     for cat in paper.get("categories", []):
                         categories_count[cat] = categories_count.get(cat, 0) + 1
                 top_categories = sorted(categories_count.items(), key=lambda x: x[1], reverse=True)[:5]
-                logger.info(f"ArXiv search result categories: {dict(top_categories)}")
+                logger.debug(f"ArXiv search result categories: {dict(top_categories)}")
 
             return papers
 
@@ -231,7 +231,7 @@ class ArxivSearchTool:
 
     def get_paper_details(self, arxiv_id: str) -> Optional[Dict]:
         """Get detailed information for a specific paper by arXiv ID"""
-        logger.info(f"Fetching arXiv paper details for ID: {arxiv_id}")
+        logger.debug(f"Fetching arXiv paper details for ID: {arxiv_id}")
         try:
             import time
 
@@ -244,7 +244,7 @@ class ArxivSearchTool:
 
             if papers:
                 paper = self._format_paper(papers[0])
-                logger.info(f"Successfully retrieved paper '{paper['title']}' ({arxiv_id}) in {fetch_time:.2f}ms")
+                logger.debug(f"Successfully retrieved paper '{paper['title']}' ({arxiv_id}) in {fetch_time:.2f}ms")
                 return paper
             else:
                 logger.warning(f"No paper found with arXiv ID: {arxiv_id}")
@@ -301,7 +301,7 @@ class ArxivSearchTool:
 
     def analyze_research_trends(self, query: str, days_back: int = 30) -> Dict:
         """Analyze research trends for a given topic"""
-        logger.info(f"Starting arXiv trends analysis for '{query}' over last {days_back} days")
+        logger.debug(f"Starting arXiv trends analysis for '{query}' over last {days_back} days")
 
         papers = self.search_recent_papers(query, days_back, max_results=50)
 
@@ -327,12 +327,12 @@ class ArxivSearchTool:
         top_authors = sorted(author_counts.items(), key=lambda x: x[1], reverse=True)[:10]
 
         # Log trends analysis results
-        logger.info(
+        logger.debug(
             f"ArXiv trends analysis completed for '{query}': {len(papers)} papers, "
             f"top categories: {dict(top_categories[:3])}"
         )
         if top_authors:
-            logger.info(f"Most active authors: {dict(top_authors[:3])}")
+            logger.debug(f"Most active authors: {dict(top_authors[:3])}")
 
         return {
             "total_papers": len(papers),

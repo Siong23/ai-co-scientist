@@ -115,7 +115,7 @@ class EvolutionAgent:
                 strategy,
                 evidence_sources=evidence_sources,
             )
-            logger.info(
+            logger.debug(
                 "Evolved hypothesis %s created with strategy %s from parents %s",
                 evolved.hypothesis_id,
                 strategy,
@@ -127,7 +127,7 @@ class EvolutionAgent:
         if max_workers <= 1:
             results = [evolve_one(strategy) for strategy in strategies]
         else:
-            logger.info("Evolving %d candidates with %d workers.", len(strategies), max_workers)
+            logger.debug("Evolving %d candidates with %d workers.", len(strategies), max_workers)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 results = list(executor.map(evolve_one, strategies))
         for _, diagnostics in results:
