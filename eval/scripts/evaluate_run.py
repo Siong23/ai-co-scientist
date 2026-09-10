@@ -22,6 +22,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 from rubrics.goal_alignment import goals_match  # noqa: E402
+from rubrics.suites import DEFAULT_METRIC_SUITE, METRIC_SUITES  # noqa: E402
 
 DEFAULT_GOAL_PATH = PROJECT_ROOT / "goals" / "goal_001_perovskite_humidity.txt"
 RANKING_STEP_PATTERN = re.compile(r"ranking(?:_?(\d+)|_final)?")
@@ -187,6 +188,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="run opt-in DeepEval metrics using a local OpenAI-compatible judge",
     )
     parser.add_argument(
+        "--metric-suite",
+        choices=METRIC_SUITES,
+        default=DEFAULT_METRIC_SUITE,
+        help=(
+            "which DeepEval metric suite --llm-metrics runs: 'hypothesis' scores the "
+            "hypothesis itself, 'rag' scores it against retrieved evidence, 'legacy' runs "
+            "the superseded Evidence support metric, and 'all' runs hypothesis plus rag "
+            f"(default: {DEFAULT_METRIC_SUITE})"
+        ),
+    )
+    parser.add_argument(
         "--judge-model",
         help="local judge model name (or set LOCAL_MODEL_NAME)",
     )
@@ -267,8 +279,15 @@ def main(argv: list[str] | None = None) -> int:
                 model=judge["model"],
                 base_url=judge["base_url"],
                 api_key=os.environ["LOCAL_MODEL_API_KEY"],
+                # Judging must be as reproducible as a local server allows.
+                temperature=0,
             )
-            llm_report = evaluate_parsed_run(parsed, threshold=args.threshold, model=local_model)
+            llm_report = evaluate_parsed_run(
+                parsed,
+                threshold=args.threshold,
+                model=local_model,
+                suite=args.metric_suite,
+            )
         except (RunValidationError, LLMEvaluationError) as exc:
             print(
                 f"Evaluation error: {redact_environment_secrets(str(exc))}",
@@ -276,6 +295,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         parsed["llm_evaluation"] = {"judge": judge, **llm_report}
+        if llm_report["status"] != "completed":
+            # An all-skipped suite is not a pass; say so instead of letting an
+            # empty metric list look like success.
+            print(f"No metric completed: {llm_report['reason']}", file=sys.stderr)
         if not llm_report["passed"]:
             exit_code = 1
 

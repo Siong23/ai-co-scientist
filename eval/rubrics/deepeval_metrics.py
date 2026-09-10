@@ -1,67 +1,228 @@
-"""Opt-in DeepEval metrics for persisted Co-Scientist hypotheses."""
+"""Opt-in DeepEval metric suites for persisted Co-Scientist hypotheses.
+
+Metric definitions are declarative (:data:`METRIC_DEFINITIONS`) and execution is
+centralized in :func:`evaluate_parsed_run`, so adding a metric never means
+adding another branch to the runner.
+
+Custom scientific metrics use ``GEval`` with explicit ``evaluation_steps`` and
+never ``criteria`` as well: DeepEval 4.2.2 ignores ``criteria`` once steps are
+supplied, and fixed steps judge more reproducibly than a generated rubric.
+"""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
-from deepeval.metrics import GEval
+from deepeval.metrics import (
+    AnswerRelevancyMetric,
+    ContextualRelevancyMetric,
+    FaithfulnessMetric,
+    GEval,
+)
 from deepeval.test_case import LLMTestCase, SingleTurnParams
 
+from rubrics.errors import LLMEvaluationError
+from rubrics.retrieval_context import RetrievalContext, extract_retrieval_context
+from rubrics.suites import (
+    DEFAULT_METRIC_SUITE,
+    METRIC_SUITES,
+    SUITE_ALL,
+    SUITE_HYPOTHESIS,
+    SUITE_LEGACY,
+    SUITE_RAG,
+)
 
-class LLMEvaluationError(RuntimeError):
-    """Raised when an LLM-backed evaluation cannot be completed."""
+KIND_GEVAL = "geval"
+KIND_ANSWER_RELEVANCY = "answer_relevancy"
+KIND_FAITHFULNESS = "faithfulness"
+KIND_CONTEXTUAL_RELEVANCY = "contextual_relevancy"
+
+#: Metric classes per kind; tests substitute fakes so the suite stays offline.
+DEFAULT_METRIC_FACTORIES: Mapping[str, Callable[..., Any]] = {
+    KIND_GEVAL: GEval,
+    KIND_ANSWER_RELEVANCY: AnswerRelevancyMetric,
+    KIND_FAITHFULNESS: FaithfulnessMetric,
+    KIND_CONTEXTUAL_RELEVANCY: ContextualRelevancyMetric,
+}
 
 
-METRIC_DEFINITIONS = (
-    {
-        "name": "Goal alignment",
-        "criteria": (
-            "Judge whether the proposed research hypothesis directly addresses the "
-            "research goal. Reward a clear mechanism and outcome connected to the goal; "
-            "penalize tangential or generic proposals."
+@dataclass(frozen=True)
+class MetricSpec:
+    """A metric, the suite it belongs to, and the artifact fields it needs."""
+
+    name: str
+    suite: str
+    kind: str
+    evaluation_params: tuple[SingleTurnParams, ...]
+    evaluation_steps: tuple[str, ...] = ()
+
+    @property
+    def requires_retrieval_context(self) -> bool:
+        """Whether this metric may only run against substantive source text."""
+        return SingleTurnParams.RETRIEVAL_CONTEXT in self.evaluation_params
+
+    def build_kwargs(self, *, threshold: float, model: Any) -> dict[str, Any]:
+        """Return the constructor arguments for this metric's factory."""
+        kwargs: dict[str, Any] = {
+            "threshold": threshold,
+            "model": model,
+            "async_mode": False,
+        }
+        if self.kind == KIND_GEVAL:
+            # Only GEval takes a rubric. The built-in metrics declare their own
+            # required params and reject unexpected keyword arguments.
+            kwargs["name"] = self.name
+            kwargs["evaluation_params"] = list(self.evaluation_params)
+            kwargs["evaluation_steps"] = list(self.evaluation_steps)
+        return kwargs
+
+
+METRIC_DEFINITIONS: tuple[MetricSpec, ...] = (
+    MetricSpec(
+        name="Goal alignment",
+        suite=SUITE_HYPOTHESIS,
+        kind=KIND_GEVAL,
+        evaluation_params=(SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT),
+        evaluation_steps=(
+            "Identify the central objective and every explicit constraint stated in the research goal.",
+            "Identify the intervention, mechanism, and intended outcome proposed by the hypothesis.",
+            "Check each explicit goal constraint against the hypothesis and note any it ignores or contradicts.",
+            "Score how directly and completely the hypothesis addresses the stated goal, penalizing "
+            "tangential, generic, or only partially responsive proposals.",
         ),
-        "evaluation_params": [SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-        "evaluation_steps": [
-            "Identify the central objective and constraints in the research goal.",
-            "Identify the intervention, mechanism, and intended outcome in the hypothesis.",
-            "Score how directly and completely the hypothesis addresses the goal.",
-        ],
-    },
-    {
-        "name": "Scientific testability",
-        "criteria": (
-            "Judge whether the hypothesis is falsifiable and can be tested by a concrete "
-            "experiment. Reward explicit variables, measurable outcomes, a plausible "
-            "comparison or control, and a predicted direction of effect."
+    ),
+    MetricSpec(
+        name="Scientific testability",
+        suite=SUITE_HYPOTHESIS,
+        kind=KIND_GEVAL,
+        evaluation_params=(SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT),
+        evaluation_steps=(
+            "Identify the intervention or independent variable the hypothesis proposes to manipulate.",
+            "Identify the dependent variable or outcome, and whether the text states how it would be measured.",
+            "Identify any comparison, baseline, or control condition, and whether one is needed for this claim.",
+            "Identify the predicted direction or size of the effect.",
+            "Decide whether a researcher could design a concrete experiment whose result would falsify the "
+            "hypothesis as written.",
+            "Score only on the elements above. Award no credit for scientific vocabulary, hedging, or a "
+            "confident tone that is not backed by a stated variable, measurement, comparison, or prediction.",
         ),
-        "evaluation_params": [SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
-        "evaluation_steps": [
-            "Extract the proposed intervention or independent variable.",
-            "Extract measurable outcomes, comparison conditions, and predicted effects.",
-            "Score whether a researcher could design a falsifying experiment from the text.",
-        ],
-    },
-    {
-        "name": "Evidence support",
-        "criteria": (
-            "Judge whether the supplied evidence sources support the factual and mechanistic "
-            "claims made by the hypothesis. Use only the supplied retrieval context; do not "
-            "assume that a citation supports claims not represented in that context."
+    ),
+    MetricSpec(
+        name="Feasibility",
+        suite=SUITE_HYPOTHESIS,
+        kind=KIND_GEVAL,
+        evaluation_params=(SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT),
+        evaluation_steps=(
+            "List the data, equipment, instrumentation, and measurements the proposed work would require, "
+            "using only what the research goal and the hypothesis state.",
+            "Judge whether the text establishes that those resources are obtainable, or whether it silently "
+            "depends on proprietary datasets, unavailable hardware, or access it never mentions.",
+            "Assess experimental complexity and implementation burden: scale, duration, expertise, and the "
+            "number of steps that must succeed together.",
+            "Note any dependency that is unrealistic or impossible as stated.",
+            "Score how realistically this research could be executed on the supplied information. Do not "
+            "assume access to resources the text does not mention.",
         ),
-        "evaluation_params": [
+    ),
+    MetricSpec(
+        name="Scientific plausibility",
+        suite=SUITE_HYPOTHESIS,
+        kind=KIND_GEVAL,
+        evaluation_params=(SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT),
+        evaluation_steps=(
+            "State, step by step, the causal or mechanistic account the hypothesis proposes.",
+            "Check whether each step follows from the previous one, or whether the argument jumps from "
+            "correlation, analogy, or restatement to a causal claim.",
+            "Check the mechanism for internal contradictions and for assumptions that are physically, "
+            "biologically, or computationally impossible.",
+            "Check whether the predicted outcome actually follows from the stated mechanism.",
+            "Score the internal coherence and scientific reasoning of the mechanism. Judge only the reasoning "
+            "in the supplied text; do not claim to have verified any statement against external literature, "
+            "and do not credit or penalize the hypothesis on sources that were not supplied.",
+        ),
+    ),
+    MetricSpec(
+        name="Novelty vs retrieved prior art",
+        suite=SUITE_HYPOTHESIS,
+        kind=KIND_GEVAL,
+        evaluation_params=(
+            SingleTurnParams.INPUT,
             SingleTurnParams.ACTUAL_OUTPUT,
             SingleTurnParams.RETRIEVAL_CONTEXT,
-        ],
-        "evaluation_steps": [
+        ),
+        evaluation_steps=(
+            "Summarize the approaches, mechanisms, and findings that the retrieval context actually describes.",
+            "State what the hypothesis proposes for the research goal.",
+            "Identify the specific respects in which the hypothesis differs from the retrieved work - a "
+            "different mechanism, combination, setting, or measurement - and the respects in which it "
+            "restates that work.",
+            "Score how meaningfully the hypothesis differs from the approaches present in the retrieval "
+            "context. Treat that context as the only record of prior art available: do not substitute your "
+            "own background knowledge for it, and do not assert novelty with respect to the wider literature.",
+        ),
+    ),
+    MetricSpec(
+        name="Answer relevancy",
+        suite=SUITE_RAG,
+        kind=KIND_ANSWER_RELEVANCY,
+        evaluation_params=(SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT),
+    ),
+    MetricSpec(
+        name="Faithfulness",
+        suite=SUITE_RAG,
+        kind=KIND_FAITHFULNESS,
+        evaluation_params=(
+            SingleTurnParams.INPUT,
+            SingleTurnParams.ACTUAL_OUTPUT,
+            SingleTurnParams.RETRIEVAL_CONTEXT,
+        ),
+    ),
+    # DeepEval 4.2.2 scores the retrieval context against the input alone here;
+    # ACTUAL_OUTPUT is deliberately absent because the metric never reads it.
+    MetricSpec(
+        name="Contextual relevancy",
+        suite=SUITE_RAG,
+        kind=KIND_CONTEXTUAL_RELEVANCY,
+        evaluation_params=(
+            SingleTurnParams.INPUT,
+            SingleTurnParams.RETRIEVAL_CONTEXT,
+        ),
+    ),
+    # Superseded by Faithfulness, which measures the same failure mode with
+    # DeepEval's purpose-built claim/truth decomposition. Kept out of every
+    # default suite so that the two are never double-counted.
+    MetricSpec(
+        name="Evidence support",
+        suite=SUITE_LEGACY,
+        kind=KIND_GEVAL,
+        evaluation_params=(
+            SingleTurnParams.ACTUAL_OUTPUT,
+            SingleTurnParams.RETRIEVAL_CONTEXT,
+        ),
+        evaluation_steps=(
             "Identify the hypothesis's factual and mechanistic claims.",
             "For each material claim, locate support or contradiction in the supplied evidence.",
             "Score the coverage and strength of support, penalizing unsupported extrapolation.",
-        ],
-        "requires_evidence": True,
-    },
+        ),
+    ),
 )
+
+
+def resolve_suite(suite: str) -> tuple[str, ...]:
+    """Expand a requested suite name into the concrete suites it selects."""
+    if suite not in METRIC_SUITES:
+        raise LLMEvaluationError(f"unknown metric suite {suite!r}; choose from {', '.join(METRIC_SUITES)}")
+    if suite == SUITE_ALL:
+        return (SUITE_HYPOTHESIS, SUITE_RAG)
+    return (suite,)
+
+
+def select_metric_specs(suite: str) -> tuple[MetricSpec, ...]:
+    """Return the metric definitions belonging to a requested suite."""
+    selected = resolve_suite(suite)
+    return tuple(spec for spec in METRIC_DEFINITIONS if spec.suite in selected)
 
 
 def hypothesis_as_text(hypothesis: Mapping[str, Any]) -> str:
@@ -75,13 +236,6 @@ def hypothesis_as_text(hypothesis: Mapping[str, Any]) -> str:
     return body.strip()
 
 
-def evidence_as_context(sources: Any) -> list[str]:
-    """Serialize evidence records without inventing content absent from the artifact."""
-    if not isinstance(sources, list) or not all(isinstance(item, Mapping) for item in sources):
-        raise LLMEvaluationError("evidence_sources must be a list of objects")
-    return [json.dumps(dict(source), ensure_ascii=False, sort_keys=True) for source in sources]
-
-
 def build_test_case(parsed_run: Mapping[str, Any]) -> LLMTestCase:
     """Map a deterministic parser result to a DeepEval single-turn test case."""
     goal = parsed_run.get("research_goal")
@@ -91,10 +245,11 @@ def build_test_case(parsed_run: Mapping[str, Any]) -> LLMTestCase:
     if not isinstance(hypothesis, Mapping):
         raise LLMEvaluationError("selected_hypothesis must be an object")
 
+    context = extract_retrieval_context(parsed_run.get("evidence_sources", []))
     return LLMTestCase(
         input=goal.strip(),
         actual_output=hypothesis_as_text(hypothesis),
-        retrieval_context=evidence_as_context(parsed_run.get("evidence_sources", [])),
+        retrieval_context=context.as_list(),
         metadata={
             "run_id": parsed_run.get("run_id"),
             "hypothesis_source_step": parsed_run.get("hypothesis_source_step"),
@@ -103,66 +258,106 @@ def build_test_case(parsed_run: Mapping[str, Any]) -> LLMTestCase:
     )
 
 
+def _validate_threshold(threshold: Any) -> float:
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        raise LLMEvaluationError("metric threshold must be numeric")
+    if not 0 <= float(threshold) <= 1:
+        raise LLMEvaluationError("metric threshold must be between 0 and 1")
+    return float(threshold)
+
+
+def _run_metric(
+    spec: MetricSpec,
+    test_case: LLMTestCase,
+    *,
+    threshold: float,
+    model: Any,
+    factory: Callable[..., Any],
+) -> dict[str, Any]:
+    """Construct, measure, and serialize a single metric."""
+    try:
+        metric = factory(**spec.build_kwargs(threshold=threshold, model=model))
+        metric.measure(test_case)
+        score = getattr(metric, "score", None)
+        passed = bool(metric.is_successful())
+    except Exception as exc:
+        raise LLMEvaluationError(f"DeepEval metric {spec.name!r} failed: {exc}") from exc
+
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise LLMEvaluationError(f"DeepEval metric {spec.name!r} returned no numeric score")
+
+    return {
+        "name": spec.name,
+        "status": "completed",
+        "score": float(score),
+        "threshold": threshold,
+        "passed": passed,
+        "reason": getattr(metric, "reason", None),
+    }
+
+
 def evaluate_parsed_run(
     parsed_run: Mapping[str, Any],
     *,
     threshold: float = 0.7,
     model: Any = None,
-    metric_factory: Callable[..., Any] = GEval,
+    suite: str = DEFAULT_METRIC_SUITE,
+    metric_factories: Mapping[str, Callable[..., Any]] | None = None,
 ) -> dict[str, Any]:
     """Measure the selected hypothesis and return a JSON-serializable report."""
-    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
-        raise LLMEvaluationError("metric threshold must be numeric")
-    if not 0 <= float(threshold) <= 1:
-        raise LLMEvaluationError("metric threshold must be between 0 and 1")
+    threshold = _validate_threshold(threshold)
+    specs = select_metric_specs(suite)
+    factories = {**DEFAULT_METRIC_FACTORIES, **(metric_factories or {})}
 
     test_case = build_test_case(parsed_run)
+    context: RetrievalContext = extract_retrieval_context(parsed_run.get("evidence_sources", []))
+
     results: list[dict[str, Any]] = []
-
-    for definition in METRIC_DEFINITIONS:
-        if definition.get("requires_evidence") and not test_case.retrieval_context:
-            results.append(
-                {
-                    "name": definition["name"],
-                    "status": "skipped",
-                    "reason": "the selected hypothesis has no persisted evidence sources",
-                }
-            )
+    for spec in specs:
+        if spec.requires_retrieval_context and not context.is_substantive:
+            results.append({"name": spec.name, "status": "skipped", "reason": context.reason})
             continue
-
-        kwargs = {
-            key: value
-            for key, value in definition.items()
-            if key in {"name", "criteria", "evaluation_params", "evaluation_steps"}
-        }
-        try:
-            metric = metric_factory(
-                **kwargs,
-                threshold=float(threshold),
-                model=model,
-                async_mode=False,
-            )
-            metric.measure(test_case)
-            score = getattr(metric, "score", None)
-            passed = bool(metric.is_successful())
-        except Exception as exc:
-            raise LLMEvaluationError(f"DeepEval metric {definition['name']!r} failed: {exc}") from exc
-
-        if isinstance(score, bool) or not isinstance(score, (int, float)):
-            raise LLMEvaluationError(f"DeepEval metric {definition['name']!r} returned no numeric score")
         results.append(
-            {
-                "name": definition["name"],
-                "status": "completed",
-                "score": float(score),
-                "threshold": float(threshold),
-                "passed": passed,
-                "reason": getattr(metric, "reason", None),
-            }
+            _run_metric(
+                spec,
+                test_case,
+                threshold=threshold,
+                model=model,
+                factory=factories[spec.kind],
+            )
         )
 
     completed = [result for result in results if result["status"] == "completed"]
-    return {
+    report: dict[str, Any] = {
+        "suite": suite,
+        "status": "completed" if completed else "no_metrics_completed",
         "passed": bool(completed) and all(result["passed"] for result in completed),
         "metrics": results,
+        "retrieval_context": context.summary(),
     }
+    if not completed:
+        report["reason"] = (
+            f"every metric in the {suite!r} suite was skipped for this artifact"
+            if results
+            else f"the {suite!r} suite selected no metrics"
+        )
+    return report
+
+
+__all__ = [
+    "DEFAULT_METRIC_FACTORIES",
+    "DEFAULT_METRIC_SUITE",
+    "METRIC_DEFINITIONS",
+    "METRIC_SUITES",
+    "SUITE_ALL",
+    "SUITE_HYPOTHESIS",
+    "SUITE_LEGACY",
+    "SUITE_RAG",
+    "LLMEvaluationError",
+    "MetricSpec",
+    "build_test_case",
+    "evaluate_parsed_run",
+    "hypothesis_as_text",
+    "resolve_suite",
+    "select_metric_specs",
+]
