@@ -1,9 +1,11 @@
+import uuid
 from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictInt
 
 # Import config to access defaults easily
 from .config import config
+from .research_modes import normalize_research_type, research_type_requires_hypotheses
 
 # Assuming logger is configured elsewhere or passed in if needed within methods
 # If models need logging, consider passing a logger instance during initialization
@@ -108,6 +110,8 @@ class ResearchGoal:
         reflection_temperature: Optional[float] = None,
         elo_k_factor: Optional[int] = None,
         top_k_hypotheses: Optional[int] = None,
+        research_type: Optional[str] = None,
+        research_id: Optional[str] = None,
     ):
         self.description = description
         self.preferences = preferences
@@ -133,6 +137,12 @@ class ResearchGoal:
         )
         self.elo_k_factor = elo_k_factor if elo_k_factor is not None else config.get("elo_k_factor", 32)
         self.top_k_hypotheses = top_k_hypotheses if top_k_hypotheses is not None else config.get("top_k_hypotheses", 2)
+        requested_research_type = str(research_type or "auto").strip().casefold().replace("-", "_").replace(" ", "_")
+        self.research_type = requested_research_type if requested_research_type != "" else "auto"
+        self.resolved_research_type: Optional[str] = (
+            normalize_research_type(self.research_type) if self.research_type != "auto" else None
+        )
+        self.research_id = str(research_id or f"research-{uuid.uuid4().hex}")
 
 
 class ContextMemory:
@@ -140,7 +150,24 @@ class ContextMemory:
     A simple in-memory context storage.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        research_id: str = "",
+        research_type: str = "hypothesis_testing",
+    ):
+        self.research_id: str = research_id
+        self.research_type: str = normalize_research_type(research_type)
+        self.research_plan: Dict = {}
+        self.sub_questions: List[str] = []
+        self.evidence_requirements: List[Dict] = []
+        self.evidence_relationships: List[Dict] = []
+        self.last_literature_synthesis: Dict = {}
+        self.resume_state: Dict = {
+            "status": "new",
+            "requires_evidence_refresh": False,
+            "suspended_pending_tasks": [],
+        }
         self.hypotheses: Dict[str, Hypothesis] = {}  # key: hypothesis_id
         self.tournament_results: List[Dict] = []
         self.meta_review_feedback: List[Dict] = []
@@ -174,6 +201,18 @@ class ContextMemory:
     def get_active_hypotheses(self) -> List[Hypothesis]:
         return [h for h in self.hypotheses.values() if h.is_active]
 
+    def uses_hypothesis_pipeline(self) -> bool:
+        """Return whether hypothesis-only downstream agents should run."""
+
+        configured = self.research_plan.get("hypothesis_pipeline_enabled")
+        if isinstance(configured, bool):
+            return configured
+        # Historical contexts do not have a retained research plan. Preserve
+        # their behavior when they already contain candidate hypotheses.
+        if self.hypotheses:
+            return True
+        return research_type_requires_hypotheses(self.research_type)
+
 
 ###############################################################################
 # Pydantic Schemas for API
@@ -195,6 +234,8 @@ class ResearchGoalRequest(BaseModel):
     reflection_temperature: Optional[float] = None
     elo_k_factor: Optional[int] = None
     top_k_hypotheses: Optional[int] = None
+    research_type: Optional[str] = "auto"
+    research_id: Optional[str] = None
 
 
 class HypothesisResponse(BaseModel):
@@ -278,6 +319,7 @@ class ReflectionReport(BaseModel):
     recommendation: str = "UNREVIEWED"
 
     claims: List[ClaimAssessment] = []
+    proposed_tests: List[str] = Field(default_factory=list)
     overall_confidence: float = Field(default=1.0, ge=1.0, le=10.0)
 
 

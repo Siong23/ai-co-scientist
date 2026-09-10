@@ -52,6 +52,9 @@ class ElsevierSearchTool:
             )
             self.last_error_status = response.status_code
             response.raise_for_status()
+            # Clear on success so _provider_status() does not treat HTTP 200
+            # as a provider error (error_status must be None for "ok").
+            self.last_error_status = None
             entries = response.json().get("search-results", {}).get("entry", [])
             papers = [self._format_paper(entry) for entry in entries if entry.get("dc:title")]
             usable_papers = [paper for paper in papers if paper.get("abstract")]

@@ -1,3 +1,6 @@
+import json
+
+import pytest
 from langchain_core.documents import Document
 
 from app.agents_modules.reflection_helpers import (
@@ -10,6 +13,75 @@ from app.agents_modules.reflection_helpers import (
     recommendation_after_claim_assessment,
 )
 from app.models import ClaimAssessment, Hypothesis, ReflectionReport
+
+
+@pytest.mark.parametrize(
+    "premises,feasibility,expected",
+    [
+        (["Hierarchical RL manages slice bandwidth allocation."], 8, "ACCEPT"),
+        (["Quantum processors eliminate packet loss."], 8, "REVISE"),
+        ([], 8, "REVISE"),
+        (["Hierarchical RL manages slice bandwidth allocation."], 2, "REJECT"),
+    ],
+)
+def test_reflection_separates_predictions_from_grounded_premises(monkeypatch, premises, feasibility, expected):
+    from app.agents_modules.reflection import ReflectionAgent
+    from app.agents_modules.supervisor_planner import evaluate_finalization_readiness
+    from app.models import ContextMemory, ResearchGoal
+
+    prediction = "We predict semantic preprocessing will accelerate convergence during traffic spikes."
+    passage = "Hierarchical RL manages slice bandwidth allocation."
+    hypothesis = Hypothesis("G1", "5G control", f"Hypothesis: {prediction}\n\nRationale: {passage}")
+    hypothesis.evidence_source_ids = ["paper-1"]
+    hypothesis.evidence_sources = [
+        {
+            "source_id": "paper-1",
+            "title": "Network review",
+            "abstract": "A broad survey of telecommunications.",
+            "evidence_refs": [{"source_id": "paper-1", "text": passage, "page": 13}],
+        }
+    ]
+
+    def fake_llm(prompt, **kwargs):
+        assert passage in prompt
+        assert "factual premises" in prompt
+        return json.dumps(
+            {
+                **dict.fromkeys(
+                    [
+                        "alignment_score",
+                        "novelty_score",
+                        "plausibility_score",
+                        "testability_score",
+                        "evidence_quality_score",
+                        "expected_research_value_score",
+                    ],
+                    8,
+                ),
+                "feasibility_score": feasibility,
+                "sub_claims": premises,
+                "proposed_tests": [prediction],
+                "comment": "Test the proposed improvement experimentally.",
+                "references": ["paper-1"],
+            }
+        )
+
+    monkeypatch.setattr("app.agents.call_llm", fake_llm)
+    monkeypatch.setattr("app.agents_modules.reflection_helpers.ResearchRetriever.retrieve", lambda *a, **k: [])
+    context = ContextMemory()
+    context.hypotheses[hypothesis.hypothesis_id] = hypothesis
+    goal = ResearchGoal("Allocate 5G bandwidth", "", "")
+    ReflectionAgent(max_workers=1).review_hypotheses([hypothesis], context, goal)
+    report = hypothesis.reflection_report
+    assert report.recommendation == expected
+    assert [claim.claim for claim in report.claims] == premises
+    assert report.proposed_tests == [prediction]
+    assert ReflectionReport.model_validate(report.model_dump()).proposed_tests == [prediction]
+    if expected == "ACCEPT":
+        gate = evaluate_finalization_readiness(context, goal)
+        assert gate["accepted_count"] == 1
+        assert gate["low_confidence_finalist_ids"] == []
+        assert gate["unsupported_claim_finalist_ids"] == []
 
 
 class FakeRetriever:

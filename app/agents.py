@@ -16,6 +16,7 @@ from .agents_modules.evolution_helpers import (
 )
 from .agents_modules.generation import GenerationAgent
 from .agents_modules.generation_helpers import (
+    AbstractScreeningResult,
     EvidenceCoverage,
     FocusArea,
     LiteratureFinding,
@@ -25,6 +26,7 @@ from .agents_modules.generation_helpers import (
     _resolve_retrieved_source_id,  # noqa: F401
     _resolve_retrieved_source_ids,  # noqa: F401
     build_evidence_queries,
+    call_llm_for_abstract_screening,
     call_llm_for_debate_refinement,
     call_llm_for_evidence_coverage,
     call_llm_for_focus_area_identification,
@@ -87,6 +89,7 @@ from .utils import (
 
 __all__ = [
     "ArxivRAGRetriever",
+    "AbstractScreeningResult",
     "ContextMemory",
     "EvidenceAspect",
     "EvidenceChunk",
@@ -117,6 +120,7 @@ __all__ = [
     "assess_supervisor_state",
     "build_supervisor_planning_prompt",
     "call_llm",
+    "call_llm_for_abstract_screening",
     "call_llm_for_debate_refinement",
     "call_llm_for_evidence_coverage",
     "call_llm_for_focus_area_identification",

@@ -339,6 +339,61 @@ def test_download_allows_configured_springer_pdf_host(tmp_path):
     library._validate_pdf_url("https://link.springer.com/content/pdf/10.1007/test.pdf")
 
 
+@pytest.mark.parametrize("download_succeeds", [True, False])
+def test_springer_metadata_without_pdf_reaches_acquisition_and_strict_gate(tmp_path, monkeypatch, download_succeeds):
+    from app.agents import AbstractScreeningResult
+    from app.agents_modules.generation import GenerationAgent
+    from app.tools.springer_search import SpringerSearchTool
+
+    paper = SpringerSearchTool._format_paper(
+        {
+            "doi": "10.1007/s10922-026-10060-7",
+            "title": "5G bandwidth control",
+            "abstract": "Latency control in network slices.",
+            "url": [{"format": "html", "value": "https://doi.org/10.1007/s10922-026-10060-7"}],
+        }
+    )
+    document = Document(page_content=paper["abstract"], metadata={**paper, "source_id": paper["arxiv_id"]})
+    library = _library(tmp_path)
+    attempts = []
+
+    def download(url, destination):
+        library._validate_pdf_url(url)
+        attempts.append(url)
+        if not download_succeeds:
+            raise RuntimeError("Publisher download unavailable")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"%PDF-test")
+
+    monkeypatch.setattr(library, "_download_pdf", download)
+    monkeypatch.setattr(library, "_extract_pages", lambda _: [(1, "Latency control evidence. " * 30)])
+    monkeypatch.setattr(
+        "app.agents_modules.generation.call_llm_for_abstract_screening",
+        lambda *_args, **_kwargs: (
+            (
+                AbstractScreeningResult(
+                    source_id=paper["arxiv_id"],
+                    decision="ACCEPT",
+                    relevance_score=9.0,
+                    reason="Directly relevant to 5G latency control.",
+                    full_text_needed=True,
+                    full_text_questions=("What latency results were measured?",),
+                ),
+            ),
+            None,
+        ),
+    )
+    agent = GenerationAgent(paper_library=library)
+
+    retained = agent._prepare_candidate_documents([document], ResearchGoal("5G latency control"))
+
+    assert attempts == ["https://link.springer.com/content/pdf/10.1007/s10922-026-10060-7.pdf"]
+    assert bool(retained) is download_succeeds
+    if retained:
+        assert retained[0].metadata["full_text_indexed"] is True
+        assert retained[0].metadata["full_text_chunks_used"] > 0
+
+
 def test_download_allows_configured_web_search_pdf_host(tmp_path):
     library = _library(tmp_path)
 

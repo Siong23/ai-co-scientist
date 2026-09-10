@@ -24,6 +24,13 @@ from .evidence import (
     coerce_evidence,
     evidence_from_result,
 )
+from .research_modes import (
+    ResearchType,
+    normalize_research_type,
+    research_type_allows_hypotheses,
+    research_type_requires_hypotheses,
+)
+from .search_backoff import guarded_search
 from .tools.arxiv_search import ArxivSearchTool
 from .tools.elsevier_search import ElsevierSearchTool
 from .tools.pdf_urls import find_pdf_url
@@ -62,6 +69,88 @@ class ProvisionalHypothesis:
     role: HypothesisRole
     statement: str
     goal_quote: str
+
+
+@dataclass(frozen=True)
+class ResearchPlan:
+    """Mode-aware output from the research-planning stage."""
+
+    research_goal: str
+    research_type: ResearchType
+    key_entities: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    sub_questions: tuple[str, ...] = ()
+    evidence_requirements: tuple[str, ...] = ()
+    freshness_requirement: str = ""
+    ambiguities: tuple[str, ...] = ()
+    search_strategy: str = ""
+    provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
+    competing_candidates: tuple[str, ...] = ()
+    competing_explanations: tuple[str, ...] = ()
+    comparison_dimensions: tuple[str, ...] = ()
+    research_questions: tuple[str, ...] = ()
+    topic_dimensions: tuple[str, ...] = ()
+    themes: tuple[str, ...] = ()
+    controversies: tuple[str, ...] = ()
+    evidence_dimensions: tuple[str, ...] = ()
+    areas_of_agreement: tuple[str, ...] = ()
+    areas_of_disagreement: tuple[str, ...] = ()
+    literature_gaps: tuple[str, ...] = ()
+    claims: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
+    counterclaims: tuple[str, ...] = ()
+    primary_source_checks: tuple[str, ...] = ()
+    missing_evidence: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "research_type", normalize_research_type(self.research_type))
+
+    @property
+    def hypothesis_pipeline_enabled(self) -> bool:
+        if research_type_requires_hypotheses(self.research_type):
+            return True
+        return research_type_allows_hypotheses(self.research_type) and bool(self.provisional_hypotheses)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe plan without losing mode-specific structure."""
+
+        return {
+            "research_goal": self.research_goal,
+            "research_type": self.research_type,
+            "key_entities": list(self.key_entities),
+            "constraints": list(self.constraints),
+            "sub_questions": list(self.sub_questions),
+            "evidence_requirements": list(self.evidence_requirements),
+            "freshness_requirement": self.freshness_requirement,
+            "ambiguities": list(self.ambiguities),
+            "search_strategy": self.search_strategy,
+            "provisional_hypotheses": [
+                {
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "role": hypothesis.role,
+                    "statement": hypothesis.statement,
+                    "goal_quote": hypothesis.goal_quote,
+                }
+                for hypothesis in self.provisional_hypotheses
+            ],
+            "competing_candidates": list(self.competing_candidates),
+            "competing_explanations": list(self.competing_explanations),
+            "comparison_dimensions": list(self.comparison_dimensions),
+            "research_questions": list(self.research_questions),
+            "topic_dimensions": list(self.topic_dimensions),
+            "themes": list(self.themes),
+            "controversies": list(self.controversies),
+            "evidence_dimensions": list(self.evidence_dimensions),
+            "areas_of_agreement": list(self.areas_of_agreement),
+            "areas_of_disagreement": list(self.areas_of_disagreement),
+            "literature_gaps": list(self.literature_gaps),
+            "claims": list(self.claims),
+            "risks": list(self.risks),
+            "counterclaims": list(self.counterclaims),
+            "primary_source_checks": list(self.primary_source_checks),
+            "missing_evidence": list(self.missing_evidence),
+            "hypothesis_pipeline_enabled": self.hypothesis_pipeline_enabled,
+        }
 
 
 SearchRoute = Literal["academic", "web", "official", "news", "all"]
@@ -123,6 +212,8 @@ class SearchQueryPlan:
     explicit_requirements: tuple[EvidenceAspect, ...] = ()
     exploration_directions: tuple[str, ...] = ()
     provisional_hypotheses: tuple[ProvisionalHypothesis, ...] = ()
+    research_type: ResearchType | str = "hypothesis_testing"
+    research_plan: ResearchPlan | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -134,6 +225,22 @@ class SearchQueryPlan:
                 if isinstance(query, SearchQuery) or str(query).strip()
             ),
         )
+        normalized_type = normalize_research_type(
+            self.research_plan.research_type if self.research_plan is not None else self.research_type
+        )
+        object.__setattr__(self, "research_type", normalized_type)
+        if self.research_plan is not None and not self.provisional_hypotheses:
+            object.__setattr__(
+                self,
+                "provisional_hypotheses",
+                self.research_plan.provisional_hypotheses,
+            )
+
+    @property
+    def hypothesis_pipeline_enabled(self) -> bool:
+        if self.research_plan is not None:
+            return self.research_plan.hypothesis_pipeline_enabled
+        return research_type_requires_hypotheses(self.research_type)
 
     @property
     def query_texts(self) -> tuple[str, ...]:
@@ -229,6 +336,25 @@ def _canonical_arxiv_id(arxiv_id: str) -> str:
     return re.sub(r"v\d+$", "", arxiv_id.strip(), flags=re.IGNORECASE)
 
 
+def _source_version_order(evidence: EvidenceSource) -> tuple[int, str]:
+    """Sort observable source revisions without conflating them with relevance."""
+
+    arxiv_id = str(evidence.metadata.get("arxiv_id") or evidence.source_id)
+    match = re.search(r"v(\d+)$", arxiv_id, re.IGNORECASE)
+    version = int(match.group(1)) if match else -1
+    return version, str(evidence.updated_at or evidence.metadata.get("updated") or "")
+
+
+def _observed_source_version(evidence: EvidenceSource) -> dict[str, str]:
+    arxiv_id = str(evidence.metadata.get("arxiv_id") or "")
+    match = re.search(r"v(\d+)$", arxiv_id or evidence.source_id, re.IGNORECASE)
+    return {
+        "source_id": evidence.source_id,
+        "paper_version": f"v{match.group(1)}" if match else "",
+        "updated_at": str(evidence.updated_at or evidence.metadata.get("updated") or ""),
+    }
+
+
 def reciprocal_rank_fusion(
     ranked_results: Sequence[Sequence[EvidenceSource | dict[str, Any]]],
     k: int = 60,
@@ -268,9 +394,23 @@ def reciprocal_rank_fusion(
                     if context_key not in seen_contexts:
                         seen_contexts.add(context_key)
                         merged_contexts.append(context)
-                preferred = evidence if (evidence.search_score or 0) > (existing.search_score or 0) else existing
+                existing_order = _source_version_order(existing)
+                incoming_order = _source_version_order(evidence)
+                if incoming_order != existing_order:
+                    preferred = evidence if incoming_order > existing_order else existing
+                else:
+                    preferred = evidence if (evidence.search_score or 0) > (existing.search_score or 0) else existing
                 merged_metadata = dict(preferred.metadata)
                 merged_metadata["query_contexts"] = tuple(merged_contexts)
+                observed_versions = []
+                for candidate in (
+                    *(existing.metadata.get("observed_source_versions") or ()),
+                    _observed_source_version(existing),
+                    _observed_source_version(evidence),
+                ):
+                    if isinstance(candidate, dict) and candidate not in observed_versions:
+                        observed_versions.append(candidate)
+                merged_metadata["observed_source_versions"] = tuple(observed_versions)
                 evidence_by_key[canonical_key] = replace(
                     preferred,
                     metadata=merged_metadata,
@@ -282,7 +422,7 @@ def reciprocal_rank_fusion(
         key=lambda key: scores[key],
         reverse=True,
     )
-    return [evidence_by_key[key].with_rrf_score(scores[key]) for key in ranked_keys]
+    return [evidence_by_key[key].with_provider_rrf_score(scores[key]) for key in ranked_keys]
 
 
 class ResearchRetriever:
@@ -765,18 +905,27 @@ class ResearchRetriever:
         started_at = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
             futures = [
-                (source_name, task_queries, source, executor.submit(search))
+                (
+                    source_name,
+                    task_queries,
+                    source,
+                    executor.submit(guarded_search, source, search, provider_name=source_name),
+                )
                 for source_name, task_queries, source, search in tasks
             ]
             ranked_results: list[list[EvidenceSource]] = []
             for source_name, task_queries, source, future in futures:
                 query_total = len(task_queries)
                 try:
-                    source_results = future.result()
+                    source_results, cooling_down = future.result()
                     ranked_results.extend(source_results)
                     completed = len(source_results)
                     result_count = sum(len(results) for results in source_results)
-                    status = self._provider_status(source, completed, query_total, result_count)
+                    status = (
+                        "cooldown"
+                        if cooling_down
+                        else self._provider_status(source, completed, query_total, result_count)
+                    )
                     error_status = getattr(source, "last_error_status", None)
                     if not isinstance(error_status, int):
                         error_status = None
@@ -1602,7 +1751,9 @@ class ResearchRetriever:
                 "doi": evidence.doi,
                 "venue": evidence.venue,
                 "pdf_url": pdf_url,
+                "provider_rrf_score": evidence.provider_rrf_score,
                 "rrf_score": evidence.rrf_score,
+                "observed_source_versions": list(evidence.metadata.get("observed_source_versions", ())),
                 # Compatibility fields for the current UI and saved runs.
                 "arxiv_id": evidence.metadata.get("arxiv_id") if evidence.source_family == "academic" else None,
                 "abstract": summary,
@@ -1649,12 +1800,23 @@ def format_documents_for_prompt(
                     text = document.metadata.get("abstract", "")
                 if not isinstance(text, str) or not text.strip():
                     continue
+                raw_section_path = evidence_ref.get("section_path")
+                if isinstance(raw_section_path, (list, tuple)):
+                    section_path = " > ".join(str(item) for item in raw_section_path if str(item))
+                else:
+                    section_path = str(raw_section_path or "")
                 attributes = {
                     "chunk_id": evidence_ref.get("chunk_id", ""),
                     "source_id": evidence_ref.get("source_id", source_id),
                     "section": evidence_ref.get("section", "Unknown"),
-                    "page": evidence_ref.get("page", ""),
+                    "subsection": evidence_ref.get("subsection", ""),
+                    "section_path": section_path,
+                    "page_start": evidence_ref.get("page_start", evidence_ref.get("page", "")),
+                    "page_end": evidence_ref.get("page_end", evidence_ref.get("page", "")),
+                    "element_type": evidence_ref.get("element_type", ""),
                     "evidence_type": evidence_type,
+                    "selected_anchor_chunk_id": evidence_ref.get("selected_anchor_chunk_id", ""),
+                    "context_relation": evidence_ref.get("context_relation", ""),
                 }
                 serialized_attributes = " ".join(
                     f'{key}="{value}"' for key, value in attributes.items() if value not in (None, "")
@@ -1833,7 +1995,25 @@ def serialize_documents(
             "arxiv_url": document.metadata.get("arxiv_url"),
             "pdf_url": document.metadata.get("pdf_url"),
             "source": document.metadata.get("source"),
+            "provider_rrf_score": document.metadata.get("provider_rrf_score"),
             "rrf_score": document.metadata.get("rrf_score"),
+            "abstract_screening": document.metadata.get("abstract_screening"),
+            "abstract_screen_decision": document.metadata.get("abstract_screen_decision"),
+            "abstract_relevance_score": document.metadata.get("abstract_relevance_score"),
+            "abstract_screen_reason": document.metadata.get("abstract_screen_reason"),
+            "abstract_evidence_requirement_ids": document.metadata.get(
+                "abstract_evidence_requirement_ids",
+                [],
+            ),
+            "abstract_provisional_hypothesis_ids": document.metadata.get(
+                "abstract_provisional_hypothesis_ids",
+                [],
+            ),
+            "abstract_screen_promoted": document.metadata.get("abstract_screen_promoted"),
+            "abstract_acquisition_reason": document.metadata.get("abstract_acquisition_reason"),
+            "full_text_needed": document.metadata.get("full_text_needed"),
+            "full_text_questions": document.metadata.get("full_text_questions", []),
+            "full_text_cache_hit": document.metadata.get("full_text_cache_hit", False),
             "full_text_indexed": document.metadata.get("full_text_indexed", False),
             "full_text_chunks_used": document.metadata.get("full_text_chunks_used", 0),
             "index_status": document.metadata.get("index_status"),
@@ -1841,6 +2021,8 @@ def serialize_documents(
             "acquisition_attempted": document.metadata.get("acquisition_attempted", False),
             "acquisition_result": document.metadata.get("acquisition_result"),
             "selected_chunk_ids": document.metadata.get("selected_chunk_ids", []),
+            "expanded_chunk_ids": document.metadata.get("expanded_chunk_ids", []),
+            "context_chunk_ids": document.metadata.get("context_chunk_ids", []),
             "strict_gate_retained": document.metadata.get("strict_gate_retained"),
             "strict_gate_rejection_reason": document.metadata.get("strict_gate_rejection_reason"),
             "evidence_status": document.metadata.get("evidence_status", "abstract_only"),

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -36,6 +38,8 @@ class SpringerSearchTool:
         ).strip()
         self.meta_key = (os.environ.get("SPRINGER_META_API_KEY", "") or os.environ.get("SPRINGER_API_KEY", "")).strip()
         self.api_key = self.openaccess_key or self.meta_key
+        self.last_error_status: int | None = None
+        self.last_error_kind: str = ""
 
     @property
     def is_configured(self) -> bool:
@@ -51,15 +55,18 @@ class SpringerSearchTool:
         """Return Springer papers matching ``query``, or an empty list on failure."""
 
         query = query.strip()
+        self.last_error_status = None
+        self.last_error_kind = ""
         if not query or not self.is_configured:
             return []
 
         limit = max_results if max_results is not None else self.max_results
 
         # Try Open Access endpoint first, fall back to Meta endpoint
+        active_key = self.openaccess_key or self.meta_key or self.api_key
         endpoints = [
-            (self.openaccess_url, self.openaccess_key or self.meta_key),
-            (self.meta_url, self.meta_key or self.openaccess_key),
+            (self.openaccess_url, active_key),
+            (self.meta_url, active_key),
         ]
         for url, key in endpoints:
             if not url or not key:
@@ -76,6 +83,8 @@ class SpringerSearchTool:
                 papers = [self._format_paper(record) for record in records if record.get("title")]
                 usable_papers = [paper for paper in papers if paper.get("abstract")]
                 if usable_papers:
+                    self.last_error_status = None
+                    self.last_error_kind = ""
                     logger.info(
                         "Springer Nature returned %d usable paper(s) for query %r.",
                         len(usable_papers),
@@ -83,6 +92,20 @@ class SpringerSearchTool:
                     )
                     return usable_papers
             except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status:
+                    self.last_error_status = status
+                    self.last_error_kind = (
+                        "quota_or_plan_rejection"
+                        if status in (401, 402, 403, 432, 433)
+                        else "rate_limited"
+                        if status in (429, 503)
+                        else "provider_error"
+                    )
+                elif isinstance(exc, requests.Timeout):
+                    self.last_error_kind = "timeout"
+                else:
+                    self.last_error_kind = "provider_error"
                 logger.error(
                     "Springer Nature search failed for endpoint %r query %r: %s",
                     url,
@@ -129,6 +152,15 @@ class SpringerSearchTool:
         entry_url = web_url or (
             f"https://doi.org/{doi}" if doi else f"https://api.springernature.com/meta/v2/json?q=doi:{doi}"
         )
+        # Metadata responses can omit PDF links even for accessible articles.
+        # Supply a publisher endpoint for acquisition, not proof of full text:
+        # the library must still download, validate, and commit the PDF.
+        if not pdf_url and re.fullmatch(r"10\.(?:1007|1038)/\S+", doi):
+            encoded_doi = quote(doi, safe="/")
+            if doi.startswith("10.1038/"):
+                pdf_url = f"https://www.nature.com/articles/{encoded_doi.split('/', 1)[1]}.pdf"
+            else:
+                pdf_url = f"https://link.springer.com/content/pdf/{encoded_doi}.pdf"
 
         return {
             "arxiv_id": source_id,

@@ -36,6 +36,7 @@ def _build_reflection_report(result: Dict) -> Optional[ReflectionReport]:
         weaknesses=result.get("weaknesses", []),
         recommendation=result.get("recommendation", "UNREVIEWED"),
         claims=result.get("claims", []),
+        proposed_tests=result.get("proposed_tests", []),
         overall_confidence=result.get("overall_confidence", 1.0),
         review_comments=[result["comment"]] if result.get("comment") else [],
     )
@@ -88,6 +89,7 @@ class ReflectionAgent:
                         plausibility_score=result["plausibility_score"],
                         model=research_goal.llm_model,
                         claims=result.get("sub_claims"),
+                        proposed_tests=result.get("proposed_tests"),
                     )
                 )
                 result["recommendation"] = recommendation_after_claim_assessment(result)

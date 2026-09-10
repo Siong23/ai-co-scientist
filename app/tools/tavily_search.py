@@ -111,6 +111,8 @@ class TavilySearchTool:
             self.last_error_kind = (
                 "timeout"
                 if isinstance(exc, requests.Timeout)
+                else "quota_or_plan_rejection"
+                if self.last_error_status in (401, 402, 403, 432, 433)
                 else "rate_limited"
                 if self.last_error_status in (429, 503)
                 else "provider_error"
@@ -169,6 +171,8 @@ class TavilySearchTool:
             self.last_error_kind = (
                 "timeout"
                 if isinstance(exc, requests.Timeout)
+                else "quota_or_plan_rejection"
+                if self.last_error_status in (401, 402, 403, 432, 433)
                 else "rate_limited"
                 if self.last_error_status in (429, 503)
                 else "provider_error"
