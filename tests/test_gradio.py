@@ -775,6 +775,12 @@ def test_execute_cycle_uses_configured_supervisor_entrypoint(gradio_app_module, 
 def test_execute_cycle_surfaces_recovery_warnings(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
 
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+
     monkeypatch.chdir(tmp_path)
     supervisor = Mock()
     supervisor.run.return_value = {
