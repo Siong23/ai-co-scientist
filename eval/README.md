@@ -23,6 +23,33 @@ The evaluator always performs deterministic parsing first:
 DeepEval metrics are opt-in (`--llm-metrics`), so ordinary parsing and the
 pytest suite remain offline.
 
+## Who does what
+
+An LLM-backed run is executed by DeepEval's own runner, not by this project:
+
+```text
+this harness                         DeepEval
+─────────────────────────────────    ─────────────────────────────────
+parse the run, validate the goal
+select the metric suite
+skip what the artifact cannot
+  ground
+build the metrics and the one
+  LLMTestCase
+                                 ->  measure every metric it is given
+                                 ->  print the native result table
+                                 <-  return an EvaluationResult
+map the results back into the
+  audit JSON, and file it
+```
+
+The whole suite goes through one `deepeval.evaluate()` call, configured with
+`AsyncConfig(run_async=False)` so a local judge is never asked several questions
+at once, and `DisplayConfig(print_results=True)`, which is what puts the result
+table on the terminal. There is no hand-built score table here: what you see is
+DeepEval's own, and the AI Co-Scientist audit JSON goes to a file rather than
+being dumped underneath it.
+
 ## Setup and use
 
 ```shell
@@ -33,6 +60,59 @@ uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json
 
 DeepEval is pinned to `4.2.2` in `eval/pyproject.toml` and belongs only to this
 project. It is never added to the parent application's `requirements.txt`.
+
+The recommended workflow configures the judge once, in `eval/.env`:
+
+```powershell
+cd eval
+Copy-Item .env.example .env   # then edit it
+```
+
+```ini
+LOCAL_MODEL_API_KEY=lm-studio
+LOCAL_MODEL_NAME=unsloth/qwen3.8-27b
+LOCAL_MODEL_BASE_URL=http://100.117.90.5:1234/v1/
+```
+
+Every later run is then just the run and the goal:
+
+```powershell
+uv run python scripts/evaluate_run.py `
+  ../results/runs/run-20260911-073448-611c235c.json `
+  --goal-file goals/goal_005_5G-NIDD.txt `
+  --llm-metrics `
+  --metric-suite hypothesis
+```
+
+That run uses the default threshold of `0.7`, shows DeepEval's native result
+table, and writes the full audit report to
+`reports/hyp-run-20260911-073448-611c235c.json` by itself. `--report` is only
+needed to send it somewhere else.
+
+### The env file
+
+`scripts/evaluate_run.py` reads `eval/.env` at start-up, wherever it is invoked
+from, and merges `KEY=value` lines into the process environment. Precedence runs
+lowest to highest:
+
+```text
+eval/.env  ->  the shell environment  ->  --judge-model / --judge-base-url
+```
+
+A variable already in the environment is never overwritten, so one-off runs
+still work with `$env:LOCAL_MODEL_NAME = "..."` or the CLI flags, and CI keeps
+setting its own values. Everything after the first `=` is the value, so an
+inline `#` is part of it rather than a comment.
+
+`.env` is git-ignored and `.env.example` is the committed template — keep real
+credentials out of the template. `LOCAL_MODEL_API_KEY` is a non-secret
+placeholder whenever the LM Studio server has authentication disabled, which is
+the usual case here; DeepEval's OpenAI-compatible adapter simply refuses to run
+without some value.
+
+The env file is also the natural home for a reasoning judge's timeout
+overrides, which would otherwise have to be exported before every run — see
+[Judge timeouts](#judge-timeouts).
 
 ## Metric suites
 
@@ -204,7 +284,7 @@ Identifying metadata never counts as evidence on its own — `title`, `doi`,
 ```
 
 cannot support or contradict a claim, so any metric needing
-`retrieval_context` is reported as
+`retrieval_context` is left out of the `deepeval.evaluate()` call and reported as
 
 ```json
 {
@@ -267,6 +347,8 @@ judge is configured explicitly and passed to every LLM-backed metric, with
 
 ```shell
 export LOCAL_MODEL_API_KEY=lm-studio
+export LOCAL_MODEL_NAME=<loaded-model-id>
+export LOCAL_MODEL_BASE_URL=http://127.0.0.1:1234/v1/
 ```
 
 Hypothesis suite:
@@ -276,10 +358,7 @@ uv run python scripts/evaluate_run.py \
   ../results/runs/<run-id>.json \
   --goal-file goals/<goal>.txt \
   --llm-metrics \
-  --metric-suite hypothesis \
-  --judge-model <loaded-model-id> \
-  --judge-base-url http://127.0.0.1:1234/v1/ \
-  --threshold 0.7
+  --metric-suite hypothesis
 ```
 
 RAG suite:
@@ -289,13 +368,11 @@ uv run python scripts/evaluate_run.py \
   ../results/runs/<run-id>.json \
   --goal-file goals/<goal>.txt \
   --llm-metrics \
-  --metric-suite rag \
-  --judge-model <loaded-model-id> \
-  --judge-base-url http://127.0.0.1:1234/v1/ \
-  --threshold 0.7
+  --metric-suite rag
 ```
 
-All currently supported metrics, written to a report file:
+`--judge-model` and `--judge-base-url` override the environment for a single
+run, and take precedence over `LOCAL_MODEL_NAME` and `LOCAL_MODEL_BASE_URL`:
 
 ```shell
 uv run python scripts/evaluate_run.py \
@@ -309,13 +386,53 @@ uv run python scripts/evaluate_run.py \
   --report reports/<run-id>.json
 ```
 
+### Where the results go
+
+An `--llm-metrics` run produces two things, and they do not overlap:
+
+- **the terminal** carries DeepEval's native result display — metric names,
+  scores, thresholds, pass/fail, and its own aggregate table. Nothing is printed
+  over it;
+- **`reports/<prefix>-<run-id>.json`** holds the complete AI Co-Scientist audit
+  report, including every metric's `reason`, which is the part worth reading.
+
+The report path is derived from the suite whenever `--report` is omitted:
+`hypothesis` writes `reports/hyp-<run-id>.json`, and `rag`, `legacy`, and `all`
+write the `rag-`, `legacy-`, and `all-` prefixes. A run artifact with no usable
+`run_id` falls back to the run file's own name. `reports/` is created when it
+does not exist, and an explicit `--report` always wins.
+
+A metric the artifact cannot ground is never handed to DeepEval, so it does not
+appear in DeepEval's table at all. It is still in the JSON report, in its usual
+position and marked `"status": "skipped"`, and the command names it under the
+report path:
+
+```text
+AI Co-Scientist report written to:
+reports/rag-run-20260911-073448-611c235c.json
+Skipped metrics:
+- Faithfulness: the persisted evidence sources carry only citation metadata (no source passage of at least 200 characters)
+```
+
+DeepEval can save its own timestamped test-run JSON as well, but that stays off
+by default so that one run produces one report. Ask for it with
+`--deepeval-results-folder PATH` when you want DeepEval's raw record too.
+
+DeepEval's score cache is switched off, so re-running a suite always re-judges
+rather than replaying an earlier verdict. That is deliberate for an audit, and
+it also avoids a Windows failure: reading the cache back takes a shared file
+lock that needs pywin32, and without it every run after the first died at the
+very end, once the judge had already done all the work.
+
+Without `--llm-metrics` nothing is measured and no report path is derived, so
+that mode still prints the parsed run as JSON on stdout.
+
 On PowerShell, use `$env:LOCAL_MODEL_API_KEY = "lm-studio"` and replace the
 trailing backslashes with backticks. DeepEval's OpenAI-compatible adapter
 requires an API-key value even when LM Studio authentication is disabled; in
-that case the value is only a non-secret placeholder. The model and base URL can
-instead be supplied through `LOCAL_MODEL_NAME` and `LOCAL_MODEL_BASE_URL`. Real
-credentials are never accepted as a CLI argument, printed, or written to the
-report — error text passes through environment-secret redaction first.
+that case the value is only a non-secret placeholder. Real credentials are never
+accepted as a CLI argument, printed, or written to the report — error text
+passes through environment-secret redaction first.
 
 The command exits with status 0 when all completed metrics pass, 1 when at least
 one metric is below threshold or no metric could run, and 2 for invalid input,
@@ -347,6 +464,9 @@ remainder. Raise both budgets before running:
 export DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE=2400
 export DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE=900
 ```
+
+Or set the same two in `eval/.env`, where they apply to every run without being
+re-exported.
 
 A smaller non-reasoning judge is the cheaper fix, at the cost of judging
 quality. Whichever you pick, keep it fixed across every run you intend to
@@ -383,48 +503,55 @@ Confirm `goal_matches` is true, the selected hypothesis has text, and
 `evidence_sources` carries real passages rather than citation metadata alone.
 That last point decides whether the `rag` metrics will run or be skipped.
 
-**4. Configure the judge.** The API key is required even against an
-unauthenticated server, where it is only a non-secret placeholder:
+**4. Configure the judge**, once, in `eval/.env` — copied from
+`.env.example`. The API key is required even against an unauthenticated server,
+where it is only a non-secret placeholder:
 
-```powershell
-$env:LOCAL_MODEL_API_KEY = "lm-studio"; $env:LOCAL_MODEL_BASE_URL = "http://127.0.0.1:1234/v1/"; $env:LOCAL_MODEL_NAME = "<loaded-model-id>"
+```ini
+LOCAL_MODEL_API_KEY=lm-studio
+LOCAL_MODEL_NAME=<loaded-model-id>
+LOCAL_MODEL_BASE_URL=http://127.0.0.1:1234/v1/
+DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE=2400
+DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE=900
 ```
 
-```powershell
-$env:DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE = "2400"; $env:DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE = "900"
-```
+For a one-off override, export the same names in the shell instead; the
+environment wins over the file.
 
 Check the model actually loads before starting a long run — a server short on
 memory answers `Failed to load model` to the first request.
 
-**5. Score the hypothesis.**
+**5. Score the hypothesis.** DeepEval prints its result table as it goes, and
+the audit report lands in `reports/hyp-<run-id>.json` on its own:
 
 ```powershell
-uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json --goal-file goals/<goal>.txt --llm-metrics --metric-suite hypothesis --threshold 0.7 --report reports/hyp-<run-id>.json
+uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json --goal-file goals/<goal>.txt --llm-metrics --metric-suite hypothesis
 ```
 
 **6. Score its grounding.**
 
 ```powershell
-uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json --goal-file goals/<goal>.txt --llm-metrics --metric-suite rag --threshold 0.7 --report reports/rag-<run-id>.json
+uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json --goal-file goals/<goal>.txt --llm-metrics --metric-suite rag
 ```
 
 Run the suites separately rather than reaching for `--metric-suite all`.
 DeepEval's own guidance is no more than about five metrics at a time, and a
 mixed report makes a retrieval failure and a reasoning failure look alike.
 
-**7. Read the report.**
+**7. Read the reasons.** The scores were already on the terminal; what the
+report adds is why.
 
 ```powershell
-$r = Get-Content reports/hyp-<run-id>.json -Raw -Encoding UTF8 | ConvertFrom-Json; $r.llm_evaluation.metrics | Format-Table name, status, score, threshold, passed -AutoSize
-```
-
-```powershell
-$r.llm_evaluation.metrics | ForEach-Object { "$($_.name): $($_.reason)" }
+$r = Get-Content reports/hyp-<run-id>.json -Raw -Encoding UTF8 | ConvertFrom-Json; $r.llm_evaluation.metrics | ForEach-Object { "$($_.name): $($_.reason)" }
 ```
 
 The reasons matter more than the numbers. `Experimental readiness` in particular
-names the missing slot, which is the part that tells you what to fix.
+names the missing slot, which is the part that tells you what to fix. The
+numbers are still there when you want them back:
+
+```powershell
+$r.llm_evaluation.metrics | Format-Table name, status, score, threshold, passed -AutoSize
+```
 
 One run scores one hypothesis and settles nothing on its own. For comparisons
 across goals, conditions, and repeats, use `scripts/idea_bench.py` — see

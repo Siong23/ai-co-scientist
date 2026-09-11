@@ -20,7 +20,6 @@ from rubrics.deepeval_metrics import (
     METRIC_DEFINITIONS,
     LLMEvaluationError,
     MetricSpec,
-    evaluate_parsed_run,
 )
 from rubrics.experimental_readiness import (
     COMPARISON_CRITERIA,
@@ -35,7 +34,12 @@ from rubrics.experimental_readiness import (
     build_experimental_readiness_dag,
 )
 from rubrics.suites import SUITE_HYPOTHESIS
-from tests.test_deepeval_metrics import StubJudge, fake_factories, parsed_run  # noqa: F401
+from tests.test_deepeval_metrics import (  # noqa: F401
+    StubJudge,
+    fake_factories,
+    parsed_run,
+    run_evaluation,
+)
 
 METRIC_NAME = "Experimental readiness"
 
@@ -126,7 +130,7 @@ def test_every_rung_forbids_the_judge_from_filling_the_gap_itself():
 
 
 def test_readiness_scores_a_hypothesis_with_no_evidence_at_all(fake_factories):  # noqa: F811
-    report = evaluate_parsed_run(parsed_run(evidence="none"), suite=SUITE_HYPOTHESIS, metric_factories=fake_factories)
+    report = run_evaluation(parsed_run(evidence="none"), fake_factories, suite=SUITE_HYPOTHESIS)
     metric = next(entry for entry in report["metrics"] if entry["name"] == METRIC_NAME)
 
     assert metric["status"] == "completed"

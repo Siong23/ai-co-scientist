@@ -7,14 +7,22 @@ adding another branch to the runner.
 Custom scientific metrics use ``GEval`` with explicit ``evaluation_steps`` and
 never ``criteria`` as well: DeepEval 4.2.2 ignores ``criteria`` once steps are
 supplied, and fixed steps judge more reproducibly than a generated rubric.
+
+Measurement itself belongs to DeepEval. :func:`evaluate_parsed_run` decides
+which metrics this artifact can support, hands them to ``deepeval.evaluate()``
+in a single call -- which is also what renders DeepEval's native result table
+on the terminal -- and translates the ``MetricData`` it returns back into this
+project's report schema. No code here calls ``metric.measure()``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from deepeval import evaluate as deepeval_evaluate
+from deepeval.evaluate import AsyncConfig, CacheConfig, DisplayConfig
 from deepeval.metrics import (
     AnswerRelevancyMetric,
     ContextualRelevancyMetric,
@@ -23,6 +31,7 @@ from deepeval.metrics import (
     GEval,
 )
 from deepeval.test_case import LLMTestCase, SingleTurnParams
+from deepeval.test_run.test_run import TestRunResultDisplay
 
 from rubrics.errors import LLMEvaluationError
 from rubrics.experimental_readiness import (
@@ -64,6 +73,10 @@ DEFAULT_METRIC_FACTORIES: Mapping[str, Callable[..., Any]] = {
     KIND_FAITHFULNESS: FaithfulnessMetric,
     KIND_CONTEXTUAL_RELEVANCY: ContextualRelevancyMetric,
 }
+
+#: DeepEval's own evaluator, which both measures the metrics and prints the
+#: native result table. Tests inject a double here so the suite stays offline.
+DEFAULT_EVALUATION_RUNNER: Callable[..., Any] = deepeval_evaluate
 
 
 @dataclass(frozen=True)
@@ -310,34 +323,131 @@ def _validate_threshold(threshold: Any) -> float:
     return float(threshold)
 
 
-def _run_metric(
+def _build_metric(
     spec: MetricSpec,
-    test_case: LLMTestCase,
     *,
     threshold: float,
     model: Any,
     factory: Callable[..., Any],
-) -> dict[str, Any]:
-    """Construct, measure, and serialize a single metric."""
+) -> Any:
+    """Construct one metric, naming it when its factory rejects our arguments."""
     try:
-        metric = factory(**spec.build_kwargs(threshold=threshold, model=model))
-        metric.measure(test_case)
-        score = getattr(metric, "score", None)
-        passed = bool(metric.is_successful())
+        return factory(**spec.build_kwargs(threshold=threshold, model=model))
+    except LLMEvaluationError:
+        raise
     except Exception as exc:
-        raise LLMEvaluationError(f"DeepEval metric {spec.name!r} failed: {exc}") from exc
+        raise LLMEvaluationError(f"DeepEval metric {spec.name!r} could not be constructed: {exc}") from exc
 
+
+def _deepeval_metric_name(metric: Any) -> str | None:
+    """The name DeepEval reports for a metric, or ``None`` for a test double."""
+    name = getattr(metric, "__name__", None)
+    return name if isinstance(name, str) else None
+
+
+def metric_data_to_report_entry(metric_data: Any, *, name: str, threshold: float) -> dict[str, Any]:
+    """Translate one DeepEval ``MetricData`` into this project's report entry.
+
+    Only the documented fields cross over, so no DeepEval object is ever
+    serialized into the report. ``name`` is this project's metric name rather
+    than DeepEval's, which appends a ``[GEval]`` or ``[DAG]`` suffix of its own.
+    """
+    error = getattr(metric_data, "error", None)
+    if error:
+        raise LLMEvaluationError(f"DeepEval metric {name!r} failed: {error}")
+
+    score = getattr(metric_data, "score", None)
     if isinstance(score, bool) or not isinstance(score, (int, float)):
-        raise LLMEvaluationError(f"DeepEval metric {spec.name!r} returned no numeric score")
+        raise LLMEvaluationError(f"DeepEval metric {name!r} returned no numeric score")
 
+    reported_threshold = getattr(metric_data, "threshold", None)
+    if isinstance(reported_threshold, bool) or not isinstance(reported_threshold, (int, float)):
+        reported_threshold = threshold
+
+    reason = getattr(metric_data, "reason", None)
     return {
-        "name": spec.name,
+        "name": name,
         "status": "completed",
         "score": float(score),
-        "threshold": threshold,
-        "passed": passed,
-        "reason": getattr(metric, "reason", None),
+        "threshold": float(reported_threshold),
+        "passed": bool(getattr(metric_data, "success", False)),
+        "reason": reason if isinstance(reason, str) else None,
     }
+
+
+def _run_native_evaluation(
+    test_case: LLMTestCase,
+    prepared: Sequence[tuple[MetricSpec, Any]],
+    *,
+    identifier: str | None,
+    results_folder: str | None,
+    runner: Callable[..., Any],
+) -> dict[str, Any]:
+    """Run DeepEval's own evaluator and return its ``MetricData`` per spec.
+
+    ``run_async=False`` is deliberate: the judge is a single local LM Studio
+    server, and issuing several 27B judging calls at once makes every one of
+    them slower. ``print_results`` is what puts DeepEval's native result table
+    on the terminal, which is this harness's entire metric display.
+
+    The score cache is written off as well. This harness never reads it -- a
+    stale judgement is exactly what an audit must not reuse -- so writing it
+    buys nothing, and on Windows it actively breaks: DeepEval takes a *shared*
+    lock to read the cache back, which needs pywin32, and without it the read
+    returns ``None`` that ``cache_test_case`` then dereferences. The first run
+    in a fresh directory survives because there is no cache file to read; every
+    run after it dies at the end with ``'NoneType' object has no attribute
+    'test_cases_lookup_map'`` after the judge has already done all the work.
+    """
+    try:
+        evaluation_result = runner(
+            test_cases=[test_case],
+            metrics=[metric for _, metric in prepared],
+            identifier=identifier,
+            async_config=AsyncConfig(run_async=False),
+            display_config=DisplayConfig(
+                print_results=True,
+                show_indicator=True,
+                display_option=TestRunResultDisplay.ALL,
+                results_folder=results_folder,
+                # This is a batch command: never hold a finished run open on an
+                # "open the inspect TUI?" prompt that nobody is there to answer.
+                inspect_after_run=False,
+            ),
+            cache_config=CacheConfig(write_cache=False),
+        )
+    except LLMEvaluationError:
+        raise
+    except Exception as exc:
+        raise LLMEvaluationError(f"DeepEval evaluation failed: {exc}") from exc
+
+    test_results = getattr(evaluation_result, "test_results", None) or []
+    if len(test_results) != 1:
+        raise LLMEvaluationError(f"DeepEval returned {len(test_results)} test results for one test case")
+
+    metrics_data = getattr(test_results[0], "metrics_data", None) or []
+    if len(metrics_data) != len(prepared):
+        raise LLMEvaluationError(f"DeepEval returned {len(metrics_data)} metric results for {len(prepared)} metrics")
+
+    # DeepEval reports one MetricData per metric, in the order the metrics were
+    # passed. Pair them back up by position and check that the names agree, so a
+    # future reordering surfaces as an error rather than as mislabeled scores.
+    measured: dict[str, Any] = {}
+    for (spec, metric), metric_data in zip(prepared, metrics_data):
+        expected = _deepeval_metric_name(metric)
+        returned = getattr(metric_data, "name", None)
+        if expected is not None and returned is not None and returned != expected:
+            raise LLMEvaluationError(
+                f"DeepEval returned metric results out of order: expected {expected!r}, found {returned!r}"
+            )
+        measured[spec.name] = metric_data
+    return measured
+
+
+def _run_identifier(parsed_run: Mapping[str, Any]) -> str | None:
+    """Label the DeepEval test run with the run id it scored, when there is one."""
+    run_id = parsed_run.get("run_id")
+    return run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
 
 
 def evaluate_parsed_run(
@@ -347,8 +457,16 @@ def evaluate_parsed_run(
     model: Any = None,
     suite: str = DEFAULT_METRIC_SUITE,
     metric_factories: Mapping[str, Callable[..., Any]] | None = None,
+    evaluation_runner: Callable[..., Any] | None = None,
+    results_folder: str | None = None,
 ) -> dict[str, Any]:
-    """Measure the selected hypothesis and return a JSON-serializable report."""
+    """Measure the selected hypothesis and return a JSON-serializable report.
+
+    A metric needing source text the artifact does not carry is filtered out
+    *before* DeepEval sees it -- passing it anyway would trade a documented skip
+    for an error -- and reappears in the report as a skipped entry in its
+    original position.
+    """
     threshold = _validate_threshold(threshold)
     specs = select_metric_specs(suite)
     factories = {**DEFAULT_METRIC_FACTORIES, **(metric_factories or {})}
@@ -356,20 +474,30 @@ def evaluate_parsed_run(
     test_case = build_test_case(parsed_run)
     context: RetrievalContext = extract_retrieval_context(parsed_run.get("evidence_sources", []))
 
-    results: list[dict[str, Any]] = []
+    prepared: list[tuple[MetricSpec, Any]] = []
+    skipped: dict[str, dict[str, Any]] = {}
     for spec in specs:
         if spec.requires_retrieval_context and not context.is_substantive:
-            results.append({"name": spec.name, "status": "skipped", "reason": context.reason})
+            skipped[spec.name] = {"name": spec.name, "status": "skipped", "reason": context.reason}
             continue
-        results.append(
-            _run_metric(
-                spec,
-                test_case,
-                threshold=threshold,
-                model=model,
-                factory=factories[spec.kind],
-            )
+        prepared.append((spec, _build_metric(spec, threshold=threshold, model=model, factory=factories[spec.kind])))
+
+    measured: dict[str, Any] = {}
+    if prepared:
+        measured = _run_native_evaluation(
+            test_case,
+            prepared,
+            identifier=_run_identifier(parsed_run),
+            results_folder=results_folder,
+            runner=evaluation_runner or DEFAULT_EVALUATION_RUNNER,
         )
+
+    results = [
+        skipped[spec.name]
+        if spec.name in skipped
+        else metric_data_to_report_entry(measured[spec.name], name=spec.name, threshold=threshold)
+        for spec in specs
+    ]
 
     completed = [result for result in results if result["status"] == "completed"]
     report: dict[str, Any] = {
@@ -389,6 +517,7 @@ def evaluate_parsed_run(
 
 
 __all__ = [
+    "DEFAULT_EVALUATION_RUNNER",
     "DEFAULT_METRIC_FACTORIES",
     "DEFAULT_METRIC_SUITE",
     "METRIC_DEFINITIONS",
@@ -402,6 +531,7 @@ __all__ = [
     "build_test_case",
     "evaluate_parsed_run",
     "hypothesis_as_text",
+    "metric_data_to_report_entry",
     "resolve_suite",
     "select_metric_specs",
 ]

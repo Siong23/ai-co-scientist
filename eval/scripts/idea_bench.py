@@ -9,7 +9,9 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from evaluate_run import (
+    ENV_FILE,
     configure_local_judge,
+    load_env_file,
     load_run,
     locate_final_hypotheses,
     redact_environment_secrets,
@@ -173,6 +175,8 @@ def evaluate_export(data, judge, call=request_judge):
 
 
 def main(argv=None):
+    # Same judge configuration as evaluate_run.py, from the same eval/.env.
+    load_env_file(ENV_FILE)
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("export", "evaluate"):

@@ -6,6 +6,7 @@ from scripts.evaluate_run import (
     RunValidationError,
     configure_local_judge,
     extract_evidence_sources,
+    load_env_file,
     load_run,
     locate_final_hypotheses,
     parse_run,
@@ -14,6 +15,14 @@ from scripts.evaluate_run import (
 )
 
 FIXED_GOAL = "Improve perovskite humidity stability."
+
+
+@pytest.fixture
+def isolated_environ(monkeypatch):
+    """Give a test its own os.environ so env-file loading cannot leak out."""
+    environ = dict(os.environ)
+    monkeypatch.setattr(os, "environ", environ)
+    return environ
 
 
 def hypothesis(hypothesis_id, elo, sources=None):
@@ -152,3 +161,65 @@ def test_local_judge_configuration_requires_environment_key(monkeypatch):
         "base_url": "http://localhost:1234/v1/",
     }
     assert os.environ["USE_LOCAL_MODEL"] == "1"
+
+
+def test_env_file_supplies_judge_defaults_without_overriding_the_environment(tmp_path, isolated_environ):
+    """The file is a default for repeat runs, not an override of the shell."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# judge configuration\n"
+        "\n"
+        "export LOCAL_MODEL_NAME=from-file\n"
+        "LOCAL_MODEL_BASE_URL = 'http://file:1234/v1/'\n"
+        'LOCAL_MODEL_API_KEY="file-key"\n'
+        "NOT_AN_ASSIGNMENT\n",
+        encoding="utf-8",
+    )
+    isolated_environ["LOCAL_MODEL_NAME"] = "from-shell"
+    isolated_environ.pop("LOCAL_MODEL_BASE_URL", None)
+    isolated_environ.pop("LOCAL_MODEL_API_KEY", None)
+
+    applied = load_env_file(env_file)
+
+    assert applied == {
+        "LOCAL_MODEL_BASE_URL": "http://file:1234/v1/",
+        "LOCAL_MODEL_API_KEY": "file-key",
+    }
+    assert isolated_environ["LOCAL_MODEL_NAME"] == "from-shell"
+    assert isolated_environ["LOCAL_MODEL_BASE_URL"] == "http://file:1234/v1/"
+
+
+def test_env_file_values_reach_the_judge_configuration(tmp_path, isolated_environ):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LOCAL_MODEL_API_KEY=lm-studio\n"
+        "LOCAL_MODEL_NAME=unsloth/qwen3.8-27b\n"
+        "LOCAL_MODEL_BASE_URL=http://100.117.90.5:1234/v1/\n",
+        encoding="utf-8",
+    )
+    for name in ("LOCAL_MODEL_API_KEY", "LOCAL_MODEL_NAME", "LOCAL_MODEL_BASE_URL"):
+        isolated_environ.pop(name, None)
+    load_env_file(env_file)
+
+    # No --judge-model or --judge-base-url: exactly the short command.
+    assert configure_local_judge(None, None) == {
+        "provider": "local",
+        "model": "unsloth/qwen3.8-27b",
+        "base_url": "http://100.117.90.5:1234/v1/",
+    }
+
+
+def test_cli_arguments_still_win_over_the_env_file(tmp_path, isolated_environ):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LOCAL_MODEL_NAME=from-file\nLOCAL_MODEL_BASE_URL=http://file:1234/v1/\n", encoding="utf-8")
+    isolated_environ["LOCAL_MODEL_API_KEY"] = "placeholder"
+    load_env_file(env_file)
+
+    judge = configure_local_judge("cli-model", "http://cli:1234/v1/")
+
+    assert judge["model"] == "cli-model"
+    assert judge["base_url"] == "http://cli:1234/v1/"
+
+
+def test_a_missing_env_file_is_not_an_error(tmp_path):
+    assert load_env_file(tmp_path / "absent.env") == {}

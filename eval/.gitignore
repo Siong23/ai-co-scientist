@@ -1,0 +1,3 @@
+# DeepEval writes its own run snapshots here whenever evaluate() runs. The
+# canonical evaluation report is the JSON under reports/.
+.deepeval/

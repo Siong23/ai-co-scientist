@@ -22,10 +22,33 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 from rubrics.goal_alignment import goals_match  # noqa: E402
-from rubrics.suites import DEFAULT_METRIC_SUITE, METRIC_SUITES  # noqa: E402
+from rubrics.suites import (  # noqa: E402
+    DEFAULT_METRIC_SUITE,
+    METRIC_SUITES,
+    SUITE_ALL,
+    SUITE_HYPOTHESIS,
+    SUITE_LEGACY,
+    SUITE_RAG,
+)
 
 DEFAULT_GOAL_PATH = PROJECT_ROOT / "goals" / "goal_001_perovskite_humidity.txt"
 RANKING_STEP_PATTERN = re.compile(r"ranking(?:_?(\d+)|_final)?")
+
+#: Where an --llm-metrics run files its audit report when --report is omitted.
+REPORTS_DIR = PROJECT_ROOT / "reports"
+
+#: Report filename prefix per suite, matching the reports already on disk.
+REPORT_PREFIXES = {
+    SUITE_HYPOTHESIS: "hyp",
+    SUITE_RAG: "rag",
+    SUITE_LEGACY: "legacy",
+    SUITE_ALL: "all",
+}
+
+UNSAFE_STEM_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+#: Judge configuration for repeat runs. Git-ignored; see .env.example.
+ENV_FILE = PROJECT_ROOT / ".env"
 
 
 class RunValidationError(ValueError):
@@ -215,9 +238,92 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--report",
         type=Path,
-        help="optional path for the complete JSON evaluation report",
+        help=(
+            "where to write the complete JSON evaluation report; with --llm-metrics and no "
+            "--report the path is derived as reports/<suite>-<run-id>.json"
+        ),
+    )
+    parser.add_argument(
+        "--deepeval-results-folder",
+        type=Path,
+        help=(
+            "optionally also keep DeepEval's own timestamped test-run JSON in this "
+            "folder; off by default so that one run produces one report"
+        ),
     )
     return parser
+
+
+def default_report_path(suite: str, run_id: Any, run_json: Path) -> Path:
+    """Derive the audit report path for an --llm-metrics run given no --report.
+
+    DeepEval owns the terminal once metrics run, so the report has to land
+    somewhere by default: the metric reasons live only in it.
+    """
+    stem = run_id if isinstance(run_id, str) and run_id.strip() else run_json.stem
+    safe_stem = UNSAFE_STEM_CHARS.sub("-", stem.strip()).strip("-.") or "run"
+    return REPORTS_DIR / f"{REPORT_PREFIXES[suite]}-{safe_stem}.json"
+
+
+def display_path(path: Path) -> str:
+    """Show a written path relative to the working directory when it is inside it."""
+    try:
+        return path.relative_to(Path.cwd()).as_posix()
+    except (OSError, ValueError):
+        return path.as_posix()
+
+
+def print_llm_footer(llm_report: Mapping[str, Any], report_path: Path | None) -> None:
+    """Say where the audit report went and which metrics never reached DeepEval.
+
+    Deliberately small: DeepEval has already printed the scores, and a second
+    rendering of the same numbers would only compete with it.
+    """
+    if report_path is not None:
+        print("AI Co-Scientist report written to:")
+        print(display_path(report_path))
+    skipped = [metric for metric in llm_report["metrics"] if metric["status"] == "skipped"]
+    if skipped:
+        print("Skipped metrics:")
+        for metric in skipped:
+            print(f"- {metric['name']}: {metric['reason']}")
+
+
+def load_env_file(path: Path) -> dict[str, str]:
+    """Merge ``KEY=value`` lines from an env file into the process environment.
+
+    A variable already in the environment is never overwritten: the file is a
+    default for repeat runs, not an override of what the shell or CI has set.
+    Everything after the first ``=`` is the value, so an inline ``#`` is part of
+    it rather than a comment. Returns only the variables this call applied.
+
+    DeepEval reads a ``.env`` of its own on import, but relying on that would
+    tie this command's configuration to a third-party import side effect and to
+    the working directory. This reads the harness's own file, explicitly.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        # No env file is ordinary: the judge can still come from the shell or
+        # from --judge-model and --judge-base-url.
+        return {}
+
+    applied: dict[str, str] = {}
+    for line in raw.splitlines():
+        entry = line.strip().removeprefix("export ").lstrip()
+        if not entry or entry.startswith("#"):
+            continue
+        name, separator, value = entry.partition("=")
+        if not separator:
+            continue
+        name, value = name.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not name or name in os.environ:
+            continue
+        os.environ[name] = value
+        applied[name] = value
+    return applied
 
 
 def configure_local_judge(model: str | None, base_url: str | None) -> dict[str, str]:
@@ -256,6 +362,7 @@ def redact_environment_secrets(message: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env_file(ENV_FILE)
     args = build_parser().parse_args(argv)
     try:
         parsed = parse_run(args.run_json, args.goal_file)
@@ -264,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     exit_code = 0
+    llm_report: dict[str, Any] | None = None
+    report_path: Path | None = args.report
     if args.llm_metrics:
         # Import only in opt-in mode so deterministic parsing remains separate
         # from DeepEval and never initializes a judge provider.
@@ -287,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
                 threshold=args.threshold,
                 model=local_model,
                 suite=args.metric_suite,
+                results_folder=(str(args.deepeval_results_folder) if args.deepeval_results_folder else None),
             )
         except (RunValidationError, LLMEvaluationError) as exc:
             print(
@@ -295,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         parsed["llm_evaluation"] = {"judge": judge, **llm_report}
+        if report_path is None:
+            report_path = default_report_path(args.metric_suite, parsed.get("run_id"), args.run_json)
         if llm_report["status"] != "completed":
             # An all-skipped suite is not a pass; say so instead of letting an
             # empty metric list look like success.
@@ -302,10 +414,10 @@ def main(argv: list[str] | None = None) -> int:
         if not llm_report["passed"]:
             exit_code = 1
 
-    if args.report:
+    if report_path is not None:
         try:
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
                 json.dumps(parsed, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
@@ -316,8 +428,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-    print("AI Co-Scientist evaluation report")
-    print(json.dumps(parsed, indent=2, ensure_ascii=False))
+    if llm_report is not None:
+        # DeepEval has already rendered its native result table. Printing the
+        # whole audit JSON underneath it would bury the scores it just showed.
+        print_llm_footer(llm_report, report_path)
+    else:
+        print("AI Co-Scientist evaluation report")
+        print(json.dumps(parsed, indent=2, ensure_ascii=False))
     return exit_code
 
 
