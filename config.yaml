@@ -305,7 +305,7 @@ validation:
 # then participates in expanded-query retrieval when direct retrieval is insufficient.
 # Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).
 semantic_scholar:
-  enabled: False
+  enabled: True
   results_per_query: 10
 
 # Springer Nature academic search (Open Access & Meta API). It follows the same
