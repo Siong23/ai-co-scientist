@@ -16,6 +16,7 @@ Integration tests (live LM Studio):
     pytest tests/test_experiment_pipeline.py::test_display_generated_pytorch_code -v -s -m integration
 """
 
+import ast
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,6 +147,113 @@ def test_code_generation_agent_extracts_fenced_python_response():
     )
 
 
+def test_code_generation_agent_recovers_unterminated_fenced_python():
+    result = CodeGenerationAgent.extract_fenced_python(
+        "```python\n"
+        "import os\n"
+        "import torch\n"
+        "print('partial'"
+    )
+
+    assert result is not None
+    # The leading imports must survive. Recovering the source from the first
+    # torch import instead would drop them and leave the experiment unrunnable.
+    assert result["pytorch_code"].startswith("import os")
+
+
+def test_code_generation_agent_continues_truncated_experiment(monkeypatch):
+    truncated = (
+        "```python\n"
+        "import os\n"
+        "import torch\n"
+        "\n"
+        "\n"
+        "def main():\n"
+        "    device = torch.device('cpu')\n"
+        "    print(os.getcwd(), device)\n"
+        "    summary = {\n"
+        '        "ffnn\n'
+    )
+
+    continuation = (
+        "    summary = {\n"
+        '        "ffnn": 0.91,\n'
+        "    }\n"
+        "    print(summary)\n"
+        "\n"
+        "\n"
+        'if __name__ == "__main__":\n'
+        "    main()\n"
+    )
+
+    responses = [truncated, continuation]
+    calls = []
+
+    def fake_call_llm(*args, **kwargs):
+        calls.append(kwargs)
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(
+        "app.agents_modules.code_generation_agent._call_llm",
+        fake_call_llm,
+    )
+
+    agent = CodeGenerationAgent(model="qwen/qwen3.8-27b")
+
+    result = agent.generate(VALID_SPECIFICATION)
+
+    assert result["success"] is True
+    assert len(calls) == 2
+    assert calls[1]["system_prompt"] == (
+        CodeGenerationAgent.CONTINUATION_SYSTEM_PROMPT
+    )
+
+    code = result["pytorch_code"]
+
+    assert code.startswith("import os")
+    assert code.rstrip().endswith("main()")
+    ast.parse(code)
+
+
+def test_code_generation_agent_keeps_complete_code_unchanged(monkeypatch):
+    def fail_call_llm(*args, **kwargs):
+        raise AssertionError(
+            "A complete experiment must not be continued."
+        )
+
+    monkeypatch.setattr(
+        "app.agents_modules.code_generation_agent._call_llm",
+        fail_call_llm,
+    )
+
+    agent = CodeGenerationAgent(model="test-model")
+    source = "import torch\nprint(torch.__version__)\n"
+
+    assert agent.continue_truncated_code(source) == source
+
+
+def test_code_generation_agent_does_not_continue_invalid_python(monkeypatch):
+    def fail_call_llm(*args, **kwargs):
+        raise AssertionError(
+            "Invalid Python must not be continued."
+        )
+
+    monkeypatch.setattr(
+        "app.agents_modules.code_generation_agent._call_llm",
+        fail_call_llm,
+    )
+
+    agent = CodeGenerationAgent(model="test-model")
+    source = (
+        "import torch\n"
+        "this is not valid Python\n"
+        + "print(1)\n" * 60
+    )
+
+    with pytest.raises(ValueError, match="not valid Python"):
+        agent.continue_truncated_code(source)
+
+
 def test_code_generation_agent_uses_dedicated_model_by_default(monkeypatch):
     from app.agents_modules.code_generation_agent import config
 
@@ -191,7 +299,9 @@ def test_code_repair_prompt_is_bounded(monkeypatch):
     )
 
     assert result["success"] is True
-    assert len(captured["prompt"]) < 50000
+    # The bound holds a full-length experiment plus both bounded logs, so the
+    # repair model sees the whole file instead of its tail.
+    assert len(captured["prompt"]) < 90000
     assert (
         captured["kwargs"]["max_tokens"]
         == agent.REPAIR_MAX_TOKENS

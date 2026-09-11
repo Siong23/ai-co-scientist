@@ -105,10 +105,32 @@ class CodeGenerationAgent:
     """
 
     DEFAULT_TEMPERATURE = 0.2
-    DEFAULT_MAX_TOKENS = 12000
-    REPAIR_MAX_TOKENS = 8000
-    MAX_REPAIR_SOURCE_CHARS = 28000
+    DEFAULT_MAX_TOKENS = 16000
+    REPAIR_MAX_TOKENS = 16000
+    MAX_REPAIR_SOURCE_CHARS = 64000
     MAX_REPAIR_LOG_CHARS = 8000
+
+    # A complete experiment can exceed a single response budget. The agent
+    # then continues the unfinished file instead of regenerating it, because
+    # a regeneration stops at the same limit.
+    MAX_CONTINUATION_ATTEMPTS = 3
+    MAX_CONTINUATION_REWIND_LINES = 400
+    MAX_CONTINUATION_SOURCE_CHARS = 80000
+    MIN_TRUNCATION_LINES = 40
+
+    TRUNCATION_SYNTAX_MARKERS = (
+        "unterminated string literal",
+        "unterminated triple-quoted string literal",
+        "was never closed",
+        "unexpected eof",
+    )
+
+    CONTINUATION_SYSTEM_PROMPT = (
+        "You continue partially written Python source files.\n"
+        "You never repeat code that already exists.\n"
+        "You return raw Python source code only, without Markdown "
+        "fences, JSON, or commentary."
+    )
 
     def __init__(
         self,
@@ -1261,10 +1283,27 @@ Do not return explanations or commentary.
             response,
             flags=re.IGNORECASE | re.DOTALL,
         )
-        if not matches:
-            return None
 
-        code = max(matches, key=len).strip()
+        if matches:
+            code = max(matches, key=len).strip()
+        else:
+            # A response that stopped at the output-token limit keeps its
+            # opening fence and never emits the closing one. Without this
+            # branch the source is recovered from the first torch import
+            # instead, which silently drops every earlier line.
+            opening = re.search(
+                r"```(?:python|py)?[ \t]*\r?\n",
+                response,
+                flags=re.IGNORECASE,
+            )
+
+            if opening is None:
+                return None
+
+            code = CodeGenerationAgent.strip_code_fences(
+                response[opening.end():]
+            )
+
         if not code:
             return None
 
@@ -1414,6 +1453,368 @@ Do not return explanations or commentary.
                 )
 
     # ========================================================
+    # Incomplete Generation Recovery
+    # ========================================================
+
+    @staticmethod
+    def strip_code_fences(
+        response: str,
+    ) -> str:
+        """
+        Remove Markdown fences, including an unterminated opening fence.
+
+        Leading spaces are preserved because a continuation starts at the
+        indentation of the statement it resumes.
+        """
+        text = response.lstrip("\n").rstrip()
+
+        text = re.sub(
+            r"^[ \t]*```[A-Za-z0-9_+-]*[ \t]*\r?\n",
+            "",
+            text,
+        )
+
+        text = re.sub(
+            r"(?:\r?\n)?[ \t]*```[ \t]*$",
+            "",
+            text,
+        )
+
+        return text.rstrip()
+
+    @classmethod
+    def syntax_error_is_truncation(
+        cls,
+        code: str,
+        error: SyntaxError,
+    ) -> bool:
+        """
+        Report whether a syntax error is the signature of a cut-off response.
+
+        A response that reaches the output-token limit stops inside the
+        construct it was writing, so the parser fails either on an unclosed
+        literal or at the end of the file.
+        """
+        message = str(
+            getattr(
+                error,
+                "msg",
+                "",
+            )
+            or ""
+        ).lower()
+
+        for marker in cls.TRUNCATION_SYNTAX_MARKERS:
+            if marker in message:
+                return True
+
+        line_number = getattr(
+            error,
+            "lineno",
+            None,
+        )
+
+        if not isinstance(
+            line_number,
+            int,
+        ):
+            return False
+
+        total_lines = len(
+            code.splitlines()
+        )
+
+        if total_lines < cls.MIN_TRUNCATION_LINES:
+            return False
+
+        return line_number >= total_lines - 1
+
+    @classmethod
+    def longest_parsable_prefix(
+        cls,
+        code: str,
+    ) -> Optional[str]:
+        """
+        Return the longest leading part of the source that still parses.
+
+        The cut-off tail is dropped so the model can continue from a
+        complete statement.
+        """
+        lines = code.splitlines()
+
+        limit = min(
+            len(lines),
+            cls.MAX_CONTINUATION_REWIND_LINES,
+        )
+
+        for dropped in range(1, limit + 1):
+            candidate = "\n".join(
+                lines[: len(lines) - dropped]
+            )
+
+            if not candidate.strip():
+                return None
+
+            try:
+                ast.parse(candidate)
+            except SyntaxError:
+                continue
+
+            return candidate
+
+        return None
+
+    def build_continuation_prompt(
+        self,
+        prefix: str,
+    ) -> str:
+        """
+        Ask the model to finish an experiment that was cut off.
+        """
+        bounded_prefix = prefix[
+            -self.MAX_CONTINUATION_SOURCE_CHARS:
+        ]
+
+        return f"""
+The following Python file is incomplete because the previous response
+reached its output-token limit. Continue the file from exactly where it
+stops.
+
+IMPORTANT:
+
+1. Do NOT repeat any line that is already written.
+2. Do NOT restate imports, classes, or functions that already exist.
+3. Continue with the indentation required where the file stops.
+4. Complete every remaining part of the experiment, including training,
+   evaluation, metrics, visualizations, artifact saving, and the
+   executable entry point.
+5. Save all artifacts inside EXPERIMENT_OUTPUT_DIR.
+6. Return ONLY raw Python source code.
+7. Do NOT return Markdown fences, JSON, explanations, or commentary.
+
+============================================================
+FILE WRITTEN SO FAR
+============================================================
+
+{bounded_prefix}
+
+============================================================
+CONTINUE THE FILE FROM THE NEXT CHARACTER
+============================================================
+""".strip()
+
+    def continue_truncated_code(
+        self,
+        generated_code: str,
+    ) -> str:
+        """
+        Complete an experiment that stopped at the output-token limit.
+
+        Returns the source unchanged when it already parses. Raises
+        ValueError when the source is invalid for another reason, or when
+        the continuations do not complete it.
+        """
+        if not isinstance(
+            generated_code,
+            str,
+        ) or not generated_code.strip():
+            raise ValueError(
+                "Generated PyTorch code is required for continuation."
+            )
+
+        code = generated_code
+
+        for attempt in range(
+            self.MAX_CONTINUATION_ATTEMPTS + 1
+        ):
+            try:
+                ast.parse(code)
+                return code
+            except SyntaxError as error:
+                if not self.syntax_error_is_truncation(
+                    code,
+                    error,
+                ):
+                    raise ValueError(
+                        "Generated PyTorch code is not valid Python: "
+                        f"{error.msg} at line {error.lineno}."
+                    ) from error
+
+                if attempt == self.MAX_CONTINUATION_ATTEMPTS:
+                    raise ValueError(
+                        "Generated PyTorch code is still incomplete after "
+                        f"{self.MAX_CONTINUATION_ATTEMPTS} continuation "
+                        "attempt(s). Increase llm_max_tokens.code_generation."
+                    ) from error
+
+            prefix = self.longest_parsable_prefix(
+                code
+            )
+
+            if prefix is None:
+                raise ValueError(
+                    "Generated PyTorch code was cut off and no complete "
+                    "prefix could be recovered."
+                )
+
+            logger.warning(
+                "Generated experiment stopped at the output-token limit; "
+                "requesting continuation %d/%d from line %d.",
+                attempt + 1,
+                self.MAX_CONTINUATION_ATTEMPTS,
+                len(prefix.splitlines()),
+            )
+
+            response = _call_llm(
+                self.build_continuation_prompt(
+                    prefix
+                ),
+                temperature=0.0,
+                model=self.model,
+                system_prompt=self.CONTINUATION_SYSTEM_PROMPT,
+                max_tokens=_output_token_limit(
+                    "code_generation",
+                    self.DEFAULT_MAX_TOKENS,
+                ),
+                reasoning="off",
+            )
+
+            if not isinstance(
+                response,
+                str,
+            ):
+                response = str(response)
+
+            if response.startswith(
+                "Error:"
+            ):
+                raise RuntimeError(
+                    response
+                )
+
+            continuation = self.strip_code_fences(
+                response
+            )
+
+            if not continuation:
+                raise ValueError(
+                    "The model returned no continuation for the "
+                    "incomplete experiment."
+                )
+
+            code = (
+                prefix.rstrip("\n")
+                + "\n"
+                + continuation.lstrip("\n")
+            )
+
+        return code
+
+    def recover_incomplete_generation(
+        self,
+        specification: Dict[str, Any],
+        generated: Optional[Dict[str, Any]],
+        code_error: ValueError,
+    ) -> Dict[str, Any]:
+        """
+        Recover a generated experiment that failed validation.
+
+        A response that stopped at the output-token limit is continued from
+        its last complete statement, because regenerating it would stop at
+        the same limit. Anything else is regenerated from the specification.
+        """
+        code = (
+            generated.get("pytorch_code")
+            if isinstance(generated, dict)
+            else None
+        )
+
+        if isinstance(
+            code,
+            str,
+        ) and code.strip():
+            try:
+                completed = self.continue_truncated_code(
+                    code
+                )
+            except (ValueError, RuntimeError) as continuation_error:
+                logger.warning(
+                    "Continuing the incomplete experiment failed: %s",
+                    continuation_error,
+                )
+            else:
+                recovered = dict(generated)
+                recovered["pytorch_code"] = completed
+
+                assumptions = list(
+                    recovered.get("assumptions")
+                    or []
+                )
+
+                if completed != code:
+                    assumptions.append(
+                        "The experiment source was completed with a "
+                        "continuation request after the model reached its "
+                        "output-token limit."
+                    )
+
+                recovered["assumptions"] = assumptions
+
+                self.validate_generated_response(
+                    recovered
+                )
+
+                return recovered
+
+        code_only_prompt = f"""
+Return only complete, executable Python source code for a PyTorch experiment.
+Do not return JSON, Markdown, explanations, analysis, or commentary. Start
+with a Python import and end with the executable experiment code.
+
+Selected hypothesis:
+{specification["selected_hypothesis"].get("text", "")}
+
+Dataset:
+{specification["dataset"].get("name", "5G-NIDD")}
+""".strip()
+
+        code_only_response = _call_llm(
+            code_only_prompt,
+            temperature=0.0,
+            model=self.model,
+            max_tokens=_output_token_limit(
+                "code_generation",
+                self.DEFAULT_MAX_TOKENS,
+            ),
+            reasoning="off",
+        )
+
+        if not isinstance(
+            code_only_response,
+            str,
+        ):
+            code_only_response = str(
+                code_only_response
+            )
+
+        regenerated = self.extract_python_source(
+            code_only_response
+        )
+
+        if regenerated is None:
+            raise code_error
+
+        regenerated["pytorch_code"] = self.continue_truncated_code(
+            regenerated["pytorch_code"]
+        )
+
+        self.validate_generated_response(
+            regenerated
+        )
+
+        return regenerated
+
+    # ========================================================
     # Generate
     # ========================================================
 
@@ -1491,9 +1892,7 @@ Do not return explanations or commentary.
                 )
             except ValueError as parse_error:
                 generated = self.extract_python_source(response)
-                if generated is not None:
-                    self.validate_generated_response(generated)
-                else:
+                if generated is None:
                     repair_prompt = f"""
     The previous response was not valid structured JSON. Return exactly one
     valid JSON object with model_recommendation, experiment_plan, assumptions,
@@ -1563,34 +1962,11 @@ Dataset:
                     generated
                 )
             except ValueError as code_error:
-                code_only_prompt = f"""
-Return only complete, executable Python source code for a PyTorch experiment.
-Do not return JSON, Markdown, explanations, analysis, or commentary. Start
-with a Python import and end with the executable experiment code.
-
-Selected hypothesis:
-{specification["selected_hypothesis"].get("text", "")}
-
-Dataset:
-{specification["dataset"].get("name", "5G-NIDD")}
-""".strip()
-                code_only_response = _call_llm(
-                    code_only_prompt,
-                    temperature=0.0,
-                    model=self.model,
-                    max_tokens=_output_token_limit(
-                        "code_generation",
-                        self.DEFAULT_MAX_TOKENS,
-                    ),
-                    reasoning="off",
+                generated = self.recover_incomplete_generation(
+                    specification,
+                    generated,
+                    code_error,
                 )
-                if not isinstance(code_only_response, str):
-                    code_only_response = str(code_only_response)
-                repaired_code = self.extract_python_source(code_only_response)
-                if repaired_code is None:
-                    raise code_error
-                self.validate_generated_response(repaired_code)
-                generated = repaired_code
 
             result.update(
                 {
@@ -1938,6 +2314,22 @@ Return ONLY the complete corrected Python source code.
                     "LLM repair response did not contain "
                     "valid Python source code."
                 ) from error
+
+        # ----------------------------------------------------
+        # Complete a repair that stopped at the token limit.
+        # ----------------------------------------------------
+
+        repaired_source = repaired.get(
+            "pytorch_code"
+        )
+
+        if isinstance(
+            repaired_source,
+            str,
+        ) and repaired_source.strip():
+            repaired["pytorch_code"] = self.continue_truncated_code(
+                repaired_source
+            )
 
         # ----------------------------------------------------
         # Validate repaired experiment.
