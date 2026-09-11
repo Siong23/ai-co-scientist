@@ -8,6 +8,7 @@ Covers:
 - Service error classification, cooldowns, and recovery (Elsevier, Tavily, Springer, Backoff).
 - Minimal fallback plan decomposition and retrieval diversity.
 - Query sanitization for contradictory evidence searches.
+- Dangling requirement/hypothesis links unlinked instead of discarding the plan.
 """
 
 from unittest.mock import Mock, patch
@@ -393,3 +394,180 @@ def test_sanitize_claim_query_removes_punctuation_and_bounds_length():
     words = sanitized.split()
     assert len(words) <= 10
     assert len(words) >= 4
+
+
+# ---------------------------------------------------------------------------
+# 12. Dangling query links survive requirement validation
+# ---------------------------------------------------------------------------
+
+_NIDD_GOAL = (
+    "Develop and empirically validate a novel deep-learning approach for improving multiclass network "
+    "intrusion detection on the provided 5G-NIDD dataset, with particular emphasis on weighted F1, macro F1, "
+    "and reliable detection of minority attack classes."
+)
+
+_NIDD_PLANNER_RESPONSE = """
+{
+  "research_goal": "<GOAL>",
+  "research_type": "hypothesis_testing",
+  "key_entities": ["5G-NIDD", "intrusion detection", "macro F1"],
+  "constraints": [],
+  "sub_questions": ["Which architectures raise minority-class recall?"],
+  "evidence_requirements": ["Reported per-class F1 on 5G-NIDD"],
+  "freshness_requirement": "none",
+  "ambiguities": [],
+  "search_strategy": "academic",
+  "provisional_hypotheses": [
+    {
+      "hypothesis_id": "primary_hypothesis",
+      "role": "primary",
+      "statement": "Class-balanced representation learning raises macro F1 without lowering weighted F1.",
+      "goal_quote": "multiclass network intrusion detection"
+    },
+    {
+      "hypothesis_id": "alternative_hypothesis",
+      "role": "alternative",
+      "statement": "Cost-sensitive ensembles match deep models on rare attack classes.",
+      "goal_quote": "reliable detection of minority attack classes"
+    },
+    {
+      "hypothesis_id": "null_hypothesis",
+      "role": "null",
+      "statement": "Architectural changes leave minority-class detection unchanged on this dataset.",
+      "goal_quote": "the provided 5G-NIDD dataset"
+    }
+  ]
+}
+""".replace("<GOAL>", _NIDD_GOAL)
+
+
+_NIDD_QUERY_RESPONSE = """
+    {
+      "queries": [
+        {
+          "query": "\\"5G-NIDD\\" dataset deep learning intrusion detection baseline performance",
+          "purpose": "Identify existing benchmarks and SOTA baselines.",
+          "sub_question": "What are the baseline deep-learning models?",
+          "source_type": "academic",
+          "preferred_domains": ["arxiv.org", "ieee.org"],
+          "freshness": null,
+          "evidence_requirement_id": "weighted_f1_comparison",
+          "hypothesis_id": null,
+          "search_intent": "goal"
+        },
+        {
+          "query": "deep learning network intrusion detection class imbalance weighted F1 macro F1",
+          "purpose": "Retrieve recent literature on class imbalance in NIDS.",
+          "sub_question": "How does class imbalance affect standard F1 scores?",
+          "source_type": "academic",
+          "preferred_domains": ["springer.com"],
+          "freshness": "year",
+          "evidence_requirement_id": "macro_f1_comparison",
+          "hypothesis_id": null,
+          "search_intent": "support"
+        },
+        {
+          "query": "cost-sensitive learning ensemble minority class recall precision network security",
+          "purpose": "Find alternative approaches that may outperform deep learning.",
+          "sub_question": "Which modifications improve minority class recall?",
+          "source_type": "academic",
+          "preferred_domains": [],
+          "freshness": null,
+          "evidence_requirement_id": "minority_class_reliability",
+          "hypothesis_id": "<HYPOTHESIS_ID>",
+          "search_intent": "counterevidence"
+        },
+        {
+          "query": "novel deep learning architecture multiclass imbalanced datasets ablation study",
+          "purpose": "Identify prior art on novel architectures for imbalanced tasks.",
+          "sub_question": "Does the proposed approach outperform the state of the art?",
+          "source_type": "academic",
+          "preferred_domains": ["arxiv.org"],
+          "freshness": null,
+          "evidence_requirement_id": "statistical_significance_validation",
+          "hypothesis_id": "primary_hypothesis",
+          "search_intent": "prior_art"
+        }
+      ],
+      "required_terms": ["5G-NIDD", "deep learning", "macro F1"],
+      "explicit_requirements": [
+        {
+          "id": "weighted_f1_comparison",
+          "goal_quote": "emphasis on weighted F1",
+          "evidence_need": "Quantitative baseline performance metrics for NIDS benchmarks."
+        },
+        {
+          "id": "macro_f1_comparison",
+          "goal_quote": "emphasis on macro F1",
+          "evidence_need": "Literature on the impact of class imbalance on macro F1."
+        },
+        {
+          "id": "minority_class_reliability",
+          "goal_quote": "reliable detection of minority attack classes",
+          "evidence_need": "Methods improving recall and precision for rare attack classes."
+        },
+        {
+          "id": "statistical_significance_validation",
+          "goal_quote": "empirically validate a novel deep-learning approach",
+          "evidence_need": "Protocols for statistical validation of novel model improvements."
+        }
+      ],
+      "exploration_directions": ["Attention mechanisms for NIDS minority class detection."]
+    }
+    """
+
+
+def _nidd_query_response(*, hypothesis_id: str = "alternative_hypothesis") -> str:
+    """Return the query plan the local model produced for run-20260911-070024.
+
+    The 'macro_f1_comparison' requirement quotes "emphasis on macro F1", which the
+    goal never states verbatim ("emphasis on weighted F1, macro F1"), so requirement
+    validation drops it while its query keeps the reference.
+    """
+    return _NIDD_QUERY_RESPONSE.replace("<HYPOTHESIS_ID>", hypothesis_id)
+
+
+def test_query_citing_dropped_requirement_is_unlinked_instead_of_failing_the_plan():
+    """A dangling evidence_requirement_id must not discard an otherwise usable plan.
+
+    Both rewrite attempts previously raised "Unknown evidence_requirement_id", which
+    aborted retrieval and left the whole cycle with zero hypotheses.
+    """
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_NIDD_PLANNER_RESPONSE, _nidd_query_response()],
+    ) as mock_call:
+        plan, error = call_llm_for_search_queries(_NIDD_GOAL, query_count=5)
+
+    assert error is None
+    assert plan is not None
+    # The rejected requirement is gone, the three verbatim ones survive.
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == [
+        "weighted_f1_comparison",
+        "minority_class_reliability",
+        "statistical_significance_validation",
+    ]
+    # Every query is kept; only the dangling link is cleared.
+    assert len(plan.queries) == 4
+    links = {query.search_intent: query.evidence_requirement_id for query in plan.queries}
+    assert links["support"] is None
+    assert links["goal"] == "weighted_f1_comparison"
+    assert links["counterevidence"] == "minority_class_reliability"
+    assert links["prior_art"] == "statistical_significance_validation"
+    # No repair round is spent on a plan that is already usable.
+    assert mock_call.call_count == 2
+
+
+def test_query_citing_unknown_hypothesis_is_unlinked_instead_of_failing_the_plan():
+    """An unknown hypothesis_id is the same dangling-reference class and must not be fatal."""
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_NIDD_PLANNER_RESPONSE, _nidd_query_response(hypothesis_id="rival_hypothesis")],
+    ):
+        plan, error = call_llm_for_search_queries(_NIDD_GOAL, query_count=5)
+
+    assert error is None
+    assert plan is not None
+    hypothesis_links = {query.search_intent: query.hypothesis_id for query in plan.queries}
+    assert hypothesis_links["counterevidence"] is None
+    assert hypothesis_links["prior_art"] == "primary_hypothesis"

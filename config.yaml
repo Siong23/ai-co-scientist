@@ -12,11 +12,12 @@ lmstudio_base_url: "http://100.117.90.5:1234/v1"
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
 
-llm_model: "qwen/qwen3.8-27b"
+llm_model: "unsloth/qwen3.8-27b"
+# llm_model: "qwen/qwen3.8-27b"
 # Dedicated model for generating executable PyTorch experiments.
-code_generation_model: "qwen/qwen3.8-27b"
+code_generation_model: "unsloth/qwen3.8-27b"
 # query_rewrite_model: "qwen/qwen3.6-35b-a3b"
-query_rewrite_model: "qwen/qwen3.8-27b"
+query_rewrite_model: "unsloth/qwen3.8-27b"
 
 
 # Number of hypotheses to generate
@@ -87,7 +88,7 @@ elo_k_factor: 32
 # pairwise tournament debates. A smaller, faster model reduces latency when many
 # comparisons run in parallel.
 # ranking_llm_model: "qwen/qwen3.6-35b-a3b"
-ranking_llm_model: qwen/qwen3.8-27b
+ranking_llm_model: "unsloth/qwen3.8-27b"
 # set ranking model to "null" to use the main llm_model for pairwise tournament debates. A smaller, faster model reduces latency when many comparisons run in parallel.
 
 ranking:
@@ -116,6 +117,11 @@ supervisor:
   # A Cycle produces one requested batch. Re-running the full literature and
   # generation pipeline inside that Cycle can multiply runtime without bound.
   max_generation_steps_per_cycle: 1
+  # Reflection often accepts fewer candidates than the finalization gate needs.
+  # Evolution sees each parent's recorded weaknesses, so extra bounded passes
+  # repair REVISE candidates without re-running retrieval. Set to 1 to keep the
+  # previous single-pass behaviour and the shortest cycle runtime.
+  max_evolution_steps_per_cycle: 2
   convergence:
     min_snapshots: 2
     top_elo_delta: 2.0

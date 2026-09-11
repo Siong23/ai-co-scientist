@@ -93,6 +93,30 @@ def _reflection_routing(hypotheses: List[Any]) -> Dict[str, List[Any]]:
     return routed
 
 
+def _completed_tournament_ids(context: Any) -> set:
+    """Return the ids that already carry a decided tournament comparison."""
+    ranked: set = set()
+    for match in getattr(context, "tournament_results", []) or []:
+        if not isinstance(match, dict) or match.get("outcome") not in {"A", "B", "TIE"}:
+            continue
+        for key in ("hypothesis_a", "hypothesis_b"):
+            if match.get(key):
+                ranked.add(str(match[key]))
+    return ranked
+
+
+def _unranked_accepted(accepted: List[Any], context: Any) -> List[Any]:
+    """Return accepted hypotheses still missing a decided tournament comparison.
+
+    A tournament needs at least two candidates, so a lone accepted hypothesis
+    is reported as rankable only once a partner exists.
+    """
+    if len(accepted) < 2:
+        return []
+    ranked = _completed_tournament_ids(context)
+    return [hypothesis for hypothesis in accepted if hypothesis.hypothesis_id not in ranked]
+
+
 def _reflection_routing_summary(routed: Mapping[str, List[Any]]) -> Dict[str, List[str]]:
     """Serialize routing decisions without duplicating full hypotheses."""
     return {name: [hypothesis.hypothesis_id for hypothesis in hypotheses] for name, hypotheses in routed.items()}
@@ -145,6 +169,26 @@ class SupervisorAgent:
         self.max_generation_steps_per_cycle = max(
             1,
             int(supervisor_config.get("max_generation_steps_per_cycle", 1)),
+        )
+        # Reflection routinely returns fewer ACCEPTs than the finalization gate
+        # requires. Evolution already receives each parent's recorded weaknesses,
+        # so a second bounded pass is the cheapest way to repair REVISE
+        # candidates instead of ending the Cycle short of the gate.
+        self.max_evolution_steps_per_cycle = max(
+            1,
+            int(supervisor_config.get("max_evolution_steps_per_cycle", 2)),
+        )
+        # A tournament that abstains on every pair leaves its candidates
+        # unranked, so the recovery routes below need their own ceiling to stay
+        # bounded rather than retrying until the step budget runs out.
+        self.max_ranking_steps_per_cycle = max(
+            1,
+            int(
+                supervisor_config.get("convergence", {}).get(
+                    "max_ranking_batches_before_evolution",
+                    2,
+                )
+            ),
         )
         self.generation_agent = GenerationAgent()
         self.reflection_agent = ReflectionAgent()
@@ -492,13 +536,21 @@ class SupervisorAgent:
         evolved_hypotheses = self.evolution_agent.evolve_hypotheses(context, research_goal)
         evolution_attempts = list(context.last_evolution_attempts)
 
+        # A Cycle may run more than one bounded Evolution pass, and each pass
+        # writes to the same step record. Accumulate so the report keeps every
+        # candidate and attempt rather than only the final pass.
+        evolution_step = cycle_details.setdefault("steps", {}).setdefault(
+            "evolution",
+            {"hypotheses": [], "attempts": []},
+        )
+
         if evolved_hypotheses:
             for eh in evolved_hypotheses:
                 context.add_hypothesis(eh)
-            cycle_details.setdefault("steps", {})["evolution"] = {
-                "hypotheses": [h.to_dict() for h in evolved_hypotheses],
-                "attempts": evolution_attempts,
-            }
+            evolution_step["hypotheses"] = list(evolution_step.get("hypotheses") or []) + [
+                h.to_dict() for h in evolved_hypotheses
+            ]
+            evolution_step["attempts"] = list(evolution_step.get("attempts") or []) + evolution_attempts
             publish(
                 "evolution",
                 "completed",
@@ -508,10 +560,7 @@ class SupervisorAgent:
                 elapsed_seconds=time.perf_counter() - phase_started,
             )
         else:
-            cycle_details.setdefault("steps", {})["evolution"] = {
-                "hypotheses": [],
-                "attempts": evolution_attempts,
-            }
+            evolution_step["attempts"] = list(evolution_step.get("attempts") or []) + evolution_attempts
             publish(
                 "evolution",
                 "completed",
@@ -848,6 +897,8 @@ class SupervisorAgent:
 
         step_count = 0
         generation_step_count = 0
+        evolution_step_count = 0
+        ranking_step_count = 0
         stopped_reason = None
         while step_count < max_steps:
             if execution_cancelled():
@@ -918,17 +969,24 @@ class SupervisorAgent:
                                 "The non-hypothesis finalization gate still lacks a retained plan or fresh "
                                 "evidence synthesis; returning to evidence generation."
                             )
-                    elif finalization_gate["accepted_count"] < finalization_gate["required_accepted_count"]:
-                        decision.action = "GENERATE"
-                        decision.reasoning = (
-                            "Finalization gate requires more accepted hypotheses; returning to generation."
-                        )
-                    elif finalization_gate["unranked_finalist_ids"]:
+                    elif (
+                        len(finalization_gate["finalist_ids"]) >= 2
+                        and finalization_gate["unranked_finalist_ids"]
+                        and ranking_step_count < self.max_ranking_steps_per_cycle
+                    ):
+                        # Checked before the acceptance shortfall: a tournament
+                        # costs far less than another Generation batch, and a
+                        # shortfall would otherwise mask every unranked finalist.
                         decision.action = "RANK"
                         decision.reasoning = (
                             "Finalization gate found unranked finalists; returning them to the tournament."
                         )
                         decision.target_hypothesis_ids = list(finalization_gate["finalist_ids"])
+                    elif finalization_gate["accepted_count"] < finalization_gate["required_accepted_count"]:
+                        decision.action = "GENERATE"
+                        decision.reasoning = (
+                            "Finalization gate requires more accepted hypotheses; returning to generation."
+                        )
                     elif finalization_gate["missing_evidence_ids"]:
                         decision.action = "EVOLVE"
                         decision.reasoning = (
@@ -938,9 +996,6 @@ class SupervisorAgent:
             if decision.action == "GENERATE" and generation_step_count >= self.max_generation_steps_per_cycle:
                 active_hypotheses = context.get_active_hypotheses()
                 routing = _reflection_routing(active_hypotheses)
-                actions_taken = {
-                    str(item.get("action", "")).upper() for item in supervisor_decisions if isinstance(item, dict)
-                }
                 if not context.uses_hypothesis_pipeline():
                     decision.action = "FINALIZE"
                     decision.reasoning = (
@@ -955,11 +1010,33 @@ class SupervisorAgent:
                         "instead of repeating retrieval and generation."
                     )
                     decision.target_hypothesis_ids = [hypothesis.hypothesis_id for hypothesis in routing["unreviewed"]]
-                elif active_hypotheses and "EVOLVE" not in actions_taken:
+                elif ranking_step_count < self.max_ranking_steps_per_cycle and _unranked_accepted(
+                    routing["accepted"], context
+                ):
+                    # Accepted candidates that were never compared leave the
+                    # finalization gate unsatisfiable. A tournament is far
+                    # cheaper than another Generation batch, so spend the
+                    # remaining budget there before ending the Cycle.
+                    decision.action = "RANK"
+                    decision.reasoning = (
+                        "The bounded Generation batch is complete; comparing the accepted candidates that "
+                        "have no tournament record yet."
+                    )
+                    decision.target_hypothesis_ids = [hypothesis.hypothesis_id for hypothesis in routing["accepted"]]
+                elif (
+                    active_hypotheses
+                    and evolution_step_count < self.max_evolution_steps_per_cycle
+                    # An extra pass is only worth its runtime when the previous
+                    # one actually produced candidates; a barren strategy set
+                    # will stay barren on the next attempt.
+                    and (evolution_step_count == 0 or last_evolved_hypotheses)
+                ):
                     decision.action = "EVOLVE"
                     decision.reasoning = (
                         "The bounded Generation batch is complete but the acceptance gate is not met; "
-                        "using one Evolution pass to repair and diversify the strongest existing candidates."
+                        f"using Evolution pass {evolution_step_count + 1} of "
+                        f"{self.max_evolution_steps_per_cycle} to repair and diversify the strongest "
+                        "existing candidates."
                     )
                 else:
                     decision.action = "FINALIZE"
@@ -1013,6 +1090,7 @@ class SupervisorAgent:
                 )
 
             elif decision.action == "RANK":
+                ranking_step_count += 1
                 active_hypos = context.get_active_hypotheses()
                 routing = _reflection_routing(active_hypos)
                 rankable_hypos = routing["accepted"]
@@ -1033,6 +1111,7 @@ class SupervisorAgent:
                 )
 
             elif decision.action == "EVOLVE":
+                evolution_step_count += 1
                 last_evolved_hypotheses = self.step_evolution(research_goal, context, publish, cycle_details)
 
             elif decision.action == "PROXIMITY":

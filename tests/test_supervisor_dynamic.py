@@ -561,3 +561,72 @@ def test_supervisor_dynamic_cycle_safe_rank_filtering():
         for h in ranked_hypos:
             rec = str(getattr(h.reflection_report, "recommendation", "")).upper()
             assert rec == "ACCEPT", f"Non-accepted hypothesis {h.hypothesis_id} was sent to ranking"
+
+
+def test_generation_cap_runs_a_second_evolution_pass_and_ranks_the_survivors():
+    """A single ACCEPT must not end the Cycle while Evolution can still repair."""
+    supervisor = SupervisorAgent()
+    supervisor.planner.plan_next_action = Mock(
+        side_effect=lambda *_args, **_kwargs: SupervisorDecision(
+            action="GENERATE", reasoning="Accepted count is below target."
+        )
+    )
+
+    generated = [_sample_hypothesis("H1"), _sample_hypothesis("H2")]
+    evolved_batches = [[_sample_hypothesis("E1")], [_sample_hypothesis("E2")]]
+    # Reflection accepts exactly one candidate per batch, which is the shortfall
+    # that stranded the reported Cycle one comparison short of its quality gate.
+    verdicts = {"H1": "ACCEPT", "H2": "REJECT", "E1": "REVISE", "E2": "ACCEPT"}
+
+    def generate_once(_goal, context, _publish, _details):
+        for hypothesis in generated:
+            context.add_hypothesis(hypothesis)
+        return list(generated)
+
+    def reflect_once(_goal, context, _publish, _details, target_hypos=None, **_kwargs):
+        for hypothesis in target_hypos or context.get_active_hypotheses():
+            if hypothesis.reflection_report is None:
+                hypothesis.reflection_report = _sample_hypothesis(
+                    hypothesis.hypothesis_id,
+                    verdicts[hypothesis.hypothesis_id],
+                ).reflection_report
+
+    def evolve_once(_goal, context, _publish, _details):
+        batch = evolved_batches.pop(0) if evolved_batches else []
+        for hypothesis in batch:
+            context.add_hypothesis(hypothesis)
+        return batch
+
+    def rank_once(_goal, context, _publish, _details, target_hypos=None, **_kwargs):
+        ranked = target_hypos or []
+        context.tournament_results.append(
+            {
+                "hypothesis_a": ranked[0].hypothesis_id,
+                "hypothesis_b": ranked[1].hypothesis_id,
+                "outcome": "A",
+            }
+        )
+        return list(context.tournament_results)
+
+    supervisor.step_generation = Mock(side_effect=generate_once)
+    supervisor.step_reflection = Mock(side_effect=reflect_once)
+    supervisor.step_evolution = Mock(side_effect=evolve_once)
+    supervisor.step_ranking = Mock(side_effect=rank_once)
+    supervisor.step_meta_review = Mock()
+    supervisor.step_proximity = Mock(return_value={})
+
+    details = supervisor.run_dynamic_cycle(
+        ResearchGoal(description="Repair before finalizing", num_hypotheses=4),
+        ContextMemory(),
+        max_steps=10,
+        planner_mode="heuristic",
+    )
+
+    actions = [item["action"] for item in details["supervisor_decisions"]]
+    assert actions == ["GENERATE", "REFLECT", "EVOLVE", "REFLECT", "EVOLVE", "REFLECT", "RANK", "FINALIZE"]
+    assert supervisor.step_generation.call_count == 1
+    assert supervisor.step_evolution.call_count == 2
+    ranked_ids = sorted(h.hypothesis_id for h in supervisor.step_ranking.call_args.kwargs["target_hypos"])
+    assert ranked_ids == ["E2", "H1"]
+    assert details["finalization"]["completed_matches"] == 1
+    assert details["finalization"]["unranked_finalist_ids"] == []

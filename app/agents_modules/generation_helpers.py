@@ -638,6 +638,10 @@ def call_llm_for_search_queries(
         seen_aspect_ids: set[str] = set()
         seen_evidence_needs: set[str] = set()
         rejected_quotes: list[str] = []
+        # Queries are written alongside the requirements they cite, so a
+        # dropped requirement leaves live references behind. Remember its id to
+        # explain the dangling link instead of guessing at a typo.
+        rejected_requirement_ids: set[str] = set()
         for raw_aspect in raw_requirements:
             if not isinstance(raw_aspect, dict):
                 continue
@@ -659,6 +663,8 @@ def call_llm_for_search_queries(
                 or (normalized_evidence_need and normalized_evidence_need in seen_evidence_needs)
             ):
                 rejected_quotes.append(goal_quote)
+                if aspect_id:
+                    rejected_requirement_ids.add(aspect_id)
                 continue
             seen_aspect_ids.add(aspect_id)
             if normalized_evidence_need:
@@ -678,6 +684,14 @@ def call_llm_for_search_queries(
             raise ValueError(
                 "Expected 1 to 5 unique explicit requirements with verbatim goal quotes. "
                 "Rejected goal_quote values: " + json.dumps(rejected_quotes, ensure_ascii=False)
+            )
+        if rejected_quotes:
+            # A plan that survives with fewer requirements still lost coverage.
+            # Say so, because downstream only sees the requirements that passed.
+            logger.warning(
+                "Dropped %d explicit requirement(s) with non-verbatim, oversized, or duplicate goal quotes: %s",
+                len(rejected_quotes),
+                json.dumps(rejected_quotes, ensure_ascii=False),
             )
 
         valid_requirement_ids = {aspect.aspect_id for aspect in explicit_requirements}
@@ -753,10 +767,24 @@ def call_llm_for_search_queries(
                     raise ValueError("Query source_type must be academic, web, official, or news.")
                 requirement_id = str(raw_query.get("evidence_requirement_id") or "").strip() or None
                 if requirement_id and requirement_id not in valid_requirement_ids:
-                    raise ValueError(f"Unknown evidence_requirement_id {requirement_id!r}.")
+                    # These links only route coverage accounting, and both ends
+                    # are optional downstream. A query that cites a dropped or
+                    # misspelled id is still a usable search, so unlink it
+                    # rather than failing the plan and the whole research cycle.
+                    logger.warning(
+                        "Unlinking query from unknown evidence_requirement_id %r%s.",
+                        requirement_id,
+                        (
+                            " (its requirement was rejected during validation)"
+                            if requirement_id in rejected_requirement_ids
+                            else ""
+                        ),
+                    )
+                    requirement_id = None
                 hypothesis_id = str(raw_query.get("hypothesis_id") or "").strip() or None
                 if hypothesis_id and hypothesis_id not in valid_hypothesis_ids:
-                    raise ValueError(f"Unknown hypothesis_id {hypothesis_id!r}.")
+                    logger.warning("Unlinking query from unknown hypothesis_id %r.", hypothesis_id)
+                    hypothesis_id = None
                 search_intent = str(raw_query.get("search_intent") or "goal").strip().casefold()
                 search_query = SearchQuery(
                     query=query_text,

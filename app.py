@@ -1558,15 +1558,16 @@ def format_cycle_results(cycle_details: Dict, log_file: str = None) -> str:
             final_step = step_name
             break
 
-    # Fallback: use step with most hypotheses if no ranking step exists
+    # Fallback: no ranking step ran, so show the most recent reviewed batch.
+    # Steps are recorded in execution order, and picking the largest batch
+    # instead surfaced the pre-Reflection Generation candidates as "final".
     if not final_hypotheses:
-        max_count = 0
-        for sname, sdata in steps.items():
+        for sname, sdata in reversed(list(steps.items())):
             hypos = sdata.get("hypotheses", [])
-            if len(hypos) > max_count:
+            if hypos:
                 final_hypotheses = hypos
                 final_step = sname
-                max_count = len(hypos)
+                break
 
     # Assertions: final list should not be empty and no duplicate IDs (only for ranking steps)
     ranking_steps = set(step_order)
