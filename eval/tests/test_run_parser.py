@@ -179,14 +179,16 @@ def test_env_file_supplies_judge_defaults_without_overriding_the_environment(tmp
     isolated_environ.pop("LOCAL_MODEL_BASE_URL", None)
     isolated_environ.pop("LOCAL_MODEL_API_KEY", None)
 
-    applied = load_env_file(env_file)
+    loaded = load_env_file(env_file)
 
-    assert applied == {
+    assert loaded.applied == {
         "LOCAL_MODEL_BASE_URL": "http://file:1234/v1/",
         "LOCAL_MODEL_API_KEY": "file-key",
     }
     assert isolated_environ["LOCAL_MODEL_NAME"] == "from-shell"
     assert isolated_environ["LOCAL_MODEL_BASE_URL"] == "http://file:1234/v1/"
+    # The shadowed value is reported rather than silently dropped.
+    assert loaded.shadowed == {"LOCAL_MODEL_NAME": "from-file"}
 
 
 def test_env_file_values_reach_the_judge_configuration(tmp_path, isolated_environ):
@@ -222,4 +224,51 @@ def test_cli_arguments_still_win_over_the_env_file(tmp_path, isolated_environ):
 
 
 def test_a_missing_env_file_is_not_an_error(tmp_path):
-    assert load_env_file(tmp_path / "absent.env") == {}
+    assert load_env_file(tmp_path / "absent.env") == ({}, {})
+
+
+def test_an_environment_value_matching_the_file_is_not_reported_as_shadowing(tmp_path, isolated_environ):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LOCAL_MODEL_NAME=same-model\n", encoding="utf-8")
+    isolated_environ["LOCAL_MODEL_NAME"] = "same-model"
+
+    assert load_env_file(env_file).shadowed == {}
+
+
+def test_the_run_says_when_the_environment_shadows_the_env_file(monkeypatch, capsys, tmp_path):
+    """Regression: a stale shell variable silently chose a different judge.
+
+    It surfaced minutes later as the server failing to load a model the env
+    file never named, with nothing in the output connecting the two.
+    """
+    from tests.test_deepeval_metrics import parsed_run
+
+    from scripts import evaluate_run
+
+    secret = "sk-a-real-judge-key"
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"LOCAL_MODEL_NAME=unsloth/qwen3.8-27b\nLOCAL_MODEL_API_KEY={secret}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    os.environ["LOCAL_MODEL_NAME"] = "qwen/qwen3.8-27b"
+    os.environ["LOCAL_MODEL_API_KEY"] = "offline-placeholder"
+    monkeypatch.setattr(evaluate_run, "ENV_FILE", env_file)
+    monkeypatch.setattr(evaluate_run, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(evaluate_run, "parse_run", lambda *args: parsed_run())
+    monkeypatch.setattr("deepeval.models.LocalModel", lambda **kwargs: None, raising=False)
+    monkeypatch.setattr(
+        "rubrics.deepeval_metrics.evaluate_parsed_run",
+        lambda parsed, **kwargs: (_ for _ in ()).throw(RunValidationError("stop here")),
+    )
+
+    evaluate_run.main(["unused.json", "--llm-metrics", "--judge-base-url", "http://localhost:1234/v1/"])
+    captured = capsys.readouterr()
+
+    assert "LOCAL_MODEL_NAME from the environment overrides" in captured.err
+    assert "'qwen/qwen3.8-27b' instead of 'unsloth/qwen3.8-27b'" in captured.err
+    # A shadowed credential is named but never quoted, from either side.
+    assert "LOCAL_MODEL_API_KEY from the environment overrides" in captured.err
+    assert secret not in captured.err
+    assert "offline-placeholder" not in captured.err

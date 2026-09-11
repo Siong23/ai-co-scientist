@@ -9,7 +9,7 @@ import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +46,10 @@ REPORT_PREFIXES = {
 }
 
 UNSAFE_STEM_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+#: A variable whose name carries one of these holds a credential, never a
+#: value this command may print.
+SECRET_NAME_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 
 #: Judge configuration for repeat runs. Git-ignored; see .env.example.
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -289,13 +293,24 @@ def print_llm_footer(llm_report: Mapping[str, Any], report_path: Path | None) ->
             print(f"- {metric['name']}: {metric['reason']}")
 
 
-def load_env_file(path: Path) -> dict[str, str]:
+class EnvFileLoad(NamedTuple):
+    """What an env file contributed, and what the environment already decided."""
+
+    #: Variables this file put into the environment.
+    applied: dict[str, str]
+    #: File values the environment overrode, by variable name. Reported rather
+    #: than silently dropped: a stale shell variable that shadows the file is
+    #: otherwise invisible until a judge the file never named starts loading.
+    shadowed: dict[str, str]
+
+
+def load_env_file(path: Path) -> EnvFileLoad:
     """Merge ``KEY=value`` lines from an env file into the process environment.
 
     A variable already in the environment is never overwritten: the file is a
     default for repeat runs, not an override of what the shell or CI has set.
     Everything after the first ``=`` is the value, so an inline ``#`` is part of
-    it rather than a comment. Returns only the variables this call applied.
+    it rather than a comment.
 
     DeepEval reads a ``.env`` of its own on import, but relying on that would
     tie this command's configuration to a third-party import side effect and to
@@ -306,9 +321,10 @@ def load_env_file(path: Path) -> dict[str, str]:
     except OSError:
         # No env file is ordinary: the judge can still come from the shell or
         # from --judge-model and --judge-base-url.
-        return {}
+        return EnvFileLoad({}, {})
 
     applied: dict[str, str] = {}
+    shadowed: dict[str, str] = {}
     for line in raw.splitlines():
         entry = line.strip().removeprefix("export ").lstrip()
         if not entry or entry.startswith("#"):
@@ -319,11 +335,15 @@ def load_env_file(path: Path) -> dict[str, str]:
         name, value = name.strip(), value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        if not name or name in os.environ:
+        if not name:
+            continue
+        if name in os.environ:
+            if os.environ[name] != value:
+                shadowed[name] = value
             continue
         os.environ[name] = value
         applied[name] = value
-    return applied
+    return EnvFileLoad(applied, shadowed)
 
 
 def configure_local_judge(model: str | None, base_url: str | None) -> dict[str, str]:
@@ -351,18 +371,23 @@ def configure_local_judge(model: str | None, base_url: str | None) -> dict[str, 
     return {"provider": "local", "model": model, "base_url": base_url}
 
 
+def names_a_secret(name: str) -> bool:
+    """Whether a variable's name marks its value as a credential."""
+    upper_name = name.upper()
+    return any(marker in upper_name for marker in SECRET_NAME_MARKERS)
+
+
 def redact_environment_secrets(message: str) -> str:
     """Remove environment-provided credentials from an error before printing it."""
     redacted = message
     for name, value in os.environ.items():
-        upper_name = name.upper()
-        if value and len(value) >= 4 and any(marker in upper_name for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+        if value and len(value) >= 4 and names_a_secret(name):
             redacted = redacted.replace(value, "[REDACTED]")
     return redacted
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_env_file(ENV_FILE)
+    env_file = load_env_file(ENV_FILE)
     args = build_parser().parse_args(argv)
     try:
         parsed = parse_run(args.run_json, args.goal_file)
@@ -377,6 +402,21 @@ def main(argv: list[str] | None = None) -> int:
         # Import only in opt-in mode so deterministic parsing remains separate
         # from DeepEval and never initializes a judge provider.
         from rubrics.deepeval_metrics import LLMEvaluationError, evaluate_parsed_run
+
+        # Say so before the judge is contacted. A shadowed LOCAL_MODEL_NAME
+        # otherwise shows up as a model the env file never named, minutes later,
+        # in whatever the server says when it fails to load it.
+        for name, file_value in env_file.shadowed.items():
+            # Name the variable always; show what it chose only when the name
+            # does not mark it a credential. Both values are the file's and the
+            # environment's, and either could be a real key.
+            chose = "" if names_a_secret(name) else f" ({os.environ[name]!r} instead of {file_value!r})"
+            print(
+                redact_environment_secrets(
+                    f"Note: {name} from the environment overrides {display_path(ENV_FILE)}{chose}"
+                ),
+                file=sys.stderr,
+            )
 
         try:
             judge = configure_local_judge(args.judge_model, args.judge_base_url)

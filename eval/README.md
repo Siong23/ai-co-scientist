@@ -104,6 +104,17 @@ still work with `$env:LOCAL_MODEL_NAME = "..."` or the CLI flags, and CI keeps
 setting its own values. Everything after the first `=` is the value, so an
 inline `#` is part of it rather than a comment.
 
+That precedence is easy to forget once a shell variable has been sitting in a
+session for an hour, so an `--llm-metrics` run says when one shadows the file:
+
+```text
+Note: LOCAL_MODEL_NAME from the environment overrides .env ('qwen/qwen3.8-27b' instead of 'unsloth/qwen3.8-27b')
+```
+
+Without it a stale `$env:LOCAL_MODEL_NAME` is invisible until the server fails
+to load a model the env file never named. Credentials are named but never
+quoted, from either side.
+
 `.env` is git-ignored and `.env.example` is the committed template — keep real
 credentials out of the template. `LOCAL_MODEL_API_KEY` is a non-secret
 placeholder whenever the LM Studio server has authentication disabled, which is
