@@ -1,0 +1,1 @@
+Develop and empirically validate a novel deep-learning approach for improving multiclass network intrusion detection on the provided 5G-NIDD dataset, with particular emphasis on weighted F1, macro F1, and reliable detection of minority attack classes.
