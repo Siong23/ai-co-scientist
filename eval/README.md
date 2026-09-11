@@ -119,8 +119,46 @@ These are DeepEval's own implementations rather than GEval rewrites of them.
 | Metric | Test-case fields | What it measures |
 | --- | --- | --- |
 | `AnswerRelevancyMetric` | `input`, `actual_output` | Whether the selected hypothesis actually responds to the research goal. Runs even when no evidence text exists. |
-| `FaithfulnessMetric` | `input`, `actual_output`, `retrieval_context` | Whether the hypothesis's claims are supported by the retrieved evidence. **Skipped** without substantive evidence text. |
+| `FaithfulnessMetric` | `input`, `actual_output`, `retrieval_context` | Whether the hypothesis's claims are supported by the retrieved evidence. **Skipped** without substantive evidence text. Runs with `truths_extraction_limit=5`; see below. |
 | `ContextualRelevancyMetric` | `input`, `retrieval_context` | Whether the evidence retrieved for the hypothesis is relevant to the research goal. **Skipped** without substantive evidence text. DeepEval 4.2.2 scores the context against the input only, so `actual_output` is not among this metric's required params. |
+
+#### Why Faithfulness caps its truth extraction
+
+`FaithfulnessMetric` works in two stages: it distils the retrieval context into
+a list of truths, then checks each claim in the hypothesis against that list.
+Left uncapped — DeepEval's default — the first stage is unbounded, and on one
+real run it produced **141 truths**, among them the paper's title, its authors,
+their affiliations, and their e-mail addresses. A hypothesis was then scored on
+whether it contradicted a list of e-mail addresses.
+
+That cost more than the noise it added. Measured against this project's local
+judge on a run with 3 evidence sources and 11 passages:
+
+| `truths_extraction_limit` | truths | generated tokens | wall clock |
+| --- | --- | --- | --- |
+| unset (DeepEval default) | 141 | 34,220 | 6 min 20 s |
+| 10 | 10 | 2,818 | 38 s |
+| **5 (this project)** | **5** | **1,378** | **21 s** |
+
+And that is only the first of the metric's four sequential calls: the truths are
+fed back into the verdict prompt in full, so an uncapped run also enlarges the
+stage after it — which is where the judge ran out of room and returned the
+unparseable JSON that DeepEval reports as `Evaluation LLM outputted an invalid
+JSON. Please use a better evaluation model.` The model was not the problem.
+
+Capping also makes the metric more permissive, and that cuts both ways. The
+score is the share of the hypothesis's claims that no truth contradicts, so
+fewer truths mean fewer chances to be contradicted: a capped run scores at least
+as high as an uncapped one on the same hypothesis, never lower. Read a
+Faithfulness of 1.0 as "nothing in the five most important retrieved facts
+contradicts this", not as "every claim was verified".
+
+The limit is 5 rather than 10 because raising it does not buy breadth. DeepEval
+joins every passage into one string before asking, so "per document" has no
+effect here: at both 5 and 10, every truth came from whichever source appears
+first. **Faithfulness therefore checks claims mainly against the first evidence
+source, not evenly across all of them** — a limitation of the metric worth
+stating in any write-up that quotes its score.
 
 ### Evidence support (`legacy`) — superseded
 

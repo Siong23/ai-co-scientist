@@ -12,7 +12,7 @@ supplied, and fixed steps judge more reproducibly than a generated rubric.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from deepeval.metrics import (
@@ -44,6 +44,14 @@ from rubrics.suites import (
 KIND_GEVAL = "geval"
 KIND_DAG = "dag"
 
+#: Truths per evidence document for Faithfulness. Left unset, DeepEval asks for
+#: every undisputed truth in the retrieval context, and on a real run that meant
+#: 141 statements -- author names, affiliations, and e-mail addresses among them
+#: -- which a hypothesis is then checked against. Those cost 6+ minutes to
+#: generate, and they re-enter the verdict prompt in full, where the judge ran
+#: out of room and returned unparseable JSON. Capping the extraction keeps the
+#: truths to the ones a claim could actually contradict.
+FAITHFULNESS_TRUTHS_LIMIT = 5
 KIND_ANSWER_RELEVANCY = "answer_relevancy"
 KIND_FAITHFULNESS = "faithfulness"
 KIND_CONTEXTUAL_RELEVANCY = "contextual_relevancy"
@@ -70,6 +78,9 @@ class MetricSpec:
     #: Builds this metric's decision tree. DAG metrics only, and called once per
     #: construction because nodes cache their verdict across a ``measure`` call.
     dag_builder: Callable[[], Any] | None = None
+    #: Constructor arguments particular to one metric class, such as a built-in
+    #: metric's own tuning knobs.
+    extra_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def requires_retrieval_context(self) -> bool:
@@ -96,6 +107,7 @@ class MetricSpec:
                 raise LLMEvaluationError(f"metric {self.name!r} is a DAG metric but declares no dag_builder")
             kwargs["name"] = self.name
             kwargs["dag"] = self.dag_builder()
+        kwargs.update(self.extra_kwargs)
         return kwargs
 
 
@@ -209,6 +221,7 @@ METRIC_DEFINITIONS: tuple[MetricSpec, ...] = (
             SingleTurnParams.ACTUAL_OUTPUT,
             SingleTurnParams.RETRIEVAL_CONTEXT,
         ),
+        extra_kwargs={"truths_extraction_limit": FAITHFULNESS_TRUTHS_LIMIT},
     ),
     # DeepEval 4.2.2 scores the retrieval context against the input alone here;
     # ACTUAL_OUTPUT is deliberately absent because the metric never reads it.

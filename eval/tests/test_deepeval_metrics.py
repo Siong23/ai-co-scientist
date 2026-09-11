@@ -16,6 +16,7 @@ from deepeval.metrics import (
 from deepeval.models.base_model import DeepEvalBaseLLM
 from rubrics.deepeval_metrics import (
     DEFAULT_METRIC_FACTORIES,
+    FAITHFULNESS_TRUTHS_LIMIT,
     KIND_ANSWER_RELEVANCY,
     KIND_CONTEXTUAL_RELEVANCY,
     KIND_FAITHFULNESS,
@@ -368,8 +369,33 @@ def test_builtin_specs_declare_exactly_the_params_deepeval_requires(kind, metric
     assert DEFAULT_METRIC_FACTORIES[kind] is metric_class
     assert list(spec.evaluation_params) == list(metric_class._required_params)
     # Built-in metrics reject GEval-only rubric arguments.
-    assert set(spec.build_kwargs(threshold=0.7, model=None)) == {"threshold", "model", "async_mode"}
+    kwargs = spec.build_kwargs(threshold=0.7, model=None)
+    assert {"criteria", "evaluation_steps", "evaluation_params", "name", "dag"}.isdisjoint(kwargs)
+    assert {"threshold", "model", "async_mode"} <= set(kwargs)
     metric_class(**spec.build_kwargs(threshold=0.7, model=StubJudge()))
+
+
+def test_faithfulness_caps_how_many_truths_it_extracts():
+    """Uncapped, one real run yielded 141 truths -- author e-mails included.
+
+    They cost minutes to generate and re-enter the verdict prompt in full, where
+    the judge ran out of room and returned unparseable JSON.
+    """
+    spec = next(spec for spec in METRIC_DEFINITIONS if spec.kind == KIND_FAITHFULNESS)
+
+    kwargs = spec.build_kwargs(threshold=0.7, model=None)
+
+    assert kwargs["truths_extraction_limit"] == FAITHFULNESS_TRUTHS_LIMIT
+    assert FaithfulnessMetric(**spec.build_kwargs(threshold=0.7, model=StubJudge())).truths_extraction_limit == (
+        FAITHFULNESS_TRUTHS_LIMIT
+    )
+
+
+def test_no_other_metric_carries_faithfulness_only_tuning():
+    for spec in METRIC_DEFINITIONS:
+        if spec.kind == KIND_FAITHFULNESS:
+            continue
+        assert "truths_extraction_limit" not in spec.build_kwargs(threshold=0.7, model=None), spec.name
 
 
 def test_every_metric_kind_has_a_factory():
