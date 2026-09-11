@@ -42,18 +42,67 @@ remains the switch that enables LLM judging at all.
 
 | Suite | Metrics | Answers |
 | --- | --- | --- |
-| `hypothesis` | Goal alignment, Scientific testability, Feasibility, Scientific plausibility, Novelty vs retrieved prior art | Is the idea itself any good? |
+| `hypothesis` | Goal alignment, Experimental readiness, Scientific testability, Feasibility, Scientific plausibility, Novelty vs retrieved prior art | Is the idea itself any good, and could anyone run it? |
 | `rag` | Answer relevancy, Faithfulness, Contextual relevancy | Is it grounded in what was retrieved? |
 | `all` (default) | `hypothesis` + `rag` | Both of the above. |
 | `legacy` | Evidence support | The superseded custom metric (see below). |
 
 `all` deliberately excludes `legacy`.
 
-### `hypothesis` — custom `GEval` metrics
+### `hypothesis` — custom metrics
 
-Each is a `GEval` metric defined with explicit `evaluation_steps` (never
-`criteria` as well) so that judging is as reproducible as an LLM judge allows.
-Scores are DeepEval's 0–1 scale, higher is better.
+Scores are DeepEval's 0–1 scale, higher is better. One metric is a `DAGMetric`
+(below); the rest are `GEval` metrics defined with explicit `evaluation_steps`
+(never `criteria` as well) so that judging is as reproducible as an LLM judge
+allows.
+
+#### Experimental readiness — a `DAGMetric`
+
+"Could someone actually run this?" is not a matter of opinion, so it is not
+scored like one. A hypothesis is executable exactly when it names the four
+things an experimenter needs before touching any equipment, and this metric asks
+for them one rung at a time:
+
+| Rung | The question it asks | Score if absent |
+| --- | --- | --- |
+| intervention | What gets manipulated — the independent variable? | 0.0 |
+| measurement | What gets recorded — the dependent variable? | 0.4 |
+| comparison | What is the result judged against — a control or baseline? | 0.6 |
+| prediction | Which way is the effect expected to go? | 0.8 |
+| — | all four present | 1.0 |
+
+The ladder is ordered by dependency, not by importance. A dependent variable
+means nothing without an intervention to attribute it to, and a predicted
+direction means nothing without something to measure, so a hypothesis that fails
+an early rung cannot be rescued by a later one. The gap between a missing
+intervention and every other failure is deliberate: without a manipulated
+variable there is no experiment to design at all.
+
+**Why a DAG rather than another GEval.** A GEval judge returns one holistic 0–1
+opinion that moves between runs and cannot be audited. Here each rung is a
+separate yes/no judgement and the score is fixed by the graph, so every lost
+point names the slot that was left empty. "0.6, because it states no comparator"
+is reviewable in a way that "0.6" is not.
+
+Every rung reads `input` and `actual_output` only, never `retrieval_context`:
+readiness is a property of the hypothesis text, and a slot that only the
+retrieved evidence fills is still a slot the hypothesis left empty. Each rung
+also tells the judge not to supply the missing piece from its own domain
+knowledge — judges reliably repair a vague hypothesis by inventing the obvious
+metric or the conventional baseline, which is precisely the failure this metric
+exists to detect.
+
+The tree short-circuits at the first "no", so a hypothesis naming no
+intervention costs one judge call while one that clears every rung costs four.
+
+`Experimental readiness` and `Scientific testability` overlap: both ask whether
+the hypothesis can be put to a test. They are kept separate because they fail
+differently — readiness reports *which* slot is empty and scores identically on
+repeat runs, while testability gives a holistic judgement that also reacts to
+how convincingly the test is framed. Read readiness first; treat testability as
+corroboration, not as a second independent vote.
+
+#### The `GEval` metrics
 
 | Metric | Test-case fields | What it measures |
 | --- | --- | --- |
@@ -243,6 +292,105 @@ The selection behavior intentionally mirrors `app.run_store._final_hypotheses`:
 otherwise the first step containing hypotheses is used. Empty ranking steps are
 skipped. Within the selected candidates, the highest numeric `elo_score` is
 chosen (a missing score has the application's default value of zero).
+
+### Judge timeouts
+
+DeepEval caps every judge call: `DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS` defaults
+to 88.5 seconds and `DEEPEVAL_PER_TASK_TIMEOUT_SECONDS` to 180. A metric makes
+several calls in sequence, so a slow local judge exhausts the task budget and
+fails with `RetryError[<Future ... raised TimeoutError>]` rather than a score.
+
+Reasoning models are the usual cause. On one 27B reasoning model served by LM
+Studio, a single short judging call took ~16 seconds and spent 368 of its 426
+generated tokens on hidden reasoning — the visible verdict was the small
+remainder. Raise both budgets before running:
+
+```shell
+export DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE=2400
+export DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE=900
+```
+
+A smaller non-reasoning judge is the cheaper fix, at the cost of judging
+quality. Whichever you pick, keep it fixed across every run you intend to
+compare.
+
+## Step-by-step: evaluating one run
+
+PowerShell, from `eval/`. Substitute your own run id, goal file, judge model,
+and endpoint. Forward slashes work throughout.
+
+**1. Install the project.**
+
+```powershell
+uv sync
+```
+
+**2. Find the goal file matching the run.** The evaluator refuses to score a run
+against a goal it was not produced for, so check first:
+
+```powershell
+Get-ChildItem ../results/runs/*.json | ForEach-Object { $g = (Get-Content $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json).research_goal; if ($g -is [string]) { $d = $g } else { $d = $g.description }; [PSCustomObject]@{ Run = $_.Name; Goal = $d.Substring(0, [Math]::Min(60, $d.Length)) } } | Format-Table -AutoSize
+```
+
+A wrong choice fails with `research goal mismatch: expected ... found ...`.
+
+**3. Parse the run offline first.** No `--llm-metrics` means no model is called
+and nothing is spent:
+
+```powershell
+uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json --goal-file goals/<goal>.txt
+```
+
+Confirm `goal_matches` is true, the selected hypothesis has text, and
+`evidence_sources` carries real passages rather than citation metadata alone.
+That last point decides whether the `rag` metrics will run or be skipped.
+
+**4. Configure the judge.** The API key is required even against an
+unauthenticated server, where it is only a non-secret placeholder:
+
+```powershell
+$env:LOCAL_MODEL_API_KEY = "lm-studio"; $env:LOCAL_MODEL_BASE_URL = "http://127.0.0.1:1234/v1/"; $env:LOCAL_MODEL_NAME = "<loaded-model-id>"
+```
+
+```powershell
+$env:DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE = "2400"; $env:DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE = "900"
+```
+
+Check the model actually loads before starting a long run — a server short on
+memory answers `Failed to load model` to the first request.
+
+**5. Score the hypothesis.**
+
+```powershell
+uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json --goal-file goals/<goal>.txt --llm-metrics --metric-suite hypothesis --threshold 0.7 --report reports/hyp-<run-id>.json
+```
+
+**6. Score its grounding.**
+
+```powershell
+uv run python scripts/evaluate_run.py ../results/runs/<run-id>.json --goal-file goals/<goal>.txt --llm-metrics --metric-suite rag --threshold 0.7 --report reports/rag-<run-id>.json
+```
+
+Run the suites separately rather than reaching for `--metric-suite all`.
+DeepEval's own guidance is no more than about five metrics at a time, and a
+mixed report makes a retrieval failure and a reasoning failure look alike.
+
+**7. Read the report.**
+
+```powershell
+$r = Get-Content reports/hyp-<run-id>.json -Raw -Encoding UTF8 | ConvertFrom-Json; $r.llm_evaluation.metrics | Format-Table name, status, score, threshold, passed -AutoSize
+```
+
+```powershell
+$r.llm_evaluation.metrics | ForEach-Object { "$($_.name): $($_.reason)" }
+```
+
+The reasons matter more than the numbers. `Experimental readiness` in particular
+names the missing slot, which is the part that tells you what to fix.
+
+One run scores one hypothesis and settles nothing on its own. For comparisons
+across goals, conditions, and repeats, use `scripts/idea_bench.py` — see
+`IDEA_BENCH_GUIDE.md`.
 
 ## Deferred metrics
 

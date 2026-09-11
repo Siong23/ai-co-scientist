@@ -18,12 +18,19 @@ from typing import Any
 from deepeval.metrics import (
     AnswerRelevancyMetric,
     ContextualRelevancyMetric,
+    DAGMetric,
     FaithfulnessMetric,
     GEval,
 )
 from deepeval.test_case import LLMTestCase, SingleTurnParams
 
 from rubrics.errors import LLMEvaluationError
+from rubrics.experimental_readiness import (
+    EVALUATION_PARAMS as READINESS_PARAMS,
+)
+from rubrics.experimental_readiness import (
+    build_experimental_readiness_dag,
+)
 from rubrics.retrieval_context import RetrievalContext, extract_retrieval_context
 from rubrics.suites import (
     DEFAULT_METRIC_SUITE,
@@ -35,6 +42,8 @@ from rubrics.suites import (
 )
 
 KIND_GEVAL = "geval"
+KIND_DAG = "dag"
+
 KIND_ANSWER_RELEVANCY = "answer_relevancy"
 KIND_FAITHFULNESS = "faithfulness"
 KIND_CONTEXTUAL_RELEVANCY = "contextual_relevancy"
@@ -42,6 +51,7 @@ KIND_CONTEXTUAL_RELEVANCY = "contextual_relevancy"
 #: Metric classes per kind; tests substitute fakes so the suite stays offline.
 DEFAULT_METRIC_FACTORIES: Mapping[str, Callable[..., Any]] = {
     KIND_GEVAL: GEval,
+    KIND_DAG: DAGMetric,
     KIND_ANSWER_RELEVANCY: AnswerRelevancyMetric,
     KIND_FAITHFULNESS: FaithfulnessMetric,
     KIND_CONTEXTUAL_RELEVANCY: ContextualRelevancyMetric,
@@ -57,6 +67,9 @@ class MetricSpec:
     kind: str
     evaluation_params: tuple[SingleTurnParams, ...]
     evaluation_steps: tuple[str, ...] = ()
+    #: Builds this metric's decision tree. DAG metrics only, and called once per
+    #: construction because nodes cache their verdict across a ``measure`` call.
+    dag_builder: Callable[[], Any] | None = None
 
     @property
     def requires_retrieval_context(self) -> bool:
@@ -76,6 +89,13 @@ class MetricSpec:
             kwargs["name"] = self.name
             kwargs["evaluation_params"] = list(self.evaluation_params)
             kwargs["evaluation_steps"] = list(self.evaluation_steps)
+        elif self.kind == KIND_DAG:
+            # A DAG carries its rubric in the graph: each node holds its own
+            # criteria and evaluation_params, so the metric takes neither.
+            if self.dag_builder is None:
+                raise LLMEvaluationError(f"metric {self.name!r} is a DAG metric but declares no dag_builder")
+            kwargs["name"] = self.name
+            kwargs["dag"] = self.dag_builder()
         return kwargs
 
 
@@ -92,6 +112,17 @@ METRIC_DEFINITIONS: tuple[MetricSpec, ...] = (
             "Score how directly and completely the hypothesis addresses the stated goal, penalizing "
             "tangential, generic, or only partially responsive proposals.",
         ),
+    ),
+    # Placed directly after goal alignment because the two answer the pipeline's
+    # first two questions: is this hypothesis about the right thing, and could
+    # anyone actually run it. A DAG rather than a GEval so that each lost point
+    # names the slot the hypothesis left empty; see experimental_readiness.
+    MetricSpec(
+        name="Experimental readiness",
+        suite=SUITE_HYPOTHESIS,
+        kind=KIND_DAG,
+        evaluation_params=tuple(READINESS_PARAMS),
+        dag_builder=build_experimental_readiness_dag,
     ),
     MetricSpec(
         name="Scientific testability",

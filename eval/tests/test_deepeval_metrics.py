@@ -39,6 +39,7 @@ GOAL = "Improve perovskite humidity stability."
 
 HYPOTHESIS_METRICS = [
     "Goal alignment",
+    "Experimental readiness",
     "Scientific testability",
     "Feasibility",
     "Scientific plausibility",
@@ -169,6 +170,7 @@ def test_all_suite_never_double_counts_evidence_support():
 def test_hypothesis_suite_scores_every_hypothesis_metric(fake_factories):
     FakeMetric.scores = {
         "Goal alignment": 0.9,
+        "Experimental readiness": 0.8,
         "Scientific testability": 0.6,
         "Feasibility": 0.75,
         "Scientific plausibility": 0.82,
@@ -177,8 +179,9 @@ def test_hypothesis_suite_scores_every_hypothesis_metric(fake_factories):
     report = evaluate_parsed_run(parsed_run(), threshold=0.7, suite="hypothesis", metric_factories=fake_factories)
 
     assert names(report) == HYPOTHESIS_METRICS
-    assert [metric["status"] for metric in report["metrics"]] == ["completed"] * 5
+    assert [metric["status"] for metric in report["metrics"]] == ["completed"] * len(HYPOTHESIS_METRICS)
     assert by_name(report, "Goal alignment")["score"] == 0.9
+    assert by_name(report, "Experimental readiness")["score"] == 0.8
     assert by_name(report, "Feasibility")["score"] == 0.75
     assert by_name(report, "Scientific plausibility")["score"] == 0.82
     # One metric below threshold fails the run.
