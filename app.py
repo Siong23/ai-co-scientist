@@ -12,6 +12,7 @@ from numpy.ma import count  # noqa: F401
 
 from app.agents import SupervisorAgent
 from app.config import config
+from app.data.dataset_manager import DatasetManager
 from app.experiments.experiment_orchestrator import (
     ExperimentOrchestrator,
 )
@@ -40,7 +41,6 @@ from app.utils import (
     logger,
     redact_secrets,
 )
-from app.data.dataset_manager import DatasetManager
 
 # Global state for the Gradio app
 global_context = ContextMemory()
