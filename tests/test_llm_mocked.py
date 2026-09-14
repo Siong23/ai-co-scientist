@@ -618,6 +618,7 @@ def test_reflection_agent_stores_sub_claim_assessments_on_report():
     with (
         patch("app.agents_modules.reflection.call_llm_for_reflection", return_value=review),
         patch("app.agents_modules.reflection.evaluate_claims", return_value=claim_assessment),
+        patch("app.agents_modules.reflection.call_llm_for_deep_verification", return_value={}),
     ):
         ReflectionAgent().review_hypotheses(
             [hypothesis],
@@ -661,6 +662,7 @@ def test_reflection_agent_reviews_independent_hypotheses_concurrently():
             "app.agents_modules.reflection.evaluate_claims",
             return_value={"claims": [], "overall_confidence": 8.0},
         ) as evaluate,
+        patch("app.agents_modules.reflection.call_llm_for_deep_verification", return_value={}),
         patch.dict("app.agents_modules.reflection.config", {"reflection": {"max_workers": 3}}),
     ):
         ReflectionAgent().review_hypotheses(
@@ -707,6 +709,7 @@ def test_reflection_agent_does_not_rewrite_revise_hypothesis_in_place():
             "app.agents_modules.reflection.evaluate_claims",
             return_value={"claims": [], "overall_confidence": 1.0},
         ),
+        patch("app.agents_modules.reflection.call_llm_for_deep_verification", return_value={}),
     ):
         ReflectionAgent().review_hypotheses(
             [hypothesis],

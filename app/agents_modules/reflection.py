@@ -10,10 +10,12 @@ from ..models import ContextMemory, Hypothesis, ReflectionReport, ResearchGoal
 from ..utils import execution_cancelled, logger, redact_secrets
 from .evolution_helpers import create_evolved_hypothesis, validate_evolution_candidate
 from .reflection_helpers import (
+    call_llm_for_deep_verification,
     call_llm_for_hypothesis_revision,
     call_llm_for_reflection,
     evaluate_claims,
     recommendation_after_claim_assessment,
+    recommendation_after_deep_verification,
 )
 
 
@@ -38,6 +40,8 @@ def _build_reflection_report(result: Dict) -> Optional[ReflectionReport]:
         claims=result.get("claims", []),
         proposed_tests=result.get("proposed_tests", []),
         overall_confidence=result.get("overall_confidence", 1.0),
+        assumptions=result.get("assumptions", []),
+        deep_verification_summary=result.get("deep_verification_summary", ""),
         review_comments=[result["comment"]] if result.get("comment") else [],
     )
 
@@ -93,6 +97,21 @@ class ReflectionAgent:
                     )
                 )
                 result["recommendation"] = recommendation_after_claim_assessment(result)
+
+                # The combined review scores the hypothesis as a whole, which
+                # lets one unsound step hide inside an otherwise convincing
+                # argument.  Decomposition judges each assumption on its own.
+                if config.get("reflection", {}).get("deep_verification_enabled", True):
+                    result.update(
+                        call_llm_for_deep_verification(
+                            h,
+                            research_goal,
+                            temperature=reflect_temp,
+                            model=research_goal.llm_model,
+                        )
+                    )
+                    result["recommendation"] = recommendation_after_deep_verification(result)
+
                 reflection_report = _build_reflection_report(result)
             h.reflection_report = reflection_report
 

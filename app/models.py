@@ -276,6 +276,22 @@ class PairwiseDecision(BaseModel):
     reasoning: str
 
 
+class AssumptionVerdict(BaseModel):
+    """One decontextualized assumption from the deep verification review.
+
+    ``fundamental`` records whether the hypothesis collapses without the
+    assumption.  An invalid but peripheral assumption is repairable during
+    refinement, so it must not be confused with an invalidating one.
+    """
+
+    assumption: str
+
+    status: Literal["VALID", "UNCERTAIN", "INVALID"] = "UNCERTAIN"
+
+    fundamental: bool = False
+    reasoning: str = ""
+
+
 class ClaimAssessment(BaseModel):
     claim: str
 
@@ -321,6 +337,9 @@ class ReflectionReport(BaseModel):
     claims: List[ClaimAssessment] = []
     proposed_tests: List[str] = Field(default_factory=list)
     overall_confidence: float = Field(default=1.0, ge=1.0, le=10.0)
+
+    assumptions: List[AssumptionVerdict] = []
+    deep_verification_summary: str = ""
 
 
 ###############################################################################

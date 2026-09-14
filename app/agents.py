@@ -53,8 +53,10 @@ from .agents_modules.ranking_helpers import (
 )
 from .agents_modules.reflection import ReflectionAgent
 from .agents_modules.reflection_helpers import (
+    call_llm_for_deep_verification,
     call_llm_for_hypothesis_revision,
     call_llm_for_reflection,
+    recommendation_after_deep_verification,
 )
 from .agents_modules.supervisor import SupervisorAgent
 from .agents_modules.supervisor_planner import (
@@ -69,7 +71,7 @@ from .agents_modules.supervisor_planner import (
     parse_supervisor_decision,
 )
 from .evidence import EvidenceChunk, EvidenceDocument, EvidenceSource
-from .models import ContextMemory, Hypothesis, ResearchGoal
+from .models import AssumptionVerdict, ContextMemory, Hypothesis, ResearchGoal
 from .rag_retriever import (
     ArxivRAGRetriever,
     EvidenceAspect,
@@ -92,6 +94,7 @@ from .utils import (
 __all__ = [
     "ArxivRAGRetriever",
     "AbstractScreeningResult",
+    "AssumptionVerdict",
     "ContextMemory",
     "EvidenceAspect",
     "EvidenceChunk",
@@ -124,6 +127,7 @@ __all__ = [
     "call_llm",
     "call_llm_for_abstract_screening",
     "call_llm_for_debate_refinement",
+    "call_llm_for_deep_verification",
     "call_llm_for_evidence_coverage",
     "call_llm_for_focus_area_identification",
     "call_llm_for_evolution",
@@ -152,6 +156,7 @@ __all__ = [
     "parse_evolution_response",
     "parse_supervisor_decision",
     "presentation_order",
+    "recommendation_after_deep_verification",
     "redact_secrets",
     "run_debate_rounds",
     "run_pairwise_debate",

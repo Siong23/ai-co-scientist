@@ -266,6 +266,23 @@ def format_reflection_report(
     else:
         output.append("No claim assessments provided.")
 
+    assumptions = getattr(report, "assumptions", None) or []
+
+    if assumptions:
+        output.extend(["", "Deep Verification of Assumptions:"])
+        for assumption in assumptions:
+            scope = "fundamental" if getattr(assumption, "fundamental", False) else "peripheral"
+            output.append(
+                f"- [{getattr(assumption, 'status', 'UNCERTAIN')}, {scope}] {getattr(assumption, 'assumption', '')}"
+            )
+        summary = getattr(report, "deep_verification_summary", "")
+        if summary:
+            output.append(f"Verification summary: {summary}")
+        output.append(
+            "An UNCERTAIN assumption is unsettled, not refuted; do not penalize a "
+            "hypothesis for proposing something that has yet to be tested."
+        )
+
     output.extend(
         [
             "",

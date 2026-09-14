@@ -12,6 +12,7 @@ from app.agents_modules.reflection_helpers import (
     function_to_get_supporting_evidence,
     recommendation_after_claim_assessment,
 )
+from app.config import config
 from app.models import ClaimAssessment, Hypothesis, ReflectionReport
 
 
@@ -66,6 +67,9 @@ def test_reflection_separates_predictions_from_grounded_premises(monkeypatch, pr
             }
         )
 
+    # This test covers the claim-assessment gate; deep verification has its own
+    # prompt and its own tests, and would consume this fake's single response.
+    monkeypatch.setitem(config["reflection"], "deep_verification_enabled", False)
     monkeypatch.setattr("app.agents.call_llm", fake_llm)
     monkeypatch.setattr("app.agents_modules.reflection_helpers.ResearchRetriever.retrieve", lambda *a, **k: [])
     context = ContextMemory()

@@ -6,7 +6,8 @@ import json
 import re
 from typing import Any, Dict, List
 
-from ..models import ClaimAssessment, ContextMemory, Hypothesis, ResearchGoal
+from ..config import config
+from ..models import AssumptionVerdict, ClaimAssessment, ContextMemory, Hypothesis, ResearchGoal
 from ..rag_retriever import ResearchRetriever, SearchQuery, SearchQueryPlan, serialize_documents
 from ..utils import logger
 from .generation_helpers import _call_llm, call_llm_for_generation
@@ -72,6 +73,153 @@ def recommendation_after_claim_assessment(review: Dict[str, Any]) -> str:
     if not confidences or min(confidences) < 4.0 or overall_confidence < 5.0:
         return "REVISE"
     return recommendation
+
+
+def recommendation_after_deep_verification(review: Dict[str, Any]) -> str:
+    """Downgrade the verdict when decomposition invalidates an assumption.
+
+    An invalid assumption disqualifies the hypothesis only when the hypothesis
+    depends on it.  A peripheral error is left for a later refinement pass,
+    which in this system is the Evolution agent's job, so it downgrades an
+    ACCEPT to REVISE instead of rejecting outright.  Gates only ever lower a
+    verdict: a clean decomposition cannot rescue a hypothesis the rubric or the
+    claim assessment already rejected.
+    """
+
+    recommendation = str(review.get("recommendation", "UNREVIEWED")).strip().upper()
+    if recommendation in {"REJECT", "UNREVIEWED"}:
+        return recommendation
+
+    invalid = [
+        assumption
+        for assumption in review.get("assumptions", [])
+        if isinstance(assumption, dict) and str(assumption.get("status", "")).upper() == "INVALID"
+    ]
+    if not invalid:
+        return recommendation
+    if any(bool(assumption.get("fundamental")) for assumption in invalid):
+        return "REJECT"
+    return "REVISE"
+
+
+def _parse_deep_verification_response(response: str, max_assumptions: int) -> Dict[str, Any]:
+    """Parse the decomposition into verdicts, discarding anything malformed.
+
+    A failed parse returns no assumptions so the caller leaves the review's
+    verdict untouched.  Inventing a verdict here would let a transport failure
+    reject a sound hypothesis.
+    """
+
+    try:
+        payload = json.loads(_strip_fenced_json(response))
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Could not parse the deep verification response.")
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    verdicts: List[Dict[str, Any]] = []
+    for item in payload.get("assumptions") or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("assumption", "")).strip()
+        if not text:
+            continue
+        status = str(item.get("status", "")).strip().upper()
+        if status not in {"VALID", "UNCERTAIN", "INVALID"}:
+            status = "UNCERTAIN"
+        verdict = AssumptionVerdict(
+            assumption=text[:600],
+            status=status,
+            fundamental=bool(item.get("fundamental", False)),
+            reasoning=str(item.get("reasoning", "")).strip()[:600],
+        )
+        verdicts.append(verdict.model_dump())
+        if len(verdicts) >= max_assumptions:
+            break
+
+    if not verdicts:
+        return {}
+    return {
+        "assumptions": verdicts,
+        "deep_verification_summary": str(payload.get("summary", "")).strip()[:1500],
+    }
+
+
+def call_llm_for_deep_verification(
+    hypothesis: Hypothesis,
+    research_goal: ResearchGoal | None = None,
+    temperature: float = 0.2,
+    model: str | None = None,
+) -> Dict[str, Any]:
+    """Decompose a hypothesis into assumptions and judge each one on its own.
+
+    The combined review scores a hypothesis as a whole, which lets a single
+    unsound step hide inside an otherwise convincing argument.  Judging each
+    assumption in isolation surfaces that step and records whether the
+    hypothesis actually depends on it.
+
+    Returns an empty dict when the model fails or its output cannot be parsed,
+    which leaves the surrounding review unchanged.
+    """
+
+    reflection_config = config.get("reflection", {})
+    max_assumptions = max(1, int(reflection_config.get("max_assumptions", 6)))
+    goal_description = research_goal.description if research_goal is not None else "Not specified."
+
+    prompt = (
+        "You are verifying a scientific hypothesis by decomposing it into the assumptions "
+        "it depends on, then judging each assumption independently.\n\n"
+        "Research Goal:\n"
+        f"{goal_description}\n\n"
+        "Hypothesis to Verify:\n"
+        f"{hypothesis.text}\n\n"
+        f"Identify at most {max_assumptions} assumptions, ordered from most to least "
+        "important. Break a compound assumption into its fundamental parts and state each "
+        "one so that it can be judged on its own, without reading the hypothesis: name the "
+        "entities explicitly instead of writing 'this mechanism' or 'the proposed method'.\n\n"
+        "Judge each assumption independently:\n"
+        "- VALID: established by well-known science, mathematics, or engineering practice.\n"
+        "- INVALID: contradicts established knowledge, or is internally inconsistent with "
+        "another part of the hypothesis.\n"
+        "- UNCERTAIN: cannot be settled from established knowledge.\n\n"
+        "A mechanism, prediction, or performance target that the hypothesis proposes to test "
+        "is NOT invalid merely because nobody has demonstrated it yet. That is the point of "
+        "the experiment. Mark it UNCERTAIN. Reserve INVALID for assumptions that are "
+        "positively contradicted, and say what contradicts them.\n\n"
+        "Also mark whether each assumption is 'fundamental': the hypothesis collapses if the "
+        "assumption is false. An assumption affecting only a detail, a parameter choice, or "
+        "one step of the protocol is not fundamental.\n\n"
+        "Return ONLY valid JSON with this exact schema:\n"
+        "{\n"
+        '  "assumptions": [\n'
+        "    {\n"
+        '      "assumption": "decontextualized statement",\n'
+        '      "status": "VALID | UNCERTAIN | INVALID",\n'
+        '      "fundamental": true,\n'
+        '      "reasoning": "one or two sentences"\n'
+        "    }\n"
+        "  ],\n"
+        '  "summary": "How the hypothesis could be invalidated, or why no invalidating '
+        'assumption was found."\n'
+        "}"
+    )
+
+    response = _call_llm(
+        prompt,
+        temperature=temperature,
+        model=model,
+        max_tokens=int(config.get("llm_max_tokens", {}).get("reflection", 2048)),
+        reasoning="off",
+    )
+    if not isinstance(response, str) or response.startswith("Error:"):
+        logger.warning(
+            "Deep verification unavailable for %s; the review keeps its existing verdict.",
+            hypothesis.hypothesis_id,
+        )
+        return {}
+
+    return _parse_deep_verification_response(response, max_assumptions)
 
 
 def _convert_score_to_review(score: int) -> str:
@@ -710,10 +858,44 @@ def _sanitize_claim_query(claim: str, max_words: int = 12) -> str:
     words = [w for w in cleaned.split() if w.strip()]
     if len(words) > max_words:
         stop_words = {
-            "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-            "of", "with", "by", "from", "as", "is", "are", "was", "were", "be",
-            "been", "being", "have", "has", "had", "do", "does", "did", "can",
-            "could", "should", "would", "may", "might", "must", "shall", "will"
+            "a",
+            "an",
+            "the",
+            "and",
+            "or",
+            "but",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "of",
+            "with",
+            "by",
+            "from",
+            "as",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "can",
+            "could",
+            "should",
+            "would",
+            "may",
+            "might",
+            "must",
+            "shall",
+            "will",
         }
         filtered = [w for w in words if w.lower() not in stop_words]
         words = filtered[:max_words] if len(filtered) >= 4 else words[:max_words]

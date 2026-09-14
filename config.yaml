@@ -109,6 +109,14 @@ ranking:
 # blocking one another serially. Tune this to the local server's capacity.
 reflection:
   max_workers: 3
+  # Deep verification decomposes a hypothesis into the assumptions it depends
+  # on and judges each one independently, which catches an unsound step that a
+  # single combined review scores past. It costs one extra call per hypothesis.
+  # An assumption the hypothesis proposes to test stays UNCERTAIN; only a
+  # contradicted assumption downgrades the verdict, and only a fundamental one
+  # rejects the hypothesis outright.
+  deep_verification_enabled: true
+  max_assumptions: 6
 
 # Synthesize actual review/debate feedback using the selected research model.
 # Invalid or unavailable model output falls back to deterministic summaries.

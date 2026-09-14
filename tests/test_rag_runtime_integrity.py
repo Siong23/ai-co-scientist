@@ -603,6 +603,10 @@ def test_empty_literature_rationale_continues_through_the_supervised_cycle():
             side_effect=assess_claims,
         ),
         patch(
+            "app.agents_modules.reflection.call_llm_for_deep_verification",
+            return_value={},
+        ),
+        patch(
             "app.agents_modules.ranking.run_pairwise_debate",
             side_effect=rank_pair,
         ),
