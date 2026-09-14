@@ -611,3 +611,82 @@ def test_evolved_hypothesis_text_carries_labelled_sections():
     assert "\n\nFeasibility: Compare against the untreated baseline;" in text
     # A model that labels its own claim must not produce "Hypothesis: Hypothesis:".
     assert text.count("Hypothesis:") == 1
+
+
+def _reviewed(hypothesis_id: str, **scores) -> Hypothesis:
+    """A parent whose review passes everywhere except the given dimensions."""
+    hypothesis = Hypothesis(hypothesis_id, "Seed", "A seed hypothesis.")
+    hypothesis.reflection_report = ReflectionReport(
+        alignment_score=8.0,
+        novelty_score=scores.get("novelty_score", 8.0),
+        feasibility_score=scores.get("feasibility_score", 8.0),
+        plausibility_score=scores.get("plausibility_score", 8.0),
+        testability_score=scores.get("testability_score", 8.0),
+        evidence_quality_score=scores.get("evidence_quality_score", 8.0),
+        expected_research_value_score=8.0,
+        recommendation="ACCEPT",
+        assumptions=scores.get("assumptions", []),
+    )
+    return hypothesis
+
+
+def test_strategy_selection_targets_the_weakest_reviewed_dimension():
+    """Blind rotation can leave a parent's worst dimension unaddressed."""
+
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
+
+    feasibility_first = agent._strategies_for_cycle(context, [_reviewed("H1", feasibility_score=2.0)])
+    assert feasibility_first[0] == "feasibility"
+
+    grounding_first = agent._strategies_for_cycle(context, [_reviewed("H1", evidence_quality_score=2.0)])
+    assert grounding_first[0] == "grounding"
+
+    testability_first = agent._strategies_for_cycle(context, [_reviewed("H1", testability_score=2.0)])
+    assert testability_first[0] == "simplification"
+
+
+def test_the_largest_gap_is_addressed_first():
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+
+    parent = _reviewed("H1", feasibility_score=4.5, evidence_quality_score=1.0)
+
+    assert agent._strategies_for_cycle(context, [parent])[0] == "grounding"
+
+
+def test_a_contradicted_assumption_prioritizes_the_feasibility_strategy():
+    from app.models import AssumptionVerdict
+
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
+
+    parent = _reviewed(
+        "H1",
+        assumptions=[
+            AssumptionVerdict(assumption="Blocking X restores sensitivity.", status="INVALID", fundamental=False)
+        ],
+    )
+
+    assert agent._strategies_for_cycle(context, [parent])[0] == "feasibility"
+
+
+def test_weighting_respects_the_parent_count_guard():
+    """A lone parent cannot run the strategies that need two, however weak it is."""
+
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+
+    selected = agent._strategies_for_cycle(context, [_reviewed("H1", novelty_score=1.0)])
+
+    assert "out_of_box" not in selected
+    assert "combination" not in selected
+    assert "inspiration" not in selected
+
+
+def test_unreviewed_parents_keep_the_rotation_order():
+    context, first, second = _context()
+    context.iteration_number = 1
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
+
+    assert agent._strategies_for_cycle(context, [first, second]) == ["simplification", "grounding"]
