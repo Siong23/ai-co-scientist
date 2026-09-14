@@ -137,13 +137,15 @@ def test_parse_evolution_response_accepts_reasoning_before_fenced_json():
 def test_parse_evolution_response_preserves_deduplicated_evidence_selection():
     response = (
         '{"title": "Child", "hypothesis": "A testable child.", '
-        '"evidence_source_ids": ["paper:2", "paper:2", "paper:1", 3]}'
+        '"evidence_source_ids": ["paper:2", "paper:2", "paper:1", 3], '
+        '"evidence_refs": ["chunk:2", "chunk:2", "chunk:1", 3]}'
     )
 
     assert parse_evolution_response(response) == {
         "title": "Child",
         "text": "A testable child.",
         "evidence_source_ids": ["paper:2", "paper:1"],
+        "evidence_refs": ["chunk:2", "chunk:1"],
     }
 
 
@@ -200,6 +202,44 @@ def test_evolution_repairs_missing_child_evidence_selection_once():
     assert [source["source_id"] for source in evolved[0].evidence_sources] == ["paper:2"]
     assert "missing_evidence_source_ids" in call_llm.call_args_list[1].args[0]
     assert context.last_evolution_attempts[0]["quality_rejections"] == ["missing_evidence_source_ids"]
+
+
+def test_evolution_keeps_only_the_child_selected_passage():
+    context, first, _ = _context()
+    first.evidence_sources[0]["evidence_refs"] = [
+        {
+            "source_id": "paper:1",
+            "chunk_id": "chunk:relevant",
+            "evidence_type": "full_text",
+            "text": "Blocking transporter X restores treatment sensitivity in the reported experiment.",
+        },
+        {
+            "source_id": "paper:1",
+            "chunk_id": "chunk:background",
+            "evidence_type": "full_text",
+            "text": "The paper also describes unrelated laboratory setup details.",
+        },
+    ]
+    first.evidence_refs = ["chunk:relevant", "chunk:background"]
+    agent = EvolutionAgent(
+        strategies=("grounding",),
+        max_candidates_per_cycle=1,
+    )
+    response = (
+        '{"title": "Grounded child", '
+        '"hypothesis": "Transiently inhibit X and test whether sensitivity is restored.", '
+        '"evidence_source_ids": ["paper:1"], '
+        '"evidence_refs": ["chunk:relevant"]}'
+    )
+
+    with patch("app.agents.call_llm", return_value=response) as call_llm:
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert len(evolved) == 1
+    assert evolved[0].evidence_refs == ["chunk:relevant"]
+    assert [ref["chunk_id"] for ref in evolved[0].evidence_sources[0]["evidence_refs"]] == ["chunk:relevant"]
+    assert '"chunk_id": "chunk:relevant"' in call_llm.call_args.args[0]
+    assert '"chunk_id": "chunk:background"' in call_llm.call_args.args[0]
 
 
 def test_stitched_combination_is_rejected_without_entering_tournament():

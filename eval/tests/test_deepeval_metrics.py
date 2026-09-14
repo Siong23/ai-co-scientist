@@ -42,7 +42,6 @@ from rubrics.deepeval_metrics import (
     select_metric_specs,
 )
 from tests.test_retrieval_context import (
-    ABSTRACT,
     PASSAGE_A,
     PASSAGE_B,
     metadata_only_source,
@@ -571,7 +570,7 @@ def test_grounded_rag_metrics_run_on_real_persisted_evidence_text(fake_factories
         "substantive": True,
         "evidence_source_count": 1,
         "sources_with_text": 1,
-        "passage_count": 3,
+        "passage_count": 2,
         "reason": None,
     }
 
@@ -658,7 +657,7 @@ def test_build_test_case_maps_saved_artifact_fields():
     assert case.input == GOAL
     assert "Hydrophobic barrier" in case.actual_output
     assert "1,000 hours" in case.actual_output
-    assert case.retrieval_context == [PASSAGE_A.strip(), PASSAGE_B.strip(), ABSTRACT.strip()]
+    assert case.retrieval_context == [PASSAGE_A.strip(), PASSAGE_B.strip()]
     assert case.metadata["hypothesis_id"] == "H1"
 
 

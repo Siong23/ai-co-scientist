@@ -1554,6 +1554,7 @@ def call_llm_for_hypothesis_audit(
     available_source_ids: set[str],
     model: str | None = None,
     system_prompt: str | None = None,
+    available_evidence_refs: dict[str, dict] | None = None,
 ) -> tuple[list[dict] | None, str | None]:
     """Audit hypotheses independently and concurrently to ensure grounding and novelty.
 
@@ -1879,6 +1880,27 @@ Requirements:
                     if valid_source_ids:
                         valid_final = {field: final_hypothesis[field].strip() for field in required_fields}
                         valid_final["source_ids"] = valid_source_ids
+                        raw_evidence_refs = final_hypothesis.get("evidence_refs", [])
+                        if isinstance(raw_evidence_refs, list):
+                            known_ref_ids = set(available_evidence_refs or ())
+                            valid_final["evidence_refs"] = list(
+                                dict.fromkeys(
+                                    ref_id
+                                    for value in raw_evidence_refs
+                                    if isinstance(value, str)
+                                    and (ref_id := value.strip())
+                                    and (
+                                        available_evidence_refs is None
+                                        or (
+                                            ref_id in known_ref_ids
+                                            and str(available_evidence_refs[ref_id].get("source_id", ""))
+                                            in valid_source_ids
+                                        )
+                                    )
+                                )
+                            )
+                        else:
+                            valid_final["evidence_refs"] = []
 
             draft_unsupported_claims = tuple(
                 dict.fromkeys(
@@ -2010,6 +2032,9 @@ Requirements:
 
             if valid_final is None:
                 hard_failures.append("No valid final hypothesis with retrieved citations.")
+
+            elif available_evidence_refs is not None and not valid_final.get("evidence_refs"):
+                hard_failures.append("No valid chunk-level evidence references.")
 
             if scores["evidence_validity"] < minimum_grounding_score:
                 hard_failures.append(f"Evidence validity score is below {minimum_grounding_score}/10.")

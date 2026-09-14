@@ -1354,7 +1354,7 @@
   "llm_evaluation": {
     "judge": {
       "provider": "local",
-      "model": "openai/gpt-oss-120b",
+      "model": "qwen/qwen3.8-27b",
       "base_url": "http://100.117.90.5:1234/v1/"
     },
     "suite": "hypothesis",
@@ -1364,10 +1364,10 @@
       {
         "name": "Goal alignment",
         "status": "completed",
-        "score": 0.9,
+        "score": 0.7,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The hypothesis directly tackles the central objective by proposing a novel deep‑learning enhancement (adaptive thresholding) for an LSTM‑Attention model on the 5G‑NIDD dataset, explicitly targeting weighted F1, macro F1, and minority class recall. It aligns with all explicit constraints and provides a clear intervention, mechanism, and measurable outcome, without ignoring any goal aspects. The only minor shortcoming is that it focuses on one architecture rather than exploring broader novel approaches."
+        "reason": "The hypothesis directly targets the 5G-NIDD multiclass intrusion detection goal and includes an empirical validation plan for an LSTM-Attention model with per-class adaptive thresholds, explicitly evaluating Weighted F1, Macro F1, and minority-class recall such as R2L. Its main shortcoming is that post-hoc threshold optimization is a post-processing enhancement rather than a clearly novel deep-learning architecture or training method, so it only partially satisfies the novelty constraint."
       },
       {
         "name": "Experimental readiness",
@@ -1375,7 +1375,7 @@
         "score": 1.0,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The score is 1.0 because the DAG traversal passed through five successive nodes—BinaryJudgementNode (intervention), BinaryJudgementNode (measurement), BinaryJudgementNode (comparison), BinaryJudgementNode (prediction), and finally VerdictNode—all returning True, which yields a deterministic positive verdict for experimental readiness."
+        "reason": "The score is 1.0 because the DAG traversal returned True at Level 0 for intervention, True at Level 1 for measurement, True at Level 2 for comparison, and True at Level 3 for prediction, leading the deterministic VerdictNode at Level 4 to return True."
       },
       {
         "name": "Scientific testability",
@@ -1383,31 +1383,31 @@
         "score": 1.0,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The response clearly identifies the independent variable (a metric‑driven adaptive threshold layer), specifies dependent variables (Macro F1, minority class recall for R2L, and Weighted F1) with measurement on the 5G‑NIDD dataset, defines a control condition (standard LSTM‑Attention with fixed thresholds), predicts the direction of effects (significant improvements in Macro F1 and minority recall without degrading Weighted F1), and outlines an experiment that could falsify the hypothesis if these improvements are not observed."
+        "reason": "The hypothesis specifies a manipulable intervention (per-class adaptive threshold optimization added to LSTM-Attention), measurable outcomes (Macro F1, Weighted F1, and R2L/minority recall on the test set), a fixed-threshold LSTM-Attention baseline, a directional prediction of significant improvement in Macro F1 and minority recall without Weighted F1 degradation, and a concrete falsification test via cross-validated threshold selection and test-set evaluation."
       },
       {
         "name": "Feasibility",
         "status": "completed",
-        "score": 0.7,
+        "score": 0.6,
         "threshold": 0.7,
-        "passed": true,
-        "reason": "The answer identifies the required data (the 5G‑NIDD dataset) and basic equipment (standard compute for training an LSTM‑Attention model) and outlines measurements (weighted F1, macro F1, minority recall). It assumes these resources are available but does not explicitly confirm their obtainability, leaving a minor gap. The experimental plan is realistic in scope—training, validation, threshold optimization, and evaluation—but the description lacks detail on hardware specifications or time frames, making the implementation burden unclear. No unrealistic dependencies are introduced. Overall, the proposal is feasible given the supplied information, earning a solid but not perfect score."
+        "passed": false,
+        "reason": "The proposal is reasonably executable because it relies on the provided 5G-NIDD dataset, standard LSTM-Attention training, validation-set precision-recall curves, per-class threshold selection, and evaluation of Macro F1, Weighted F1, and minority-class recall. However, it does not explicitly establish required compute, software, preprocessing, or statistical testing resources, and it under-specifies implementation burden, scale, duration, and expertise. No impossible dependency is present, but the missing resource and complexity details reduce realism."
       },
       {
         "name": "Scientific plausibility",
         "status": "completed",
-        "score": 0.9,
+        "score": 0.6,
         "threshold": 0.7,
-        "passed": true,
-        "reason": "The answer clearly outlines a step‑by‑step causal mechanism (adaptive threshold optimization per class) and each step follows logically from the previous one, avoiding jumps from correlation to causation. The proposed method is internally consistent, with no physical or computational contradictions, and the predicted outcome (improved Macro F1 and minority recall without hurting Weighted F1) directly follows from the described adaptive‑threshold process. Overall the reasoning is coherent and scientifically plausible, meeting all evaluation criteria."
+        "passed": false,
+        "reason": "The response provides a plausible stepwise mechanism: train an LSTM-Attention model on 5G-NIDD, build per-class precision-recall curves from validation data, select class-specific thresholds, and evaluate Macro F1, Weighted F1, and minority-class recall such as R2L. This aligns with the input’s emphasis on imbalanced multiclass intrusion detection and minority-class performance. However, the causal account is under-specified and partly inconsistent: it describes a post-hoc thresholding layer or dynamic balancing, while the feasibility steps use static validation-selected thresholds, and it does not explain how multiclass probabilities are thresholded or why per-class F1 maximization will preserve Weighted F1. It also overstates that the method resolves the Weighted/Macro F1 contradiction and relies on external parent hypotheses rather than fully deriving the mechanism from the supplied text."
       },
       {
         "name": "Novelty vs retrieved prior art",
         "status": "completed",
-        "score": 0.2,
+        "score": 0.3,
         "threshold": 0.7,
         "passed": false,
-        "reason": "The response fails to follow the evaluation steps: it does not summarize the approaches, mechanisms, and findings described in the retrieval context, nor does it explicitly state what the hypothesis proposes for the research goal. It also lacks a clear identification of how the hypothesis differs from or restates the retrieved work. Consequently, it cannot meaningfully score the novelty relative to the provided prior art."
+        "reason": "The hypothesis aligns with the research goal by targeting 5G-NIDD, LSTM-Attention, macro F1, weighted F1, and minority-class recall, especially R2L. It adds a specific mechanism: per-class, post-hoc threshold selection from validation precision-recall curves to balance macro and weighted F1. However, the retrieval context already describes threshold optimization derived from precision-recall curves that boosts recall from 73% to 93%, R2L/imbalance handling with SMOTE and focal loss, and LSTM-Attention as the best model on 5G-NIDD. Therefore, the proposal mainly restates existing mechanisms and offers only a modest combination or metric-framing difference rather than a meaningfully new deep-learning approach."
       }
     ],
     "retrieval_context": {

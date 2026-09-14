@@ -144,8 +144,16 @@ def test_corrective_full_text_path_reaches_complete_coverage_with_failover(tmp_p
     synthesis = json.dumps(
         {
             "established_findings": [
-                {"claim": "Slice evidence", "source_ids": ["arXiv:scope"]},
-                {"claim": "Spike evidence", "source_ids": ["arXiv:spike-working"]},
+                {
+                    "claim": "Slice evidence",
+                    "source_ids": ["arXiv:scope"],
+                    "evidence_refs": [{"source_id": "arXiv:scope", "chunk_id": "scope-chunk"}],
+                },
+                {
+                    "claim": "Spike evidence",
+                    "source_ids": ["arXiv:spike-working"],
+                    "evidence_refs": [{"source_id": "arXiv:spike-working", "chunk_id": "spike-chunk"}],
+                },
             ],
             "contradictions": [],
             "knowledge_gaps": [],

@@ -675,6 +675,74 @@ def test_hypothesis_auditor_revises_and_passes_a_grounded_candidate():
     }
 
 
+def test_hypothesis_auditor_keeps_only_known_passages_from_selected_sources():
+    final_hypothesis = {
+        "title": "Audited hypothesis",
+        "hypothesis": "Method A will be tested against the baseline.",
+        "rationale": "The selected passage establishes the baseline limitation.",
+        "feasibility": "Reject the claim if the measured outcome does not improve.",
+        "source_ids": ["arXiv:1111.1111"],
+        "evidence_refs": ["chunk-relevant", "chunk-invented", "chunk-other-source"],
+    }
+    evidence_refs = {
+        "chunk-relevant": {
+            "source_id": "arXiv:1111.1111",
+            "chunk_id": "chunk-relevant",
+            "text": "The baseline degrades during congestion.",
+        },
+        "chunk-other-source": {
+            "source_id": "arXiv:2222.2222",
+            "chunk_id": "chunk-other-source",
+            "text": "A different paper discusses another task.",
+        },
+    }
+
+    with patch("app.agents.call_llm", return_value=_audit_payload(final_hypothesis)):
+        audits, error = call_llm_for_hypothesis_audit(
+            "Improve network performance.",
+            [{"title": "Draft"}],
+            "The baseline degrades during congestion.",
+            {"arXiv:1111.1111", "arXiv:2222.2222"},
+            available_evidence_refs=evidence_refs,
+        )
+
+    assert error is None
+    assert audits is not None
+    assert audits[0]["passed"] is True
+    assert audits[0]["final_hypothesis"]["evidence_refs"] == ["chunk-relevant"]
+
+
+def test_hypothesis_auditor_rejects_a_candidate_without_chunk_provenance():
+    final_hypothesis = {
+        "title": "Audited hypothesis",
+        "hypothesis": "Method A will be tested against the baseline.",
+        "rationale": "The source is cited only at paper level.",
+        "feasibility": "Compare the methods on the requested outcome.",
+        "source_ids": ["arXiv:1111.1111"],
+    }
+    evidence_refs = {
+        "chunk-relevant": {
+            "source_id": "arXiv:1111.1111",
+            "chunk_id": "chunk-relevant",
+            "text": "The baseline degrades during congestion.",
+        }
+    }
+
+    with patch("app.agents.call_llm", return_value=_audit_payload(final_hypothesis)):
+        audits, error = call_llm_for_hypothesis_audit(
+            "Improve network performance.",
+            [{"title": "Draft"}],
+            "The baseline degrades during congestion.",
+            {"arXiv:1111.1111"},
+            available_evidence_refs=evidence_refs,
+        )
+
+    assert error is None
+    assert audits is not None
+    assert audits[0]["passed"] is False
+    assert "chunk-level evidence" in " ".join(audits[0]["audit_report"]["hard_failures"])
+
+
 def test_hypothesis_auditor_runs_candidates_concurrently_and_preserves_order():
     candidates = [{"title": f"Draft {index}"} for index in range(4)]
     first_attempts = threading.Barrier(len(candidates), timeout=3)
@@ -832,6 +900,20 @@ def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
             "arxiv_id": "1111.1111",
             "title": "Prior work",
             "abstract": "Evidence about the method and baseline.",
+            "evidence_refs": [
+                {
+                    "source_id": source_id,
+                    "chunk_id": "chunk-relevant",
+                    "evidence_type": "full_text",
+                    "text": "The baseline degrades during congestion, motivating a controlled comparison.",
+                },
+                {
+                    "source_id": source_id,
+                    "chunk_id": "chunk-background",
+                    "evidence_type": "full_text",
+                    "text": "Background deployment details that do not support the final hypothesis.",
+                },
+            ],
         },
     )
     plan = SearchQueryPlan(
@@ -864,6 +946,7 @@ def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
         "rationale": "Prior work grounds the baseline limitation; the improvement remains a hypothesis.",
         "feasibility": "Compare against the baseline and reject the claim if latency is not lower.",
         "source_ids": [source_id],
+        "evidence_refs": ["chunk-relevant"],
     }
     audit = {
         "candidate_index": 0,
@@ -906,6 +989,8 @@ def test_generation_returns_only_hypotheses_that_pass_the_audit_gate():
     assert hypotheses[0].title == "Audited"
     assert hypotheses[0].audit_verdict == "PASS"
     assert hypotheses[0].audit_score == 82.0
+    assert hypotheses[0].evidence_refs == ["chunk-relevant"]
+    assert [ref["chunk_id"] for ref in hypotheses[0].evidence_sources[0]["evidence_refs"]] == ["chunk-relevant"]
     assert context.last_hypothesis_audits == [audit["audit_report"]]
 
 

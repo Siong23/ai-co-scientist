@@ -89,7 +89,7 @@ def test_each_persisted_passage_stays_a_separate_string():
     context = extract_retrieval_context([sourced_evidence()])
 
     assert context.is_substantive is True
-    assert context.as_list() == [PASSAGE_A.strip(), PASSAGE_B.strip(), ABSTRACT.strip()]
+    assert context.as_list() == [PASSAGE_A.strip(), PASSAGE_B.strip()]
     assert context.summary()["sources_with_text"] == 1
 
 
@@ -117,14 +117,29 @@ def test_mixed_sources_keep_only_the_substantive_one():
         [metadata_only_source("doi:stub"), sourced_evidence("doi:full", passages=(PASSAGE_A,))]
     )
 
-    assert context.as_list() == [PASSAGE_A.strip(), ABSTRACT.strip()]
+    assert context.as_list() == [PASSAGE_A.strip()]
     assert context.summary() == {
         "substantive": True,
         "evidence_source_count": 2,
         "sources_with_text": 1,
-        "passage_count": 2,
+        "passage_count": 1,
         "reason": None,
     }
+
+
+def test_source_prose_is_only_a_fallback_when_chunk_text_is_missing():
+    source = sourced_evidence(passages=())
+    source["evidence_refs"].append(
+        {
+            "source_id": source["source_id"],
+            "chunk_id": "metadata-only-chunk",
+            "evidence_type": "full_text",
+        }
+    )
+
+    context = extract_retrieval_context([source])
+
+    assert context.as_list() == [ABSTRACT.strip()]
 
 
 def test_malformed_evidence_sources_are_rejected():

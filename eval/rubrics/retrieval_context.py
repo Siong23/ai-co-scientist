@@ -107,7 +107,7 @@ def _usable_passage(value: Any) -> str | None:
 
 
 def _source_passages(source: Mapping[str, Any]) -> list[str]:
-    """Collect one string per persisted passage, chunks before source prose."""
+    """Use explicit chunk passages, falling back to source prose only when absent."""
     passages: list[str] = []
 
     refs = source.get(PASSAGE_LIST_FIELD)
@@ -118,6 +118,9 @@ def _source_passages(source: Mapping[str, Any]) -> list[str]:
             passage = _usable_passage(ref.get(PASSAGE_TEXT_FIELD))
             if passage is not None:
                 passages.append(passage)
+
+    if passages:
+        return passages
 
     for field in SOURCE_TEXT_FIELDS:
         passage = _usable_passage(source.get(field))
