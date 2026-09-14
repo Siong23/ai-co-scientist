@@ -494,11 +494,29 @@ class GenerationAgent:
             return ""
         latest = context.meta_review_feedback[-1]
         critiques = latest.get("meta_review_critique", [])
-        next_steps = (latest.get("research_overview", {}) or {}).get("suggested_next_steps", [])
+        overview = latest.get("research_overview", {}) or {}
+        next_steps = overview.get("suggested_next_steps", [])
         sections = []
         if critiques:
             critique_text = "\n".join(f"- {c}" for c in critiques)
             sections.append(f"Prior cycle review critique:\n{critique_text}")
+
+        # The overview maps what previous cycles already covered, which is what
+        # lets this cycle push into an unexplored area instead of re-deriving a
+        # neighbour of an existing hypothesis.
+        areas = [area for area in (overview.get("research_areas") or []) if isinstance(area, dict)]
+        if areas:
+            lines = []
+            for area in areas:
+                lines.append(f"- {area.get('area', '')}: {area.get('rationale', '')}")
+                for experiment in area.get("example_experiments") or []:
+                    lines.append(f"  - Example experiment: {experiment}")
+            sections.append(
+                "Research areas already covered, with why each matters:\n"
+                + "\n".join(lines)
+                + "\nExtend or move beyond these areas; do not restate a hypothesis that already covers one."
+            )
+
         if next_steps:
             steps_text = "\n".join(f"- {s}" for s in next_steps)
             sections.append(f"Prior cycle recommended next steps:\n{steps_text}")
