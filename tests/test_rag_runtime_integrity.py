@@ -559,7 +559,7 @@ def test_empty_literature_rationale_continues_through_the_supervised_cycle():
 
     ranking_calls = []
 
-    def rank_pair(hypothesis_a, hypothesis_b, _research_goal):
+    def rank_pair(hypothesis_a, hypothesis_b, _research_goal, **_kwargs):
         ranking_calls.append((hypothesis_a.hypothesis_id, hypothesis_b.hypothesis_id))
         return PairwiseDecision(
             hypothesis_a_id=hypothesis_a.hypothesis_id,

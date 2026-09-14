@@ -45,6 +45,8 @@ from .agents_modules.ranking import RankingAgent
 from .agents_modules.ranking_helpers import (
     format_references,
     parse_pairwise_result,
+    presentation_order,
+    run_debate_rounds,
     run_pairwise_debate,
     update_elo,
     update_elo_tie,
@@ -149,7 +151,9 @@ __all__ = [
     "parse_pairwise_result",
     "parse_evolution_response",
     "parse_supervisor_decision",
+    "presentation_order",
     "redact_secrets",
+    "run_debate_rounds",
     "run_pairwise_debate",
     "serialize_documents",
     "similarity_score",
