@@ -197,6 +197,39 @@ Cost per cycle rose by two ranking-model calls for each top-k match and one
 reflection call per hypothesis. Both are bounded by the new configuration keys
 and can be switched off.
 
+## First live cycle (run-20260914-082624-86d7c161)
+
+One cycle on the 5G slice-bandwidth goal, `qwen/qwen3.8-27b`, 10 min 55 s.
+It reported recovery warnings, which traced to arXiv and Semantic Scholar both
+returning HTTP 429; Springer Nature still returned nine results and the cycle
+completed. That warning is the search layer reporting degradation correctly, not
+a defect, but the evidence base was thin enough that generation produced two
+hypotheses rather than the configured four.
+
+Confirmed working:
+
+- Slot assignment. In `ranking_7` the 1184-rated hypothesis occupied slot A
+  against a 1200-rated one, so the leader is no longer pinned to the same slot.
+- Deep verification. Six assumptions per hypothesis, 36 in total, all VALID or
+  UNCERTAIN and none INVALID. The guard holds: no hypothesis was downgraded for
+  proposing something not yet demonstrated. The two REVISE verdicts came from
+  the score rubric and the claim gate, not from this review.
+- Research areas. The meta-review produced two substantive areas with rationales
+  and concrete experiments, and `synthesis_mode` was `llm`.
+- Evolution ran combination, feasibility and simplification. The parents carried
+  no sub-threshold scores, so the rotation baseline held, as designed.
+
+Fixed as a result (`bc73195`, `241d991`):
+
+- `debate_top_k` defaulted to 3 against an active field of 3, so every match was
+  debated instead of the decisive one. The default is now 2.
+- Tournament records carried no indication of which matches were debated, so the
+  change could not be audited from a run report. Each match now records it.
+- The cycle's experiment completed with return code 0 and 0.9988 test accuracy
+  but was marked `invalid_outputs`: the generated script wrote its three timing
+  fields to `experiment_summary.json` while the validator only read
+  `metrics.json`. A timing in either file now satisfies the contract.
+
 ## Remaining
 
 - Observation review and simulation review, deferred from P0-2. Each is another
@@ -207,4 +240,8 @@ and can be switched off.
 - Measure the effect. The four items target plausibility, novelty and
   feasibility; none of that is confirmed until an eval run against a live
   LM Studio server reproduces the table above. Compare against
-  `eval/reports/all-run-20260914-063317-2dc89266.json`.
+  `eval/reports/all-run-20260914-063317-2dc89266.json`. The first live cycle
+  showed the mechanisms firing, not that the scores moved.
+- The deep verification gate has not yet fired on real output. Every assumption
+  so far came back VALID or UNCERTAIN, so its effect on plausibility rests on
+  the verdicts reaching the Ranking judge rather than on any rejection.
