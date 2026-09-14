@@ -13,8 +13,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 from .research_trace import format_research_trace_html
-from .utils import redact_secrets, logger
-
+from .utils import logger, redact_secrets
 
 DEFAULT_RESULTS_DIR = Path("results")
 RUNS_DIR_ENV = "CO_SCIENTIST_RUNS_DIR"

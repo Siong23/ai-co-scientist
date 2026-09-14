@@ -401,7 +401,6 @@ def call_llm(
                     server_error = isinstance(status_code, int) and 500 <= status_code < 600
                     if not server_error:
                         raise
-                    retryable = attempt < retry_count
                     details = _format_lmstudio_error(exc, selected_model)
                     if attempt < retry_count:
                         logger.warning(
