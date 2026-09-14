@@ -2,7 +2,11 @@
 
 Created: 2026-09-14. Replaces the 2026-09-06 `docs/quality-gaps.md` audit removed
 in `84ab63b`; that file described mechanisms already shipped, this one describes
-the work still to do.
+the work between the agents and the reference paper.
+
+Status: all four items below shipped on 2026-09-14, in the order listed. The
+offline suite passes after each. Whether they move the failing metrics is not
+yet measured — that needs a fresh eval run against a live LM Studio server.
 
 Sources: `references/nature-ai-co-scientist.pdf` (Fig. 1b and the "specialized
 agents" section) and `references/nature-ai-co-scientist-supplement.pdf`
@@ -34,6 +38,8 @@ mechanism that is missing or unwired below.
 
 ## P0-1 — Ranking: multi-turn debate is dead code, and A/B order is biased
 
+Shipped in `c9f0965`.
+
 **Paper.** Top-ranked hypotheses are compared through multi-turn scientific
 debates; lower-ranked ones use single-turn comparisons. The ablation reports the
 debate prompt is significantly more effective on high-Elo matches and "almost
@@ -62,6 +68,8 @@ it; A/B assignment is stable for a given ID pair and not always Elo-ordered; the
 existing abstention and Elo-safety gates are unchanged.
 
 ## P0-2 — Reflection: three review types missing, novelty score ungrounded
+
+Shipped in `5e80e54` (deep verification) and `9990511` (prior-art hand-off).
 
 **Paper.** Six review strategies: initial, full (with search), deep verification,
 observation, simulation, recurrent/tournament. Deep verification decomposes a
@@ -104,6 +112,8 @@ the prompt, and its absence leaves current behaviour unchanged.
 
 ## P1-1 — Evolution: strategy rotation ignores the reviews
 
+Shipped in `56edfdf`.
+
 **Paper.** The Evolution agent refines top-ranked hypotheses with grounding,
 coherence/feasibility, inspiration, combination, simplification and out-of-box
 strategies. The ablation attributes a precision gain of 70.9% to 75.4% on GPQA
@@ -127,6 +137,8 @@ first; with no reflection reports the current rotation order is preserved; the
 parent-count guard for `combination`/`inspiration`/`out_of_box` still holds.
 
 ## P1-2 — Meta-review: the research overview is a stub
+
+Shipped in `c206745`.
 
 **Paper.** At the end of computation the Meta-review agent synthesizes top-ranked
 hypotheses into a research overview: research areas and directions, why each
@@ -164,13 +176,33 @@ These differ from the paper by choice and are not planned work.
   present; only the concurrency model differs, and it does not affect output
   quality.
 
-## Order of work
+## What shipped
 
-1. P0-1 Ranking — Elo carries into Evolution parent selection and finalization, so
-   ranking errors propagate everywhere else.
-2. P0-2 Reflection — deep verification first (plausibility), then the prior-art
-   hand-off (novelty).
-3. P1-1 Evolution — strategy weighting (feasibility).
-4. P1-2 Meta-review — overview structure and the Generation feedback loop.
+| Item | Commit | New configuration |
+| --- | --- | --- |
+| P0-1 Ranking | `c9f0965` | `ranking.debate_enabled`, `ranking.debate_top_k` |
+| P0-2 deep verification | `5e80e54` | `reflection.deep_verification_enabled`, `reflection.max_assumptions` |
+| P0-2 prior-art hand-off | `9990511` | none |
+| P1-1 Evolution | `56edfdf` | none |
+| P1-2 Meta-review | `c206745` | none |
 
-`make test` must pass offline with no API key and no network after each item.
+Regression coverage: `tests/test_deep_verification.py` (new), plus additions to
+`tests/test_ranking_performance.py`, `tests/test_evolution.py` and
+`tests/test_agent_review_integrity.py`. The offline suite passes with no API key
+and no network.
+
+Cost per cycle rose by two ranking-model calls for each top-k match and one
+reflection call per hypothesis. Both are bounded by the new configuration keys
+and can be switched off.
+
+## Remaining
+
+- Observation review and simulation review, deferred from P0-2. Each is another
+  model call per hypothesis and neither maps to a currently failing metric.
+- Evolved children carry no prior-art audit, so the novelty anchor added in
+  `9990511` does not reach them. Their novelty score is still judged against
+  their parents' evidence alone.
+- Measure the effect. The four items target plausibility, novelty and
+  feasibility; none of that is confirmed until an eval run against a live
+  LM Studio server reproduces the table above. Compare against
+  `eval/reports/all-run-20260914-063317-2dc89266.json`.
