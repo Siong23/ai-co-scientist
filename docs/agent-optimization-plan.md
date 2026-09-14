@@ -56,10 +56,10 @@ the current leader instead of averaging out.
 
 **Fix.**
 
-1. Route matches by Elo: pairs above a configurable rating (or both in the top-k)
+1. Route matches by rank: pairs where both hypotheses sit in the current top-k
    run the existing multi-turn debate; the rest keep the single-shot judge. Add
-   `ranking.debate_enabled` and `ranking.debate_elo_threshold` to `config.yaml`
-   so the cost stays bounded on a local model.
+   `ranking.debate_enabled` and `ranking.debate_top_k` to `config.yaml` so the
+   cost stays bounded on a local model.
 2. Randomize or alternate A/B assignment per match, seeded deterministically from
    the hypothesis IDs so runs remain reproducible.
 
@@ -128,9 +128,11 @@ reached roughly every other cycle regardless of what is actually wrong. When
 Feasibility scores 0.2, the `feasibility` strategy is not preferentially applied.
 
 **Fix.** Weight strategy selection by the parents' weakest reflection dimensions
-(feasibility score low → `feasibility`; evidence quality low → `grounding`;
-near-duplicate cluster → `out_of_box`), keeping the rotation as the tie-breaker so
-the strategy library still gets explored. Targets feasibility.
+(feasibility or plausibility low → `feasibility`; evidence quality low →
+`grounding`; testability low → `simplification`; novelty low → `out_of_box`), and
+treat an assumption the deep verification review contradicted as a feasibility
+deficit. Rotation stays the baseline order and the tie-breaker, so the strategy
+library still gets explored. Targets feasibility.
 
 **Tests.** Offline: a parent with a low feasibility score selects `feasibility`
 first; with no reflection reports the current rotation order is preserved; the
