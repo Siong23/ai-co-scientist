@@ -233,3 +233,65 @@ def test_ranking_sees_the_assumption_verdicts():
 
 def test_ranking_output_is_unchanged_without_deep_verification():
     assert "Deep Verification" not in format_reflection_report(ReflectionReport(recommendation="ACCEPT"))
+
+
+# ---------------------------------------------------------------------------
+# Prior-art hand-off from Generation
+# ---------------------------------------------------------------------------
+
+
+def _audited(**audit):
+    hypothesis = Hypothesis(hypothesis_id="H1", text="Hierarchical RL allocates slice bandwidth.")
+    hypothesis.audit_report = audit
+    return hypothesis
+
+
+def _reflection_prompt(hypothesis):
+    from app.agents_modules.reflection_helpers import call_llm_for_reflection
+
+    with patch("app.agents_modules.reflection_helpers._call_llm", return_value="{}") as call_llm:
+        call_llm_for_reflection(hypothesis, ResearchGoal("Allocate 5G bandwidth", "", ""))
+
+    # A response that does not validate triggers a format-only repair call, so
+    # the review prompt under test is the first one.
+    return call_llm.call_args_list[0].args[0]
+
+
+def test_reflection_anchors_novelty_to_the_generation_prior_art_search():
+    hypothesis = _audited(
+        scores={"novelty_against_prior_art": 4},
+        closest_prior_art=[
+            {
+                "source_id": "arxiv:2401.00001",
+                "overlap": "Same hierarchical allocation scheme.",
+                "remaining_novelty": "Asynchronous worker updates.",
+            }
+        ],
+    )
+
+    prompt = _reflection_prompt(hypothesis)
+
+    assert "Prior-Art Search Run When This Hypothesis Was Generated:" in prompt
+    assert "4/10" in prompt
+    assert "Same hierarchical allocation scheme." in prompt
+    assert "Asynchronous worker updates." in prompt
+
+
+def test_reflection_prompt_omits_the_prior_art_section_without_an_audit():
+    hypothesis = Hypothesis(hypothesis_id="H1", text="Hierarchical RL allocates slice bandwidth.")
+
+    assert "Prior-Art Search" not in _reflection_prompt(hypothesis)
+    assert "Prior-Art Search" not in _reflection_prompt(_audited(scores={}, closest_prior_art=[]))
+
+
+def test_prior_art_entries_are_bounded():
+    hypothesis = _audited(
+        closest_prior_art=[
+            {"source_id": f"paper-{index}", "overlap": "o", "remaining_novelty": "r"} for index in range(12)
+        ]
+    )
+
+    prompt = _reflection_prompt(hypothesis)
+
+    assert "paper-4" in prompt
+    assert "paper-5" not in prompt
