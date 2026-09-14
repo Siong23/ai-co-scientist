@@ -367,10 +367,12 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert "STRUCTURED RESEARCH PLAN" in rewriter_prompt
     assert "discovery and synthesis" in rewriter_prompt
     rewriter_system_prompt = mock_call.call_args_list[1].kwargs["system_prompt"]
+    normalized_rewriter_system_prompt = " ".join(rewriter_system_prompt.split())
     assert "Search Planner" in rewriter_system_prompt
     assert "goal_quote copied verbatim" in rewriter_system_prompt
-    assert "must never become evidence gates" in " ".join(rewriter_system_prompt.split())
+    assert "must never become evidence gates" in normalized_rewriter_system_prompt
     assert "Make every prior_art query specific enough to test novelty" in rewriter_system_prompt
+    assert "Never search for a bare metric or outcome fragment" in normalized_rewriter_system_prompt
 
 
 def test_query_rewriting_retries_truncated_research_plan_once():

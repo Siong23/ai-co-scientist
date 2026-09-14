@@ -134,6 +134,19 @@ def test_parse_evolution_response_accepts_reasoning_before_fenced_json():
     }
 
 
+def test_parse_evolution_response_preserves_deduplicated_evidence_selection():
+    response = (
+        '{"title": "Child", "hypothesis": "A testable child.", '
+        '"evidence_source_ids": ["paper:2", "paper:2", "paper:1", 3]}'
+    )
+
+    assert parse_evolution_response(response) == {
+        "title": "Child",
+        "text": "A testable child.",
+        "evidence_source_ids": ["paper:2", "paper:1"],
+    }
+
+
 def test_near_duplicate_evolution_is_repaired_once():
     context, first, _ = _context()
     agent = EvolutionAgent(
@@ -143,7 +156,7 @@ def test_near_duplicate_evolution_is_repaired_once():
     )
     responses = [
         '{"title": "Rephrased parent", "hypothesis": "Transporter X causes treatment resistance."}',
-        '{"title": "Decisive inhibition test", "hypothesis": "Transiently inhibit X before treatment; restored sensitivity would isolate X as the causal resistance mechanism."}',
+        '{"title": "Decisive inhibition test", "hypothesis": "Transiently inhibit X before treatment; restored sensitivity would isolate X as the causal resistance mechanism.", "evidence_source_ids": ["paper:1"]}',
     ]
 
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
@@ -166,6 +179,29 @@ def test_near_duplicate_evolution_is_repaired_once():
     ]
 
 
+def test_evolution_repairs_missing_child_evidence_selection_once():
+    context, _, _ = _context()
+    agent = EvolutionAgent(
+        strategies=("grounding",),
+        max_candidates_per_cycle=1,
+        quality_repair_attempts=1,
+    )
+    responses = [
+        '{"title": "Uncited child", "hypothesis": "Inhibit X and measure restored sensitivity."}',
+        '{"title": "Cited child", "hypothesis": "Inhibit X and measure restored sensitivity.", '
+        '"evidence_source_ids": ["paper:2"]}',
+    ]
+
+    with patch("app.agents.call_llm", side_effect=responses) as call_llm:
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert len(evolved) == 1
+    assert evolved[0].evidence_source_ids == ["paper:2"]
+    assert [source["source_id"] for source in evolved[0].evidence_sources] == ["paper:2"]
+    assert "missing_evidence_source_ids" in call_llm.call_args_list[1].args[0]
+    assert context.last_evolution_attempts[0]["quality_rejections"] == ["missing_evidence_source_ids"]
+
+
 def test_stitched_combination_is_rejected_without_entering_tournament():
     context, _, _ = _context()
     agent = EvolutionAgent(
@@ -186,7 +222,7 @@ def test_stitched_combination_is_rejected_without_entering_tournament():
     assert context.last_evolution_attempts[0]["quality_rejections"] == ["stitched_combination"]
 
 
-def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
+def test_evolution_creates_new_children_with_lineage_and_selected_evidence():
     context, first, second = _context()
     original_first = deepcopy(first.to_dict())
     original_second = deepcopy(second.to_dict())
@@ -195,9 +231,9 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
         max_candidates_per_cycle=3,
     )
     responses = [
-        '{"title": "Combined child", "hypothesis": "X activates Y, which can be tested by dual inhibition."}',
-        '{"title": "Feasible child", "hypothesis": "Inhibit X before treatment and measure restored sensitivity."}',
-        '{"title": "Divergent child", "hypothesis": "Transient membrane tension independently drives resistance."}',
+        '{"title": "Combined child", "hypothesis": "X activates Y, which can be tested by dual inhibition.", "evidence_source_ids": ["paper:1"]}',
+        '{"title": "Feasible child", "hypothesis": "Inhibit X before treatment and measure restored sensitivity.", "evidence_source_ids": ["paper:1"]}',
+        '{"title": "Divergent child", "hypothesis": "Transient membrane tension independently drives resistance.", "evidence_source_ids": ["paper:1"]}',
     ]
 
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
@@ -207,8 +243,8 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
     assert evolved[0].parent_ids == ["H1", "H2"]
     assert evolved[1].parent_ids == ["H1"]
     assert evolved[2].parent_ids == ["H1", "H2"]
-    assert evolved[0].evidence_source_ids == ["paper:1", "paper:2", "paper:3"]
-    assert [source["source_id"] for source in evolved[0].evidence_sources] == ["paper:1", "paper:2", "paper:3"]
+    assert evolved[0].evidence_source_ids == ["paper:1"]
+    assert [source["source_id"] for source in evolved[0].evidence_sources] == ["paper:1"]
     assert evolved[0].references == [{"id": "paper:1"}, {"id": "paper:3"}]
     assert first.to_dict() == original_first
     assert second.to_dict() == original_second
@@ -220,6 +256,8 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
         "reasoning": "off",
     }
     assert "never edit" in call_llm.call_args_list[0].args[0]
+    assert "Select the smallest subset" in call_llm.call_args_list[0].args[0]
+    assert '"evidence_source_ids": ["exact supplied source_id"]' in call_llm.call_args_list[0].args[0]
     assert "Combination" not in first.title
 
 
@@ -253,8 +291,8 @@ def test_strategy_library_rotates_across_iterations():
     context.iteration_number = 1
     agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
     responses = [
-        '{"title": "Simpler", "hypothesis": "A single intervention tests X."}',
-        '{"title": "Grounded", "hypothesis": "Existing evidence supports testing X first."}',
+        '{"title": "Simpler", "hypothesis": "A single intervention tests X.", "evidence_source_ids": ["paper:1"]}',
+        '{"title": "Grounded", "hypothesis": "Existing evidence supports testing X first.", "evidence_source_ids": ["paper:1"]}',
     ]
 
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
@@ -309,7 +347,7 @@ def test_transient_evolution_transport_failure_is_retried():
         "app.agents.call_llm",
         side_effect=[
             "Error: provider temporarily unavailable",
-            '{"title": "Recovered child", "hypothesis": "A decisive intervention tests X causally."}',
+            '{"title": "Recovered child", "hypothesis": "A decisive intervention tests X causally.", "evidence_source_ids": ["paper:1"]}',
         ],
     ) as call_llm:
         evolved = agent.evolve_hypotheses(context, _goal())
@@ -429,7 +467,7 @@ def test_evolution_resolves_parent_evidence_ids_from_context_sources():
 
     with patch(
         "app.agents.call_llm",
-        return_value='{"title": "Grounded", "hypothesis": "Evidence supports a direct test."}',
+        return_value='{"title": "Grounded", "hypothesis": "Evidence supports a direct test.", "evidence_source_ids": ["paper:1"]}',
     ) as call_llm:
         evolved = agent.evolve_hypotheses(context, _goal(top_k=1))
 

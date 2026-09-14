@@ -1026,6 +1026,11 @@ without turning optional ideas into hard requirements.
   explicitly present, and do not emit overlapping or duplicate requirements.
 - exploration_directions: 0 to 5 optional search angles that must never become
   evidence gates.
+- Every query and sub_question must be self-contained. When the request names
+  an indispensable dataset, entity, disease, material, or technology, repeat
+  that anchor in the query and sub_question. Never search for a bare metric or
+  outcome fragment such as "emphasis on weighted F1"; pair it with the domain,
+  named dataset or entity, and relevant method.
 - Each query must preserve its routing intent. source_type must be exactly one
   of academic, web, official, or news. preferred_domains contains hostnames
   only. freshness is day, week, month, year, or null. Link a query to one of
