@@ -230,6 +230,49 @@ Fixed as a result (`bc73195`, `241d991`):
   fields to `experiment_summary.json` while the validator only read
   `metrics.json`. A timing in either file now satisfies the contract.
 
+## Measured after the changes
+
+`run-20260914-082624-86d7c161`, scored by the same judge (`qwen/qwen3.8-27b`) at
+the same 0.7 threshold as the baselines, `hypothesis` and `rag` suites run
+separately. Reports: `eval/reports/hyp-run-20260914-082624-86d7c161.json` and
+`eval/reports/rag-run-20260914-082624-86d7c161.json`.
+
+| Metric | hyp-run-...7fe71a20 | all-run-...2dc89266 | after |
+| --- | --- | --- | --- |
+| Goal alignment | 0.7 | 0.9 | 0.9 |
+| Experimental readiness | 1.0 | 1.0 | 1.0 |
+| Scientific testability | 0.9 | 0.9 | 0.9 |
+| Scientific plausibility | 0.6 | 0.4 | **0.7** |
+| Feasibility | 0.2 | 0.3 | **0.5** |
+| Novelty vs prior art | 0.8 | 0.5 | 0.6 |
+| Answer relevancy | 1.0 | 1.0 | 0.98 |
+| Faithfulness | 1.0 | 1.0 | 1.0 |
+| Contextual relevancy | 0.875 | 0.708 | 0.77 |
+
+Plausibility passed for the first time. Feasibility rose above both baselines
+but still fails. Novelty landed between the two baselines, which settles
+nothing.
+
+**This does not establish that the changes caused the movement.** It is one run
+against one run, the two differ in more than the code — arXiv and Semantic
+Scholar were both rate-limited for this cycle, so its evidence base was thinner
+— and the selected hypothesis is a different one. A causal claim needs repeated
+runs on the same goal.
+
+Two patterns in the judge's reasons are worth acting on, and they are
+observations about the hypotheses rather than about the scores:
+
+- Feasibility loses the same points in both runs: no required compute,
+  instrumentation, training duration, expertise, or implementation burden. The
+  Evolution `feasibility` strategy asks for "an implementable validation path"
+  without naming any of them.
+- Plausibility was marked down for "invoking the need for joint CPU/bandwidth
+  control while specifying only bandwidth allocation" — an internal
+  inconsistency, which is exactly what deep verification is meant to catch. It
+  returned no INVALID assumption. The decomposition appears to test each
+  assumption against outside knowledge while not checking the assumptions
+  against each other, though the prompt asks for both.
+
 ## Remaining
 
 - Observation review and simulation review, deferred from P0-2. Each is another
@@ -237,11 +280,14 @@ Fixed as a result (`bc73195`, `241d991`):
 - Evolved children carry no prior-art audit, so the novelty anchor added in
   `9990511` does not reach them. Their novelty score is still judged against
   their parents' evidence alone.
-- Measure the effect. The four items target plausibility, novelty and
-  feasibility; none of that is confirmed until an eval run against a live
-  LM Studio server reproduces the table above. Compare against
-  `eval/reports/all-run-20260914-063317-2dc89266.json`. The first live cycle
-  showed the mechanisms firing, not that the scores moved.
+- Repeat the measurement. One run against one run cannot separate the changes
+  from the run-to-run variance or from this cycle's thinner evidence. Several
+  runs on the same goal, same judge, would.
 - The deep verification gate has not yet fired on real output. Every assumption
-  so far came back VALID or UNCERTAIN, so its effect on plausibility rests on
-  the verdicts reaching the Ranking judge rather than on any rejection.
+  so far came back VALID or UNCERTAIN, and it missed an internal inconsistency
+  the feasibility judge did catch, so its effect on plausibility currently rests
+  on the verdicts reaching the Ranking judge rather than on any rejection.
+- Feasibility still fails. The judge names the same missing items each time;
+  whether to name them in the Evolution strategy and the Generation criteria is
+  a judgement call, since writing a prompt toward one judge's checklist risks
+  fitting the metric rather than the science.
