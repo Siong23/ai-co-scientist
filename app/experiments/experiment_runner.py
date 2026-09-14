@@ -88,6 +88,17 @@ class ExperimentRunner:
         "total_execution_seconds",
     }
 
+    # A generated script often records the run's timings in
+    # experiment_summary.json rather than metrics.json.  Both files are outputs
+    # of the same run, so a timing written to either one satisfies the
+    # contract; rejecting a completed experiment over which file holds it
+    # discards real results.
+    TIMING_METRICS = {
+        "training_seconds",
+        "evaluation_seconds",
+        "total_execution_seconds",
+    }
+
     REQUIRED_VISUALIZATION_STEMS = {
         "loss_visualization",
         "accuracy_visualization",
@@ -119,16 +130,9 @@ class ExperimentRunner:
 
         self.output_directory = Path(output_directory)
 
-        self.timeout_seconds = (
-            self.DEFAULT_TIMEOUT_SECONDS
-            if timeout_seconds is None
-            else max(1, int(timeout_seconds))
-        )
+        self.timeout_seconds = self.DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else max(1, int(timeout_seconds))
 
-        self.python_executable = (
-            python_executable
-            or sys.executable
-        )
+        self.python_executable = python_executable or sys.executable
 
         self.output_directory.mkdir(
             parents=True,
@@ -145,9 +149,7 @@ class ExperimentRunner:
         Generate a filesystem-safe timestamp.
         """
 
-        return datetime.now().strftime(
-            "%Y%m%d_%H%M%S"
-        )
+        return datetime.now().strftime("%Y%m%d_%H%M%S")
 
     @staticmethod
     def _read_json(
@@ -173,9 +175,7 @@ class ExperimentRunner:
             if isinstance(data, dict):
                 return data
 
-            return {
-                "value": data
-            }
+            return {"value": data}
 
         except Exception:
             return None
@@ -222,7 +222,8 @@ class ExperimentRunner:
             safe_name = "".join(
                 character
                 if character.isalnum()
-                or character in (
+                or character
+                in (
                     "-",
                     "_",
                 )
@@ -230,19 +231,12 @@ class ExperimentRunner:
                 for character in run_name
             )
 
-            directory_name = (
-                f"{safe_name}_{self._timestamp()}"
-            )
+            directory_name = f"{safe_name}_{self._timestamp()}"
 
         else:
-            directory_name = (
-                f"experiment_{self._timestamp()}"
-            )
+            directory_name = f"experiment_{self._timestamp()}"
 
-        run_directory = (
-            self.output_directory
-            / directory_name
-        )
+        run_directory = self.output_directory / directory_name
 
         run_directory.mkdir(
             parents=True,
@@ -270,19 +264,12 @@ class ExperimentRunner:
             generated_code,
             str,
         ):
-            raise TypeError(
-                "Generated code must be a string."
-            )
+            raise TypeError("Generated code must be a string.")
 
         if not generated_code.strip():
-            raise ValueError(
-                "Generated code is empty."
-            )
+            raise ValueError("Generated code is empty.")
 
-        code_path = (
-            run_directory
-            / filename
-        )
+        code_path = run_directory / filename
 
         code_path.write_text(
             generated_code,
@@ -304,23 +291,14 @@ class ExperimentRunner:
         source = Path(source_path)
 
         if not source.exists():
-            raise FileNotFoundError(
-                f"Generated experiment was not found: {source}"
-            )
+            raise FileNotFoundError(f"Generated experiment was not found: {source}")
 
         if source.suffix.lower() != ".py":
-            raise ValueError(
-                "Generated experiment must be a Python (.py) file."
-            )
+            raise ValueError("Generated experiment must be a Python (.py) file.")
 
-        destination = (
-            run_directory
-            / "generated_experiment.py"
-        )
+        destination = run_directory / "generated_experiment.py"
 
-        destination.write_bytes(
-            source.read_bytes()
-        )
+        destination.write_bytes(source.read_bytes())
 
         return destination
 
@@ -331,12 +309,8 @@ class ExperimentRunner:
     def save_experiment_metadata(
         self,
         run_directory: Path,
-        generated_result: Optional[
-            Dict[str, Any]
-        ] = None,
-        dataset_path: Optional[
-            str | Path
-        ] = None,
+        generated_result: Optional[Dict[str, Any]] = None,
+        dataset_path: Optional[str | Path] = None,
     ) -> Path:
         """
         Save metadata describing the experiment run.
@@ -357,20 +331,10 @@ class ExperimentRunner:
 
         metadata = {
             "created_at": datetime.now().isoformat(),
-            "dataset_path": (
-                str(dataset_path)
-                if dataset_path is not None
-                else None
-            ),
-            "model": generated_result.get(
-                "model"
-            ),
-            "model_recommendation": generated_result.get(
-                "model_recommendation"
-            ),
-            "experiment_plan": generated_result.get(
-                "experiment_plan"
-            ),
+            "dataset_path": (str(dataset_path) if dataset_path is not None else None),
+            "model": generated_result.get("model"),
+            "model_recommendation": generated_result.get("model_recommendation"),
+            "experiment_plan": generated_result.get("experiment_plan"),
             "assumptions": generated_result.get(
                 "assumptions",
                 [],
@@ -381,10 +345,7 @@ class ExperimentRunner:
             ),
         }
 
-        metadata_path = (
-            run_directory
-            / "experiment_metadata.json"
-        )
+        metadata_path = run_directory / "experiment_metadata.json"
 
         self._write_json(
             metadata_path,
@@ -400,9 +361,7 @@ class ExperimentRunner:
     def build_environment(
         self,
         run_directory: Path,
-        dataset_path: Optional[
-            str | Path
-        ] = None,
+        dataset_path: Optional[str | Path] = None,
     ) -> Dict[str, str]:
         """
         Build the environment variables supplied to the generated
@@ -416,18 +375,10 @@ class ExperimentRunner:
 
         environment = os.environ.copy()
 
-        environment[
-            "EXPERIMENT_OUTPUT_DIR"
-        ] = str(
-            run_directory
-        )
+        environment["EXPERIMENT_OUTPUT_DIR"] = str(run_directory)
 
         if dataset_path is not None:
-            environment[
-                "DATASET_PATH"
-            ] = str(
-                Path(dataset_path).resolve()
-            )
+            environment["DATASET_PATH"] = str(Path(dataset_path).resolve())
 
         return environment
 
@@ -503,8 +454,7 @@ class ExperimentRunner:
         ):
             return (
                 False,
-                f"Rejected invalid package name: "
-                f"{package_name}",
+                f"Rejected invalid package name: {package_name}",
             )
 
         command = [
@@ -523,11 +473,7 @@ class ExperimentRunner:
                 timeout=300,
             )
 
-            output = (
-                (process.stdout or "")
-                + "\n"
-                + (process.stderr or "")
-            )
+            output = (process.stdout or "") + "\n" + (process.stderr or "")
 
             if process.returncode == 0:
                 return True, output
@@ -537,14 +483,11 @@ class ExperimentRunner:
         except subprocess.TimeoutExpired:
             return (
                 False,
-                f"Timed out while installing "
-                f"{package_name}.",
+                f"Timed out while installing {package_name}.",
             )
 
         except Exception as error:
             return False, str(error)
-
-
 
     # ============================================================
     # LLM-Based Automatic Code Repair
@@ -582,9 +525,7 @@ class ExperimentRunner:
             # ----------------------------------------------------
             # Read the current generated experiment.
             # ----------------------------------------------------
-            current_code = code_path.read_text(
-                encoding="utf-8"
-            )
+            current_code = code_path.read_text(encoding="utf-8")
 
             if not current_code.strip():
                 return (
@@ -602,31 +543,17 @@ class ExperimentRunner:
             # of receiving a completely new experiment definition.
             # ----------------------------------------------------
             if isinstance(generated_result, dict):
-
                 specification = {
                     "dataset": {
                         "name": "5G-NIDD",
-                        "path": (
-                            str(dataset_path)
-                            if dataset_path is not None
-                            else None
-                        ),
-                        "task": (
-                            "5G network intrusion "
-                            "detection classification"
-                        ),
+                        "path": (str(dataset_path) if dataset_path is not None else None),
+                        "task": ("5G network intrusion detection classification"),
                     },
                     "selected_hypothesis": {
-                        "title": (
-                            "Automatically generated "
-                            "deep-learning experiment"
-                        ),
+                        "title": ("Automatically generated deep-learning experiment"),
                         "text": (
-                            generated_result.get(
-                                "experiment_plan"
-                            )
-                            or
-                            "Repair the generated experiment "
+                            generated_result.get("experiment_plan")
+                            or "Repair the generated experiment "
                             "while preserving its original "
                             "research objective and model."
                         ),
@@ -655,25 +582,14 @@ class ExperimentRunner:
                 }
 
             else:
-
                 specification = {
                     "dataset": {
                         "name": "5G-NIDD",
-                        "path": (
-                            str(dataset_path)
-                            if dataset_path is not None
-                            else None
-                        ),
-                        "task": (
-                            "5G network intrusion "
-                            "detection classification"
-                        ),
+                        "path": (str(dataset_path) if dataset_path is not None else None),
+                        "task": ("5G network intrusion detection classification"),
                     },
                     "selected_hypothesis": {
-                        "title": (
-                            "Automatically generated "
-                            "deep-learning experiment"
-                        ),
+                        "title": ("Automatically generated deep-learning experiment"),
                         "text": (
                             "Repair the generated experiment "
                             "while preserving its original "
@@ -719,12 +635,10 @@ class ExperimentRunner:
             # ----------------------------------------------------
             repair_agent = CodeGenerationAgent()
 
-            repair_result = (
-                repair_agent.repair_generated_code(
-                    specification=specification,
-                    generated_code=current_code,
-                    execution_result=execution_result,
-                )
+            repair_result = repair_agent.repair_generated_code(
+                specification=specification,
+                generated_code=current_code,
+                execution_result=execution_result,
             )
 
             if not isinstance(
@@ -749,21 +663,18 @@ class ExperimentRunner:
                 return (
                     False,
                     "",
-                    "LLM repair failed: "
-                    + "; ".join(
-                        str(error)
-                        for error in errors
-                    ),
+                    "LLM repair failed: " + "; ".join(str(error) for error in errors),
                 )
 
-            repaired_code = repair_result.get(
-                "pytorch_code"
-            )
+            repaired_code = repair_result.get("pytorch_code")
 
-            if not isinstance(
-                repaired_code,
-                str,
-            ) or not repaired_code.strip():
+            if (
+                not isinstance(
+                    repaired_code,
+                    str,
+                )
+                or not repaired_code.strip()
+            ):
                 return (
                     False,
                     "",
@@ -776,17 +687,12 @@ class ExperimentRunner:
             import ast
 
             try:
-                ast.parse(
-                    repaired_code
-                )
+                ast.parse(repaired_code)
             except SyntaxError as error:
                 return (
                     False,
                     "",
-                    (
-                        "LLM returned syntactically invalid "
-                        f"Python: {error}"
-                    ),
+                    (f"LLM returned syntactically invalid Python: {error}"),
                 )
 
             # ----------------------------------------------------
@@ -802,8 +708,7 @@ class ExperimentRunner:
             return (
                 True,
                 repaired_code,
-                "CodeGenerationAgent successfully repaired "
-                "the generated experiment.",
+                "CodeGenerationAgent successfully repaired the generated experiment.",
             )
 
         except Exception as error:
@@ -813,7 +718,6 @@ class ExperimentRunner:
                 f"LLM repair exception: {error}",
             )
 
-
     # ============================================================
     # Execute Experiment
     # ============================================================
@@ -822,12 +726,8 @@ class ExperimentRunner:
         self,
         code_path: str | Path,
         run_directory: Path,
-        dataset_path: Optional[
-            str | Path
-        ] = None,
-        generated_result: Optional[
-            Dict[str, Any]
-        ] = None,
+        dataset_path: Optional[str | Path] = None,
+        generated_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Execute the generated Python experiment.
@@ -838,19 +738,11 @@ class ExperimentRunner:
         code_path = Path(code_path).resolve()
 
         if not code_path.exists():
-            raise FileNotFoundError(
-                f"Experiment code does not exist: {code_path}"
-            )
+            raise FileNotFoundError(f"Experiment code does not exist: {code_path}")
 
-        stdout_path = (
-            run_directory
-            / "stdout.log"
-        )
+        stdout_path = run_directory / "stdout.log"
 
-        stderr_path = (
-            run_directory
-            / "stderr.log"
-        )
+        stderr_path = run_directory / "stderr.log"
 
         command = [
             self.python_executable,
@@ -891,7 +783,6 @@ class ExperimentRunner:
             attempt = 0
 
             while attempt < MAX_EXPERIMENT_ATTEMPTS:
-
                 attempt += 1
 
                 logger.debug(
@@ -920,7 +811,6 @@ class ExperimentRunner:
                 # ========================================================
 
                 if process.returncode == 0:
-
                     result.update(
                         {
                             "return_code": 0,
@@ -929,12 +819,9 @@ class ExperimentRunner:
                             "success": True,
                             "status": "completed",
                             "installed_packages": installed_packages,
-                            "dependency_install_attempts":
-                                dependency_install_attempts,
-                            "repair_attempts":
-                                repair_attempts,
-                            "experiment_attempts":
-                                attempt,
+                            "dependency_install_attempts": dependency_install_attempts,
+                            "repair_attempts": repair_attempts,
+                            "experiment_attempts": attempt,
                         }
                     )
 
@@ -946,32 +833,19 @@ class ExperimentRunner:
                 # 1. MISSING PYTHON DEPENDENCY
                 # ========================================================
 
-                missing_module = (
-                    self._extract_missing_module(
-                        stderr
-                    )
-                )
+                missing_module = self._extract_missing_module(stderr)
 
                 if missing_module:
-
                     if missing_module not in installed_packages:
-
                         logger.warning(
                             "Missing dependency detected: %s",
                             missing_module,
                         )
 
-                        install_success, install_output = (
-                            self._install_package(
-                                missing_module
-                            )
-                        )
+                        install_success, install_output = self._install_package(missing_module)
 
                         if install_success:
-
-                            installed_packages.append(
-                                missing_module
-                            )
+                            installed_packages.append(missing_module)
 
                             dependency_install_attempts += 1
 
@@ -987,26 +861,19 @@ class ExperimentRunner:
                             continue
 
                         else:
-
                             result.update(
                                 {
-                                    "return_code":
-                                        process.returncode,
-                                    "stdout":
-                                        stdout,
-                                    "stderr":
-                                        stderr,
-                                    "success":
-                                        False,
-                                    "status":
-                                        "dependency_install_failed",
-                                    "error":
-                                        (
-                                            "Failed to automatically "
-                                            f"install dependency "
-                                            f"'{missing_module}'.\n"
-                                            f"{install_output}"
-                                        ),
+                                    "return_code": process.returncode,
+                                    "stdout": stdout,
+                                    "stderr": stderr,
+                                    "success": False,
+                                    "status": "dependency_install_failed",
+                                    "error": (
+                                        "Failed to automatically "
+                                        f"install dependency "
+                                        f"'{missing_module}'.\n"
+                                        f"{install_output}"
+                                    ),
                                 }
                             )
 
@@ -1016,14 +883,12 @@ class ExperimentRunner:
                 # 2. LLM-BASED AUTOMATIC CODE REPAIR
                 # ========================================================
 
-                repair_success, repaired_code, repair_message = (
-                    self._repair_experiment_with_llm(
-                        code_path=code_path,
-                        stderr=stderr,
-                        stdout=stdout,
-                        dataset_path=dataset_path,
-                        generated_result=generated_result,
-                    )
+                repair_success, repaired_code, repair_message = self._repair_experiment_with_llm(
+                    code_path=code_path,
+                    stderr=stderr,
+                    stdout=stdout,
+                    dataset_path=dataset_path,
+                    generated_result=generated_result,
                 )
 
                 if repair_success:
@@ -1051,13 +916,10 @@ class ExperimentRunner:
                         "success": False,
                         "status": "repair_failed",
                         "error": (
-                            "Generated experiment failed and "
-                            "automatic LLM repair was unsuccessful.\n"
-                            f"{stderr.strip()}"
+                            f"Generated experiment failed and automatic LLM repair was unsuccessful.\n{stderr.strip()}"
                         ),
                         "repair_attempts": repair_attempts,
-                        "dependency_install_attempts":
-                            dependency_install_attempts,
+                        "dependency_install_attempts": dependency_install_attempts,
                         "experiment_attempts": attempt,
                     }
                 )
@@ -1090,15 +952,10 @@ class ExperimentRunner:
                 result["success"] = False
                 result["status"] = "failed"
 
-                result["error"] = (
-                    "Generated experiment exited "
-                    f"with return code {process.returncode}."
-                )
+                result["error"] = f"Generated experiment exited with return code {process.returncode}."
 
                 if stderr.strip():
-                    result["error"] += (
-                        f"\n{stderr.strip()}"
-                    )
+                    result["error"] += f"\n{stderr.strip()}"
 
         except subprocess.TimeoutExpired as error:
             stdout = (
@@ -1134,10 +991,7 @@ class ExperimentRunner:
                     "status": "timeout",
                     "stdout": stdout,
                     "stderr": stderr,
-                    "error": (
-                        "Experiment exceeded the execution "
-                        f"timeout of {self.timeout_seconds} seconds."
-                    ),
+                    "error": (f"Experiment exceeded the execution timeout of {self.timeout_seconds} seconds."),
                 }
             )
 
@@ -1152,14 +1006,9 @@ class ExperimentRunner:
         finally:
             finished_at = datetime.now()
 
-            result["finished_at"] = (
-                finished_at.isoformat()
-            )
+            result["finished_at"] = finished_at.isoformat()
 
-            result["execution_seconds"] = (
-                time.perf_counter()
-                - start_time
-            )
+            result["execution_seconds"] = time.perf_counter() - start_time
 
         return result
 
@@ -1178,17 +1027,12 @@ class ExperimentRunner:
         First checks the run root, then searches recursively.
         """
 
-        direct_path = (
-            run_directory
-            / filename
-        )
+        direct_path = run_directory / filename
 
         if direct_path.exists():
             return direct_path
 
-        matches = list(
-            run_directory.rglob(filename)
-        )
+        matches = list(run_directory.rglob(filename))
 
         if matches:
             return matches[0]
@@ -1205,9 +1049,7 @@ class ExperimentRunner:
 
         path = self.find_output_file(
             run_directory,
-            self.DEFAULT_OUTPUT_FILES[
-                "metrics"
-            ],
+            self.DEFAULT_OUTPUT_FILES["metrics"],
         )
 
         if path is None:
@@ -1226,9 +1068,7 @@ class ExperimentRunner:
 
         path = self.find_output_file(
             run_directory,
-            self.DEFAULT_OUTPUT_FILES[
-                "training_history"
-            ],
+            self.DEFAULT_OUTPUT_FILES["training_history"],
         )
 
         if path is None:
@@ -1271,11 +1111,7 @@ class ExperimentRunner:
         }
 
         for path in run_directory.rglob("*"):
-            if (
-                path.is_file()
-                and path.suffix.lower()
-                in checkpoint_extensions
-            ):
+            if path.is_file() and path.suffix.lower() in checkpoint_extensions:
                 return str(path)
 
         return None
@@ -1291,18 +1127,10 @@ class ExperimentRunner:
         visualizations: List[str] = []
 
         for path in run_directory.rglob("*"):
-            if (
-                path.is_file()
-                and path.suffix.lower()
-                in self.DEFAULT_VISUALIZATION_EXTENSIONS
-            ):
-                visualizations.append(
-                    str(path)
-                )
+            if path.is_file() and path.suffix.lower() in self.DEFAULT_VISUALIZATION_EXTENSIONS:
+                visualizations.append(str(path))
 
-        return sorted(
-            visualizations
-        )
+        return sorted(visualizations)
 
     def collect_outputs(
         self,
@@ -1314,72 +1142,30 @@ class ExperimentRunner:
 
         metrics_path = self.find_output_file(
             run_directory,
-            self.DEFAULT_OUTPUT_FILES[
-                "metrics"
-            ],
+            self.DEFAULT_OUTPUT_FILES["metrics"],
         )
 
         history_path = self.find_output_file(
             run_directory,
-            self.DEFAULT_OUTPUT_FILES[
-                "training_history"
-            ],
+            self.DEFAULT_OUTPUT_FILES["training_history"],
         )
 
         summary_path = self.find_output_file(
             run_directory,
-            self.DEFAULT_OUTPUT_FILES[
-                "summary"
-            ],
+            self.DEFAULT_OUTPUT_FILES["summary"],
         )
 
-        checkpoint_path = self.find_checkpoint(
-            run_directory
-        )
+        checkpoint_path = self.find_checkpoint(run_directory)
 
-        visualizations = (
-            self.find_visualizations(
-                run_directory
-            )
-        )
+        visualizations = self.find_visualizations(run_directory)
 
         return {
-            "metrics": (
-                self._read_json(
-                    metrics_path
-                )
-                if metrics_path
-                else None
-            ),
-            "metrics_path": (
-                str(metrics_path)
-                if metrics_path
-                else None
-            ),
-            "training_history": (
-                self._read_json(
-                    history_path
-                )
-                if history_path
-                else None
-            ),
-            "training_history_path": (
-                str(history_path)
-                if history_path
-                else None
-            ),
-            "experiment_summary": (
-                self._read_json(
-                    summary_path
-                )
-                if summary_path
-                else None
-            ),
-            "experiment_summary_path": (
-                str(summary_path)
-                if summary_path
-                else None
-            ),
+            "metrics": (self._read_json(metrics_path) if metrics_path else None),
+            "metrics_path": (str(metrics_path) if metrics_path else None),
+            "training_history": (self._read_json(history_path) if history_path else None),
+            "training_history_path": (str(history_path) if history_path else None),
+            "experiment_summary": (self._read_json(summary_path) if summary_path else None),
+            "experiment_summary_path": (str(summary_path) if summary_path else None),
             "checkpoint_path": checkpoint_path,
             "visualizations": visualizations,
         }
@@ -1395,16 +1181,10 @@ class ExperimentRunner:
             return not math.isfinite(value)
 
         if isinstance(value, dict):
-            return any(
-                ExperimentRunner._has_nonfinite_number(item)
-                for item in value.values()
-            )
+            return any(ExperimentRunner._has_nonfinite_number(item) for item in value.values())
 
         if isinstance(value, (list, tuple)):
-            return any(
-                ExperimentRunner._has_nonfinite_number(item)
-                for item in value
-            )
+            return any(ExperimentRunner._has_nonfinite_number(item) for item in value)
 
         return False
 
@@ -1420,66 +1200,45 @@ class ExperimentRunner:
 
         warnings: List[str] = []
 
-        if execution_result.get(
-            "success"
-        ):
+        if execution_result.get("success"):
             metrics = outputs.get("metrics")
             history = outputs.get("training_history")
 
             if metrics is None:
-                warnings.append(
-                    "metrics.json was not found."
-                )
+                warnings.append("metrics.json was not found.")
             else:
-                missing_metrics = sorted(
-                    ExperimentRunner.REQUIRED_METRICS - set(metrics)
-                )
+                available_metrics = set(metrics)
+                summary = outputs.get("experiment_summary")
+                if isinstance(summary, dict):
+                    available_metrics |= {
+                        key
+                        for key in ExperimentRunner.TIMING_METRICS & set(summary)
+                        if isinstance(summary[key], (int, float))
+                        and not isinstance(summary[key], bool)
+                        and math.isfinite(summary[key])
+                    }
+
+                missing_metrics = sorted(ExperimentRunner.REQUIRED_METRICS - available_metrics)
                 if missing_metrics:
-                    warnings.append(
-                        "metrics.json is missing required fields: "
-                        + ", ".join(missing_metrics)
-                    )
+                    warnings.append("metrics.json is missing required fields: " + ", ".join(missing_metrics))
                 if ExperimentRunner._has_nonfinite_number(metrics):
-                    warnings.append(
-                        "metrics.json contains NaN or infinite values."
-                    )
+                    warnings.append("metrics.json contains NaN or infinite values.")
 
             if history is None:
-                warnings.append(
-                    "training_history.json was not found."
-                )
+                warnings.append("training_history.json was not found.")
             elif ExperimentRunner._has_nonfinite_number(history):
-                warnings.append(
-                    "training_history.json contains NaN or infinite values."
-                )
+                warnings.append("training_history.json contains NaN or infinite values.")
 
-            if outputs.get(
-                "checkpoint_path"
-            ) is None:
-                warnings.append(
-                    "No PyTorch checkpoint was found."
-                )
+            if outputs.get("checkpoint_path") is None:
+                warnings.append("No PyTorch checkpoint was found.")
 
-            if not outputs.get(
-                "visualizations"
-            ):
-                warnings.append(
-                    "No visualization files were found."
-                )
+            if not outputs.get("visualizations"):
+                warnings.append("No visualization files were found.")
             else:
-                visualization_stems = {
-                    Path(path).stem
-                    for path in outputs["visualizations"]
-                }
-                missing_visualizations = sorted(
-                    ExperimentRunner.REQUIRED_VISUALIZATION_STEMS
-                    - visualization_stems
-                )
+                visualization_stems = {Path(path).stem for path in outputs["visualizations"]}
+                missing_visualizations = sorted(ExperimentRunner.REQUIRED_VISUALIZATION_STEMS - visualization_stems)
                 if missing_visualizations:
-                    warnings.append(
-                        "Missing required visualizations: "
-                        + ", ".join(missing_visualizations)
-                    )
+                    warnings.append("Missing required visualizations: " + ", ".join(missing_visualizations))
 
         return {
             "valid": (
@@ -1499,15 +1258,9 @@ class ExperimentRunner:
     def run(
         self,
         generated_code: Optional[str] = None,
-        code_path: Optional[
-            str | Path
-        ] = None,
-        dataset_path: Optional[
-            str | Path
-        ] = None,
-        generated_result: Optional[
-            Dict[str, Any]
-        ] = None,
+        code_path: Optional[str | Path] = None,
+        dataset_path: Optional[str | Path] = None,
+        generated_result: Optional[Dict[str, Any]] = None,
         run_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -1540,11 +1293,7 @@ class ExperimentRunner:
             "status": "not_started",
             "run_directory": None,
             "generated_code_path": None,
-            "dataset_path": (
-                str(dataset_path)
-                if dataset_path is not None
-                else None
-            ),
+            "dataset_path": (str(dataset_path) if dataset_path is not None else None),
             "execution": None,
             "outputs": None,
             "output_validation": None,
@@ -1559,54 +1308,32 @@ class ExperimentRunner:
             # Validate code input
             # ----------------------------------------------------
 
-            if (
-                generated_code is None
-                and code_path is None
-            ):
-                raise ValueError(
-                    "Either generated_code or code_path "
-                    "must be provided."
-                )
+            if generated_code is None and code_path is None:
+                raise ValueError("Either generated_code or code_path must be provided.")
 
-            if (
-                generated_code is not None
-                and not isinstance(
-                    generated_code,
-                    str,
-                )
+            if generated_code is not None and not isinstance(
+                generated_code,
+                str,
             ):
-                raise TypeError(
-                    "generated_code must be a string."
-                )
+                raise TypeError("generated_code must be a string.")
 
             # ----------------------------------------------------
             # Validate dataset path when supplied
             # ----------------------------------------------------
 
             if dataset_path is not None:
-                dataset = Path(
-                    dataset_path
-                )
+                dataset = Path(dataset_path)
 
                 if not dataset.exists():
-                    raise FileNotFoundError(
-                        "Dataset path does not exist: "
-                        f"{dataset}"
-                    )
+                    raise FileNotFoundError(f"Dataset path does not exist: {dataset}")
 
             # ----------------------------------------------------
             # Create run directory
             # ----------------------------------------------------
 
-            run_directory = (
-                self.create_run_directory(
-                    run_name
-                )
-            )
+            run_directory = self.create_run_directory(run_name)
 
-            result[
-                "run_directory"
-            ] = str(run_directory)
+            result["run_directory"] = str(run_directory)
 
             # ----------------------------------------------------
             # Save metadata
@@ -1623,72 +1350,50 @@ class ExperimentRunner:
             # ----------------------------------------------------
 
             if generated_code is not None:
-                experiment_code_path = (
-                    self.prepare_generated_code(
-                        generated_code,
-                        run_directory,
-                    )
+                experiment_code_path = self.prepare_generated_code(
+                    generated_code,
+                    run_directory,
                 )
 
             else:
-                experiment_code_path = (
-                    self.copy_generated_code(
-                        code_path,
-                        run_directory,
-                    )
+                experiment_code_path = self.copy_generated_code(
+                    code_path,
+                    run_directory,
                 )
 
-            result[
-                "generated_code_path"
-            ] = str(
-                experiment_code_path
-            )
+            result["generated_code_path"] = str(experiment_code_path)
 
             # ----------------------------------------------------
             # Execute
             # ----------------------------------------------------
 
-            execution_result = (
-                self.execute(
-                    experiment_code_path,
-                    run_directory,
-                    dataset_path,
-                    generated_result=generated_result,
-                )
+            execution_result = self.execute(
+                experiment_code_path,
+                run_directory,
+                dataset_path,
+                generated_result=generated_result,
             )
 
-            result[
-                "execution"
-            ] = execution_result
+            result["execution"] = execution_result
 
             # ----------------------------------------------------
             # Collect outputs
             # ----------------------------------------------------
 
-            outputs = (
-                self.collect_outputs(
-                    run_directory
-                )
-            )
+            outputs = self.collect_outputs(run_directory)
 
-            result[
-                "outputs"
-            ] = outputs
+            result["outputs"] = outputs
 
             # ----------------------------------------------------
             # Validate outputs
             # ----------------------------------------------------
 
-            output_validation = (
-                self.validate_outputs(
-                    execution_result,
-                    outputs,
-                )
+            output_validation = self.validate_outputs(
+                execution_result,
+                outputs,
             )
 
-            result[
-                "output_validation"
-            ] = output_validation
+            result["output_validation"] = output_validation
 
             # ----------------------------------------------------
             # Overall status
@@ -1696,74 +1401,40 @@ class ExperimentRunner:
 
             if execution_result.get("success", False):
                 result["success"] = bool(output_validation.get("valid"))
-                result["status"] = (
-                    "completed"
-                    if result["success"]
-                    else "invalid_outputs"
-                )
+                result["status"] = "completed" if result["success"] else "invalid_outputs"
                 if not result["success"]:
-                    result["errors"].extend(
-                        output_validation.get("warnings", [])
-                    )
+                    result["errors"].extend(output_validation.get("warnings", []))
 
             else:
-                result[
-                    "status"
-                ] = execution_result.get(
+                result["status"] = execution_result.get(
                     "status",
                     "failed",
                 )
 
-                if execution_result.get(
-                    "error"
-                ):
-                    result[
-                        "errors"
-                    ].append(
-                        execution_result[
-                            "error"
-                        ]
-                    )
+                if execution_result.get("error"):
+                    result["errors"].append(execution_result["error"])
 
         except Exception as error:
-            result[
-                "status"
-            ] = "runner_error"
+            result["status"] = "runner_error"
 
-            result[
-                "errors"
-            ].append(
-                str(error)
-            )
+            result["errors"].append(str(error))
 
         finally:
-            result[
-                "total_execution_seconds"
-            ] = (
-                time.perf_counter()
-                - total_start
-            )
+            result["total_execution_seconds"] = time.perf_counter() - total_start
 
             # ----------------------------------------------------
             # Save final runner result
             # ----------------------------------------------------
 
             if run_directory is not None:
-                result_path = (
-                    run_directory
-                    / "runner_result.json"
-                )
+                result_path = run_directory / "runner_result.json"
 
                 self._write_json(
                     result_path,
                     result,
                 )
 
-                result[
-                    "runner_result_path"
-                ] = str(
-                    result_path
-                )
+                result["runner_result_path"] = str(result_path)
 
         return result
 
@@ -1774,9 +1445,7 @@ class ExperimentRunner:
     def run_generated_result(
         self,
         generated_result: Dict[str, Any],
-        dataset_path: Optional[
-            str | Path
-        ] = None,
+        dataset_path: Optional[str | Path] = None,
         run_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -1798,9 +1467,7 @@ class ExperimentRunner:
             generated_result,
             dict,
         ):
-            raise TypeError(
-                "generated_result must be a dictionary."
-            )
+            raise TypeError("generated_result must be a dictionary.")
 
         if not generated_result.get(
             "success",
@@ -1812,19 +1479,13 @@ class ExperimentRunner:
                 "errors": (
                     generated_result.get(
                         "errors",
-                        [
-                            "Code generation failed."
-                        ],
+                        ["Code generation failed."],
                     )
                 ),
                 "generation_result": generated_result,
             }
 
-        generated_code = (
-            generated_result.get(
-                "pytorch_code"
-            )
-        )
+        generated_code = generated_result.get("pytorch_code")
 
         if not isinstance(
             generated_code,
@@ -1833,10 +1494,7 @@ class ExperimentRunner:
             return {
                 "success": False,
                 "status": "invalid_generated_code",
-                "errors": [
-                    "CodeGenerationAgent did not return "
-                    "valid pytorch_code."
-                ],
+                "errors": ["CodeGenerationAgent did not return valid pytorch_code."],
             }
 
         return self.run(
@@ -1845,5 +1503,3 @@ class ExperimentRunner:
             generated_result=generated_result,
             run_name=run_name,
         )
-
-    
