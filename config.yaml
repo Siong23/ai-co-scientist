@@ -96,10 +96,13 @@ ranking:
   # before a judge adjudicates, which is markedly more reliable than a single
   # comparison on closely matched top ideas. It costs two extra ranking-model
   # calls per match, so only pairs where both hypotheses sit in the current
-  # top-k use it; every other match keeps the single-turn judge. Set
-  # debate_enabled false, or debate_top_k 0, for single-turn ranking only.
+  # top-k use it; every other match keeps the single-turn judge. Keep this well
+  # below num_hypotheses: a cycle's active field is often only three or four
+  # candidates, and a top-k that covers all of them debates every match instead
+  # of the decisive one. Set debate_enabled false, or debate_top_k 0, for
+  # single-turn ranking only.
   debate_enabled: true
-  debate_top_k: 3
+  debate_top_k: 2
   proximity_guided_matching: true
   # Bound tournament latency: prioritize nearby Elo/proximity competitors
   # instead of comparing every possible pair in one cycle.

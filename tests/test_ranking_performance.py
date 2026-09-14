@@ -1029,3 +1029,49 @@ def test_slot_a_does_not_always_hold_the_higher_rated_hypothesis():
 
     assert 1300.0 in leaders
     assert 1100.0 in leaders
+
+
+def test_tournament_records_which_matches_were_debated():
+    """A run report cannot audit the debate path unless the match says so."""
+
+    hypotheses = [
+        _hypothesis("H1", elo_score=1300.0),
+        _hypothesis("H2", elo_score=1280.0),
+        _hypothesis("H3", elo_score=1100.0),
+    ]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    with (
+        patch(
+            "app.agents_modules.ranking.run_pairwise_debate",
+            side_effect=lambda h_a, h_b, goal, **kwargs: _decision(h_a, h_b),
+        ),
+        patch.dict(config["ranking"], {"debate_enabled": True, "debate_top_k": 2}),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    debated = {
+        frozenset((match["hypothesis_a"], match["hypothesis_b"])): match["debate"]
+        for match in context.tournament_results
+    }
+    assert debated[frozenset(("H1", "H2"))] is True
+    assert debated[frozenset(("H1", "H3"))] is False
+
+
+def test_the_default_top_k_does_not_debate_a_whole_small_field():
+    """A live cycle's active field is often three candidates."""
+
+    hypotheses = [_hypothesis(f"H{index}", elo_score=1300.0 - index * 20) for index in range(3)]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    with patch(
+        "app.agents_modules.ranking.run_pairwise_debate",
+        side_effect=lambda h_a, h_b, goal, **kwargs: _decision(h_a, h_b),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    debated = [match["debate"] for match in context.tournament_results]
+    assert debated.count(True) == 1
+    assert debated.count(False) == len(debated) - 1

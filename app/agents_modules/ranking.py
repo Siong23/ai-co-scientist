@@ -97,8 +97,10 @@ class RankingAgent:
         # judge on closely matched top candidates, and costs two extra model
         # calls per match, so it is reserved for pairs where both hypotheses
         # currently lead the field.  active_hypotheses is already Elo-ordered.
+        # A top-k as large as the field debates every match rather than the
+        # decisive one, which is why the configured default stays small.
         debate_ids: set[str] = set()
-        debate_top_k = int(ranking_config.get("debate_top_k", 3))
+        debate_top_k = int(ranking_config.get("debate_top_k", 2))
         if ranking_config.get("debate_enabled", True) and debate_top_k > 0:
             debate_ids = {hypothesis.hypothesis_id for hypothesis in active_hypotheses[:debate_top_k]}
 
@@ -123,7 +125,7 @@ class RankingAgent:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] START {hA.hypothesis_id} vs {hB.hypothesis_id}")
                 decision = run_pairwise_debate(hA, hB, research_goal, use_debate=use_debate)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] END {hA.hypothesis_id} vs {hB.hypothesis_id}")
-                return hA, hB, decision
+                return hA, hB, decision, use_debate
 
             except Exception as e:
                 logger.error(
@@ -142,7 +144,7 @@ class RankingAgent:
             if result is None:
                 continue
 
-            hA, hB, decision = result
+            hA, hB, decision, used_debate = result
 
             # ------------------------------------------------------------
             # Safety gate: never update Elo without valid Reflection scores
@@ -195,5 +197,8 @@ class RankingAgent:
                     "scores_a": decision.scores_a,
                     "scores_b": decision.scores_b,
                     "criteria": decision.decisive_criteria,
+                    # Which comparison actually produced this outcome, so a run
+                    # report can tell a debated match from a single-turn one.
+                    "debate": used_debate,
                 }
             )
