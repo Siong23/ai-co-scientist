@@ -568,9 +568,10 @@ numbers are still there when you want them back:
 $r.llm_evaluation.metrics | Format-Table name, status, score, threshold, passed -AutoSize
 ```
 
-One run scores one hypothesis and settles nothing on its own. For comparisons
-across goals, conditions, and repeats, use `scripts/idea_bench.py` — see
-`IDEA_BENCH_GUIDE.md`.
+One run scores one hypothesis and settles nothing on its own. A comparison
+across goals, conditions, or repeats means evaluating each run and reading the
+reports side by side, and a judge model has to be held fixed across them for
+the scores to mean anything next to each other.
 
 ## Deferred metrics
 
