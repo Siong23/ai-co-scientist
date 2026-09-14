@@ -123,6 +123,12 @@ def _parse_evolution_response(response: str) -> tuple[dict[str, Any] | None, str
                         ref_id.strip() for ref_id in raw_evidence_refs if isinstance(ref_id, str) and ref_id.strip()
                     )
                 )
+            # Absent sections stay absent rather than becoming empty strings, so
+            # the quality gate can tell them apart and ask for a repair.
+            for section in ("rationale", "feasibility"):
+                value = normalised.get(section)
+                if isinstance(value, str) and value.strip():
+                    parsed[section] = value.strip()
             return parsed, "accepted"
 
     reason = "missing_required_fields" if found_object else "no_json_object"
@@ -139,6 +145,34 @@ def _normalise_hypothesis_text(text: str) -> str:
     return " ".join(re.findall(r"\w+", text.casefold()))
 
 
+#: A model that echoes a parent's formatting labels its claim itself; composing
+#: on top of that would persist "Hypothesis: Hypothesis: ...".
+_HYPOTHESIS_LABEL = re.compile(r"^\s*hypothesis\s*:\s*", flags=re.IGNORECASE)
+
+
+def compose_hypothesis_text(candidate: Mapping[str, Any]) -> str:
+    """Render a candidate's sections the way Generation renders its own.
+
+    Evolution returns the claim, its rationale, and its feasibility plan as
+    separate JSON fields, while the persisted hypothesis text is the labelled
+    document that reviewers, the tournament, and the evaluation harness all
+    read. A candidate carrying neither section -- Reflection builds one that
+    way -- keeps its text unchanged.
+    """
+    body = str(candidate.get("text") or candidate.get("hypothesis") or "").strip()
+    rationale = str(candidate.get("rationale") or "").strip()
+    feasibility = str(candidate.get("feasibility") or "").strip()
+    if not rationale and not feasibility:
+        return body
+
+    sections = [f"Hypothesis: {_HYPOTHESIS_LABEL.sub('', body)}"]
+    if rationale:
+        sections.append(f"Rationale: {rationale}")
+    if feasibility:
+        sections.append(f"Feasibility: {feasibility}")
+    return "\n\n".join(sections)
+
+
 def validate_evolution_candidate(
     candidate: Mapping[str, Any],
     parents: Sequence[Hypothesis],
@@ -146,12 +180,24 @@ def validate_evolution_candidate(
     *,
     available_evidence_source_ids: Sequence[str] = (),
     evidence_ref_source_ids: Mapping[str, str] | None = None,
+    require_sections: bool = False,
 ) -> str | None:
-    """Return a deterministic rejection reason for non-evolutionary output."""
+    """Return a deterministic rejection reason for non-evolutionary output.
+
+    ``require_sections`` enforces the rationale and feasibility fields that the
+    Evolution schema asks for. Reflection reuses this gate for a revised
+    hypothesis it rebuilds from prose alone, so the requirement stays opt-in.
+    """
     text = str(candidate.get("text") or candidate.get("hypothesis") or "").strip()
     normalised = _normalise_hypothesis_text(text)
     if not normalised:
         return "empty_hypothesis"
+
+    if require_sections:
+        for section in ("rationale", "feasibility"):
+            value = candidate.get(section)
+            if not isinstance(value, str) or not value.strip():
+                return f"missing_{section}"
 
     if len(re.findall(r"\bhypothesis\s*:", text, flags=re.IGNORECASE)) > 1:
         return "multiple_hypotheses"
@@ -224,6 +270,13 @@ def _build_quality_repair_prompt(
         "unknown_evidence_refs": "Use only exact chunk_id values shown in the supplied evidence.",
         "evidence_ref_source_mismatch": (
             "Every selected chunk_id must belong to one of the selected evidence_source_ids."
+        ),
+        "missing_rationale": (
+            "Add a rationale explaining why the claim follows from the selected evidence and why it matters."
+        ),
+        "missing_feasibility": (
+            "Add a feasibility section naming the data, splits, baseline, measurable outcome, and the result "
+            "that would reject the hypothesis."
         ),
     }.get(
         rejection_reason.split(":", 1)[0],
@@ -518,8 +571,17 @@ Evidence selection rules:
 - When chunk-level passages are supplied, select the smallest set of exact chunk_id values that directly supports
   the new hypothesis. Do not retain unrelated passages from an otherwise relevant paper.
 
+Output structure:
+- title: a short descriptive name.
+- hypothesis: one clear, self-contained and empirically testable claim.
+- rationale: why the claim follows from the selected evidence and why it matters.
+- feasibility: a concrete method for testing the claim, naming the dataset and splits, the baseline it is
+  compared against, the measurable outcome, and the result that would reject the hypothesis.
+- evidence_source_ids / evidence_refs: the selections described above.
+Every field is required. A candidate without a rationale and a feasibility plan is rejected.
+
 Return only valid JSON with this exact schema:
-{{"title": "concise title", "hypothesis": "detailed, self-contained and empirically testable hypothesis", "evidence_source_ids": ["exact supplied source_id"], "evidence_refs": ["exact supplied chunk_id"]}}
+{{"title": "concise title", "hypothesis": "detailed, self-contained and empirically testable hypothesis", "rationale": "why the claim follows from the selected evidence", "feasibility": "dataset, splits, baseline, measurable outcome, and rejection criterion", "evidence_source_ids": ["exact supplied source_id"], "evidence_refs": ["exact supplied chunk_id"]}}
 """.strip()
 
 
@@ -586,6 +648,7 @@ def call_llm_for_evolution(
             strategy,
             available_evidence_source_ids=available_evidence_source_ids,
             evidence_ref_source_ids=evidence_ref_source_ids,
+            require_sections=True,
         )
         if quality_rejection is None:
             reason = "accepted_after_quality_repair" if quality_rejections else "accepted"
@@ -639,7 +702,7 @@ def create_evolved_hypothesis(
     evidence_sources: Sequence[Mapping] | None = None,
 ) -> Hypothesis:
     """Create a tournament-ready child while retaining lineage and evidence."""
-    evolved = Hypothesis(generate_unique_id("E"), candidate["title"], candidate["text"])
+    evolved = Hypothesis(generate_unique_id("E"), candidate["title"], compose_hypothesis_text(candidate))
     evolved.parent_ids = list(dict.fromkeys(parent.hypothesis_id for parent in parents))
     evolved.evolution_strategy = strategy
     evolved.references = [reference for parent in parents for reference in parent.references]
