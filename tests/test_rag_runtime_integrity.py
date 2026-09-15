@@ -144,8 +144,16 @@ def test_corrective_full_text_path_reaches_complete_coverage_with_failover(tmp_p
     synthesis = json.dumps(
         {
             "established_findings": [
-                {"claim": "Slice evidence", "source_ids": ["arXiv:scope"]},
-                {"claim": "Spike evidence", "source_ids": ["arXiv:spike-working"]},
+                {
+                    "claim": "Slice evidence",
+                    "source_ids": ["arXiv:scope"],
+                    "evidence_refs": [{"source_id": "arXiv:scope", "chunk_id": "scope-chunk"}],
+                },
+                {
+                    "claim": "Spike evidence",
+                    "source_ids": ["arXiv:spike-working"],
+                    "evidence_refs": [{"source_id": "arXiv:spike-working", "chunk_id": "spike-chunk"}],
+                },
             ],
             "contradictions": [],
             "knowledge_gaps": [],
@@ -551,7 +559,7 @@ def test_empty_literature_rationale_continues_through_the_supervised_cycle():
 
     ranking_calls = []
 
-    def rank_pair(hypothesis_a, hypothesis_b, _research_goal):
+    def rank_pair(hypothesis_a, hypothesis_b, _research_goal, **_kwargs):
         ranking_calls.append((hypothesis_a.hypothesis_id, hypothesis_b.hypothesis_id))
         return PairwiseDecision(
             hypothesis_a_id=hypothesis_a.hypothesis_id,
@@ -593,6 +601,10 @@ def test_empty_literature_rationale_continues_through_the_supervised_cycle():
         patch(
             "app.agents_modules.reflection.evaluate_claims",
             side_effect=assess_claims,
+        ),
+        patch(
+            "app.agents_modules.reflection.call_llm_for_deep_verification",
+            return_value={},
         ),
         patch(
             "app.agents_modules.ranking.run_pairwise_debate",

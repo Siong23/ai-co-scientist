@@ -1357,7 +1357,7 @@
       "model": "openai/gpt-oss-120b",
       "base_url": "http://100.117.90.5:1234/v1/"
     },
-    "suite": "hypothesis",
+    "suite": "all",
     "status": "completed",
     "passed": false,
     "metrics": [
@@ -1367,7 +1367,7 @@
         "score": 0.9,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The hypothesis directly tackles the central objective by proposing a novel deep‑learning enhancement (adaptive thresholding) for an LSTM‑Attention model on the 5G‑NIDD dataset, explicitly targeting weighted F1, macro F1, and minority class recall. It aligns with all explicit constraints and provides a clear intervention, mechanism, and measurable outcome, without ignoring any goal aspects. The only minor shortcoming is that it focuses on one architecture rather than exploring broader novel approaches."
+        "reason": "The hypothesis directly tackles the central objective by proposing a novel deep‑learning enhancement (adaptive threshold layer) for an LSTM‑Attention model on the 5G‑NIDD dataset, and explicitly targets weighted F1, macro F1, and minority class recall as required. It aligns with all explicit constraints and provides a clear intervention, mechanism, and measurable outcome without contradicting any goal, though it could be slightly more comprehensive in describing validation procedures."
       },
       {
         "name": "Experimental readiness",
@@ -1375,7 +1375,7 @@
         "score": 1.0,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The score is 1.0 because the DAG traversal passed through five successive nodes—BinaryJudgementNode (intervention), BinaryJudgementNode (measurement), BinaryJudgementNode (comparison), BinaryJudgementNode (prediction), and finally VerdictNode—all returning True, which yields a deterministic positive verdict for experimental readiness."
+        "reason": "The score is 1.0 because the DAG traversal shows every binary judgement node (intervention, measurement, comparison, prediction) returned True, and the final VerdictNode deterministically confirms the hypothesis meets all criteria for experimental readiness."
       },
       {
         "name": "Scientific testability",
@@ -1383,7 +1383,7 @@
         "score": 1.0,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The response clearly identifies the independent variable (a metric‑driven adaptive threshold layer), specifies dependent variables (Macro F1, minority class recall for R2L, and Weighted F1) with measurement on the 5G‑NIDD dataset, defines a control condition (standard LSTM‑Attention with fixed thresholds), predicts the direction of effects (significant improvements in Macro F1 and minority recall without degrading Weighted F1), and outlines an experiment that could falsify the hypothesis if these improvements are not observed."
+        "reason": "The response clearly identifies the independent variable (a metric‑driven adaptive threshold layer), specifies dependent variables (Macro F1, minority class recall, Weighted F1) and how they will be measured on the 5G‑NIDD dataset, defines a control condition (standard LSTM‑Attention with fixed thresholds), predicts the direction of effects (significant improvements in Macro F1 and minority recall without loss in Weighted F1), and outlines an experiment that could falsify the hypothesis if these improvements are not observed."
       },
       {
         "name": "Feasibility",
@@ -1391,7 +1391,7 @@
         "score": 0.7,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The answer identifies the required data (the 5G‑NIDD dataset) and basic equipment (standard compute for training an LSTM‑Attention model) and outlines measurements (weighted F1, macro F1, minority recall). It assumes these resources are available but does not explicitly confirm their obtainability, leaving a minor gap. The experimental plan is realistic in scope—training, validation, threshold optimization, and evaluation—but the description lacks detail on hardware specifications or time frames, making the implementation burden unclear. No unrealistic dependencies are introduced. Overall, the proposal is feasible given the supplied information, earning a solid but not perfect score."
+        "reason": "The answer identifies the required data (5G-NIDD) and basic equipment (standard compute for training LSTM-Attention), matching the research goal, but it does not explicitly state hardware availability (e.g., GPUs) or confirm that the dataset is accessible. It assumes standard resources without mentioning obtainability, yet there are no unrealistic dependencies. The experimental plan involves several clear steps, indicating moderate complexity and implementation burden, which is realistic given the information provided."
       },
       {
         "name": "Scientific plausibility",
@@ -1399,7 +1399,7 @@
         "score": 0.9,
         "threshold": 0.7,
         "passed": true,
-        "reason": "The answer clearly outlines a step‑by‑step causal mechanism (adaptive threshold optimization per class) and each step follows logically from the previous one, avoiding jumps from correlation to causation. The proposed method is internally consistent, with no physical or computational contradictions, and the predicted outcome (improved Macro F1 and minority recall without hurting Weighted F1) directly follows from the described adaptive‑threshold process. Overall the reasoning is coherent and scientifically plausible, meeting all evaluation criteria."
+        "reason": "The answer clearly enumerates a step‑by‑step causal mechanism (adaptive threshold optimization per class after LSTM‑Attention training) and each step follows logically from the previous one without jumps to unsupported claims. The proposed method is physically plausible—training, generating precision‑recall curves, selecting thresholds, applying them, and evaluating metrics—and contains no internal contradictions or impossible assumptions. The predicted outcome (improved Macro F1 and minority recall with stable Weighted F1) directly follows from the described mechanism. Overall the reasoning is coherent and scientifically sound, meriting a high score."
       },
       {
         "name": "Novelty vs retrieved prior art",
@@ -1407,7 +1407,31 @@
         "score": 0.2,
         "threshold": 0.7,
         "passed": false,
-        "reason": "The response fails to follow the evaluation steps: it does not summarize the approaches, mechanisms, and findings described in the retrieval context, nor does it explicitly state what the hypothesis proposes for the research goal. It also lacks a clear identification of how the hypothesis differs from or restates the retrieved work. Consequently, it cannot meaningfully score the novelty relative to the provided prior art."
+        "reason": "The response fails to follow the required evaluation steps: it does not provide a clear summary of the approaches, mechanisms, and findings described in the retrieval context, nor does it explicitly state what the hypothesis proposes for the research goal. It also lacks a direct comparison that identifies how the hypothesis differs from or restates the retrieved work. Consequently, the answer does not meaningfully assess the novelty of the hypothesis relative to the provided prior art."
+      },
+      {
+        "name": "Answer relevancy",
+        "status": "completed",
+        "score": 1.0,
+        "threshold": 0.7,
+        "passed": true,
+        "reason": "The score is 1.00 because the response was fully on-topic and addressed every aspect of the request without any irrelevant content."
+      },
+      {
+        "name": "Faithfulness",
+        "status": "completed",
+        "score": 1.0,
+        "threshold": 0.7,
+        "passed": true,
+        "reason": "The score is 1.00 because there are no contradictions, indicating the actual output fully aligns with the retrieval context."
+      },
+      {
+        "name": "Contextual relevancy",
+        "status": "completed",
+        "score": 0.45714285714285713,
+        "threshold": 0.7,
+        "passed": false,
+        "reason": "The score is 0.46 because most of the retrieved statements are unrelated—e.g., \"It describes the k‑NN algorithm ('finds K nearest neighbors...') which is unrelated to a deep‑learning approach for multiclass network intrusion detection\" and \"The statement discusses Naïve Bayes ... not part of a novel deep‑learning approach\"—while only a few pertain to the task, such as \"Experiments were conducted on CICIDS2017 and 5G-NIDD datasets, showing that GRU coupled with an attention layer yielded the highest performance on the CICIDS2017 dataset, while LSTM with attention obtained the best results on the 5G‑NIDD dataset\" and the definition of weighted F1-score. The abundance of irrelevant content drags the relevance down to a moderate level."
       }
     ],
     "retrieval_context": {

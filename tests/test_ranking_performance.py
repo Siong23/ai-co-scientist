@@ -359,7 +359,7 @@ def test_tournament_comparison_count_with_new_hypothesis():
         description="Test research goal",
     )
 
-    def fake_debate(h_a, h_b, research_goal):
+    def fake_debate(h_a, h_b, research_goal, **kwargs):
         return _decision(h_a, h_b)
 
     with patch(
@@ -410,7 +410,7 @@ def test_tournament_caps_matches_without_requiring_proximity_data():
     with (
         patch(
             "app.agents_modules.ranking.run_pairwise_debate",
-            side_effect=lambda h_a, h_b, goal: _decision(h_a, h_b),
+            side_effect=lambda h_a, h_b, goal, **kwargs: _decision(h_a, h_b),
         ) as debate,
         patch.dict(config["ranking"], {"max_matches_per_cycle": 2}),
     ):
@@ -428,7 +428,7 @@ def test_tournament_does_not_repeat_completed_pairs():
 
     with patch(
         "app.agents_modules.ranking.run_pairwise_debate",
-        side_effect=lambda h_a, h_b, goal: _decision(h_a, h_b),
+        side_effect=lambda h_a, h_b, goal, **kwargs: _decision(h_a, h_b),
     ) as debate:
         RankingAgent().run_tournament(hypotheses, context, goal)
 
@@ -466,7 +466,7 @@ def test_ranking_consistency():
         frozenset(("B", "C")): "B",
     }
 
-    def deterministic_debate(h_a, h_b, research_goal):
+    def deterministic_debate(h_a, h_b, research_goal, **kwargs):
 
         outcome = outcomes[frozenset((h_a.hypothesis_id, h_b.hypothesis_id))]
 
@@ -728,7 +728,7 @@ def test_inactive_hypotheses_are_not_ranked():
         description="Test research goal",
     )
 
-    def fake_debate(h_a, h_b, research_goal):
+    def fake_debate(h_a, h_b, research_goal, **kwargs):
         return _decision(h_a, h_b)
 
     with patch(
@@ -787,7 +787,7 @@ def test_tournament_records_results_in_context():
         description="Test research goal",
     )
 
-    def fake_debate(h_a, h_b, research_goal):
+    def fake_debate(h_a, h_b, research_goal, **kwargs):
         return _decision(
             h_a,
             h_b,
@@ -898,3 +898,180 @@ def test_ranking_model_resolution_from_config():
 
     with patch("app.config.config", {"llm_model": "default/model"}):
         assert _get_ranking_model() == "default/model"
+
+
+# ---------------------------------------------------------------------------
+# 12. MULTI-TURN DEBATE ROUTING
+# ---------------------------------------------------------------------------
+
+
+def test_debate_runs_both_arguments_before_judging():
+    """The debate path argues both sides, then adjudicates the two arguments."""
+
+    goal = ResearchGoal(description="Test research goal")
+
+    with patch(
+        "app.agents_modules.ranking_helpers._call_llm",
+        side_effect=["Argument for A", "Argument for B", _ranking_response("B")],
+    ) as call_llm:
+        decision = run_pairwise_debate(
+            _hypothesis("A"),
+            _hypothesis("B"),
+            goal,
+            use_debate=True,
+        )
+
+    assert decision.outcome == "B"
+    assert call_llm.call_count == 3
+
+
+def test_debate_falls_back_to_the_single_turn_judge_when_an_argument_fails():
+    """A one-sided debate would hand the match to whichever side was served."""
+
+    goal = ResearchGoal(description="Test research goal")
+
+    with patch(
+        "app.agents_modules.ranking_helpers._call_llm",
+        side_effect=[
+            "Argument for A",
+            "Error: LM Studio returned an empty response.",
+            _ranking_response("A"),
+        ],
+    ) as call_llm:
+        decision = run_pairwise_debate(
+            _hypothesis("A"),
+            _hypothesis("B"),
+            goal,
+            use_debate=True,
+        )
+
+    # Two debate attempts plus the single-turn judge; judge_debate never ran.
+    assert call_llm.call_count == 3
+    assert decision.outcome == "A"
+
+
+def test_tournament_debates_only_the_top_ranked_pairs():
+    """Pairs outside the configured top-k keep the cheaper single-turn judge."""
+
+    hypotheses = [
+        _hypothesis("H1", elo_score=1300.0),
+        _hypothesis("H2", elo_score=1280.0),
+        _hypothesis("H3", elo_score=1100.0),
+    ]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    debate_flags = {}
+
+    def record(h_a, h_b, research_goal, **kwargs):
+        debate_flags[frozenset((h_a.hypothesis_id, h_b.hypothesis_id))] = kwargs.get("use_debate")
+        return _decision(h_a, h_b)
+
+    with (
+        patch("app.agents_modules.ranking.run_pairwise_debate", side_effect=record),
+        patch.dict(config["ranking"], {"debate_enabled": True, "debate_top_k": 2}),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    assert debate_flags[frozenset(("H1", "H2"))] is True
+    assert debate_flags[frozenset(("H1", "H3"))] is False
+    assert debate_flags[frozenset(("H2", "H3"))] is False
+
+
+def test_disabled_debate_keeps_every_match_single_turn():
+    hypotheses = [_hypothesis("H1", elo_score=1300.0), _hypothesis("H2", elo_score=1280.0)]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    flags = []
+
+    def record(h_a, h_b, research_goal, **kwargs):
+        flags.append(kwargs.get("use_debate"))
+        return _decision(h_a, h_b)
+
+    with (
+        patch("app.agents_modules.ranking.run_pairwise_debate", side_effect=record),
+        patch.dict(config["ranking"], {"debate_enabled": False}),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    assert flags == [False]
+
+
+# ---------------------------------------------------------------------------
+# 13. SLOT ASSIGNMENT
+# ---------------------------------------------------------------------------
+
+
+def test_presentation_order_is_stable_and_independent_of_argument_order():
+    from app.agents_modules.ranking_helpers import presentation_order
+
+    hypo_a = _hypothesis("A")
+    hypo_b = _hypothesis("B")
+
+    first = presentation_order(hypo_a, hypo_b)
+    assert presentation_order(hypo_a, hypo_b) == first
+    assert presentation_order(hypo_b, hypo_a) == first
+
+
+def test_slot_a_does_not_always_hold_the_higher_rated_hypothesis():
+    """Elo-ordered slots would let any positional bias favour the leader."""
+
+    from app.agents_modules.ranking_helpers import presentation_order
+
+    leaders = [
+        presentation_order(
+            _hypothesis(f"H{index}", elo_score=1300.0),
+            _hypothesis(f"H{index}-rival", elo_score=1100.0),
+        )[0].elo_score
+        for index in range(24)
+    ]
+
+    assert 1300.0 in leaders
+    assert 1100.0 in leaders
+
+
+def test_tournament_records_which_matches_were_debated():
+    """A run report cannot audit the debate path unless the match says so."""
+
+    hypotheses = [
+        _hypothesis("H1", elo_score=1300.0),
+        _hypothesis("H2", elo_score=1280.0),
+        _hypothesis("H3", elo_score=1100.0),
+    ]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    with (
+        patch(
+            "app.agents_modules.ranking.run_pairwise_debate",
+            side_effect=lambda h_a, h_b, goal, **kwargs: _decision(h_a, h_b),
+        ),
+        patch.dict(config["ranking"], {"debate_enabled": True, "debate_top_k": 2}),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    debated = {
+        frozenset((match["hypothesis_a"], match["hypothesis_b"])): match["debate"]
+        for match in context.tournament_results
+    }
+    assert debated[frozenset(("H1", "H2"))] is True
+    assert debated[frozenset(("H1", "H3"))] is False
+
+
+def test_the_default_top_k_does_not_debate_a_whole_small_field():
+    """A live cycle's active field is often three candidates."""
+
+    hypotheses = [_hypothesis(f"H{index}", elo_score=1300.0 - index * 20) for index in range(3)]
+    context = ContextMemory()
+    goal = ResearchGoal(description="Test research goal")
+
+    with patch(
+        "app.agents_modules.ranking.run_pairwise_debate",
+        side_effect=lambda h_a, h_b, goal, **kwargs: _decision(h_a, h_b),
+    ):
+        RankingAgent().run_tournament(hypotheses, context, goal)
+
+    debated = [match["debate"] for match in context.tournament_results]
+    assert debated.count(True) == 1
+    assert debated.count(False) == len(debated) - 1

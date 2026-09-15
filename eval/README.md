@@ -277,14 +277,18 @@ DeepEval needs. The mapping from persisted run JSON to test case is:
 `rubrics/retrieval_context.py` builds `retrieval_context` and is the single
 place that decides what counts as evidence. It reads, in order:
 
-1. `evidence_sources[].evidence_refs[].text` — the retrieved chunk passages, one
-   string per passage; and
-2. `evidence_sources[].content`, `.abstract`, `.summary` — source-level prose.
+1. `evidence_sources[].evidence_refs[].text` — the explicitly selected retrieved
+   chunk passages, one string per passage; or
+2. when no selected chunk carries substantive text,
+   `evidence_sources[].content`, `.abstract`, `.summary` — source-level fallback
+   prose.
 
 A passage must be at least 200 characters to count. Nothing is concatenated,
 summarized, or generated: each persisted passage stays its own
-`retrieval_context` entry, and the abstract, which the serializer writes into
-both `abstract` and `summary`, is counted once.
+`retrieval_context` entry. Source-level prose is not added on top of explicit
+chunk passages because doing so would reintroduce uncited context from the same
+paper. When source-level fallback is needed, an abstract written into both
+`abstract` and `summary` is counted once.
 
 Identifying metadata never counts as evidence on its own — `title`, `doi`,
 `url`, `canonical_url`, `source_id`, `arxiv_id`, `authors`, `venue`,
@@ -564,9 +568,10 @@ numbers are still there when you want them back:
 $r.llm_evaluation.metrics | Format-Table name, status, score, threshold, passed -AutoSize
 ```
 
-One run scores one hypothesis and settles nothing on its own. For comparisons
-across goals, conditions, and repeats, use `scripts/idea_bench.py` — see
-`IDEA_BENCH_GUIDE.md`.
+One run scores one hypothesis and settles nothing on its own. A comparison
+across goals, conditions, or repeats means evaluating each run and reading the
+reports side by side, and a judge model has to be held fixed across them for
+the scores to mean anything next to each other.
 
 ## Deferred metrics
 

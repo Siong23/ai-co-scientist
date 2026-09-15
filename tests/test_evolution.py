@@ -134,6 +134,21 @@ def test_parse_evolution_response_accepts_reasoning_before_fenced_json():
     }
 
 
+def test_parse_evolution_response_preserves_deduplicated_evidence_selection():
+    response = (
+        '{"title": "Child", "hypothesis": "A testable child.", '
+        '"evidence_source_ids": ["paper:2", "paper:2", "paper:1", 3], '
+        '"evidence_refs": ["chunk:2", "chunk:2", "chunk:1", 3]}'
+    )
+
+    assert parse_evolution_response(response) == {
+        "title": "Child",
+        "text": "A testable child.",
+        "evidence_source_ids": ["paper:2", "paper:1"],
+        "evidence_refs": ["chunk:2", "chunk:1"],
+    }
+
+
 def test_near_duplicate_evolution_is_repaired_once():
     context, first, _ = _context()
     agent = EvolutionAgent(
@@ -142,8 +157,8 @@ def test_near_duplicate_evolution_is_repaired_once():
         quality_repair_attempts=1,
     )
     responses = [
-        '{"title": "Rephrased parent", "hypothesis": "Transporter X causes treatment resistance."}',
-        '{"title": "Decisive inhibition test", "hypothesis": "Transiently inhibit X before treatment; restored sensitivity would isolate X as the causal resistance mechanism."}',
+        '{"title": "Rephrased parent", "hypothesis": "Transporter X causes treatment resistance.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it."}',
+        '{"title": "Decisive inhibition test", "hypothesis": "Transiently inhibit X before treatment; restored sensitivity would isolate X as the causal resistance mechanism.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
     ]
 
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
@@ -166,6 +181,67 @@ def test_near_duplicate_evolution_is_repaired_once():
     ]
 
 
+def test_evolution_repairs_missing_child_evidence_selection_once():
+    context, _, _ = _context()
+    agent = EvolutionAgent(
+        strategies=("grounding",),
+        max_candidates_per_cycle=1,
+        quality_repair_attempts=1,
+    )
+    responses = [
+        '{"title": "Uncited child", "hypothesis": "Inhibit X and measure restored sensitivity.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it."}',
+        '{"title": "Cited child", "hypothesis": "Inhibit X and measure restored sensitivity.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", '
+        '"evidence_source_ids": ["paper:2"]}',
+    ]
+
+    with patch("app.agents.call_llm", side_effect=responses) as call_llm:
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert len(evolved) == 1
+    assert evolved[0].evidence_source_ids == ["paper:2"]
+    assert [source["source_id"] for source in evolved[0].evidence_sources] == ["paper:2"]
+    assert "missing_evidence_source_ids" in call_llm.call_args_list[1].args[0]
+    assert context.last_evolution_attempts[0]["quality_rejections"] == ["missing_evidence_source_ids"]
+
+
+def test_evolution_keeps_only_the_child_selected_passage():
+    context, first, _ = _context()
+    first.evidence_sources[0]["evidence_refs"] = [
+        {
+            "source_id": "paper:1",
+            "chunk_id": "chunk:relevant",
+            "evidence_type": "full_text",
+            "text": "Blocking transporter X restores treatment sensitivity in the reported experiment.",
+        },
+        {
+            "source_id": "paper:1",
+            "chunk_id": "chunk:background",
+            "evidence_type": "full_text",
+            "text": "The paper also describes unrelated laboratory setup details.",
+        },
+    ]
+    first.evidence_refs = ["chunk:relevant", "chunk:background"]
+    agent = EvolutionAgent(
+        strategies=("grounding",),
+        max_candidates_per_cycle=1,
+    )
+    response = (
+        '{"title": "Grounded child", '
+        '"hypothesis": "Transiently inhibit X and test whether sensitivity is restored.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", '
+        '"evidence_source_ids": ["paper:1"], '
+        '"evidence_refs": ["chunk:relevant"]}'
+    )
+
+    with patch("app.agents.call_llm", return_value=response) as call_llm:
+        evolved = agent.evolve_hypotheses(context, _goal())
+
+    assert len(evolved) == 1
+    assert evolved[0].evidence_refs == ["chunk:relevant"]
+    assert [ref["chunk_id"] for ref in evolved[0].evidence_sources[0]["evidence_refs"]] == ["chunk:relevant"]
+    assert '"chunk_id": "chunk:relevant"' in call_llm.call_args.args[0]
+    assert '"chunk_id": "chunk:background"' in call_llm.call_args.args[0]
+
+
 def test_stitched_combination_is_rejected_without_entering_tournament():
     context, _, _ = _context()
     agent = EvolutionAgent(
@@ -175,7 +251,7 @@ def test_stitched_combination_is_rejected_without_entering_tournament():
     )
     response = (
         '{"title": "Combined", '
-        '"hypothesis": "Combination of:<br>1. Transporter X causes resistance.<br>2. Stress Y causes resistance."}'
+        '"hypothesis": "Combination of:<br>1. Transporter X causes resistance.<br>2. Stress Y causes resistance.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it."}'
     )
 
     with patch("app.agents.call_llm", return_value=response):
@@ -186,7 +262,7 @@ def test_stitched_combination_is_rejected_without_entering_tournament():
     assert context.last_evolution_attempts[0]["quality_rejections"] == ["stitched_combination"]
 
 
-def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
+def test_evolution_creates_new_children_with_lineage_and_selected_evidence():
     context, first, second = _context()
     original_first = deepcopy(first.to_dict())
     original_second = deepcopy(second.to_dict())
@@ -195,9 +271,9 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
         max_candidates_per_cycle=3,
     )
     responses = [
-        '{"title": "Combined child", "hypothesis": "X activates Y, which can be tested by dual inhibition."}',
-        '{"title": "Feasible child", "hypothesis": "Inhibit X before treatment and measure restored sensitivity."}',
-        '{"title": "Divergent child", "hypothesis": "Transient membrane tension independently drives resistance."}',
+        '{"title": "Combined child", "hypothesis": "X activates Y, which can be tested by dual inhibition.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
+        '{"title": "Feasible child", "hypothesis": "Inhibit X before treatment and measure restored sensitivity.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
+        '{"title": "Divergent child", "hypothesis": "Transient membrane tension independently drives resistance.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
     ]
 
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
@@ -207,8 +283,8 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
     assert evolved[0].parent_ids == ["H1", "H2"]
     assert evolved[1].parent_ids == ["H1"]
     assert evolved[2].parent_ids == ["H1", "H2"]
-    assert evolved[0].evidence_source_ids == ["paper:1", "paper:2", "paper:3"]
-    assert [source["source_id"] for source in evolved[0].evidence_sources] == ["paper:1", "paper:2", "paper:3"]
+    assert evolved[0].evidence_source_ids == ["paper:1"]
+    assert [source["source_id"] for source in evolved[0].evidence_sources] == ["paper:1"]
     assert evolved[0].references == [{"id": "paper:1"}, {"id": "paper:3"}]
     assert first.to_dict() == original_first
     assert second.to_dict() == original_second
@@ -220,6 +296,8 @@ def test_evolution_creates_new_children_with_lineage_and_inherited_evidence():
         "reasoning": "off",
     }
     assert "never edit" in call_llm.call_args_list[0].args[0]
+    assert "Select the smallest subset" in call_llm.call_args_list[0].args[0]
+    assert '"evidence_source_ids": ["exact supplied source_id"]' in call_llm.call_args_list[0].args[0]
     assert "Combination" not in first.title
 
 
@@ -253,8 +331,8 @@ def test_strategy_library_rotates_across_iterations():
     context.iteration_number = 1
     agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
     responses = [
-        '{"title": "Simpler", "hypothesis": "A single intervention tests X."}',
-        '{"title": "Grounded", "hypothesis": "Existing evidence supports testing X first."}',
+        '{"title": "Simpler", "hypothesis": "A single intervention tests X.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
+        '{"title": "Grounded", "hypothesis": "Existing evidence supports testing X first.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
     ]
 
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
@@ -309,7 +387,7 @@ def test_transient_evolution_transport_failure_is_retried():
         "app.agents.call_llm",
         side_effect=[
             "Error: provider temporarily unavailable",
-            '{"title": "Recovered child", "hypothesis": "A decisive intervention tests X causally."}',
+            '{"title": "Recovered child", "hypothesis": "A decisive intervention tests X causally.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
         ],
     ) as call_llm:
         evolved = agent.evolve_hypotheses(context, _goal())
@@ -429,7 +507,7 @@ def test_evolution_resolves_parent_evidence_ids_from_context_sources():
 
     with patch(
         "app.agents.call_llm",
-        return_value='{"title": "Grounded", "hypothesis": "Evidence supports a direct test."}',
+        return_value='{"title": "Grounded", "hypothesis": "Evidence supports a direct test.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
     ) as call_llm:
         evolved = agent.evolve_hypotheses(context, _goal(top_k=1))
 
@@ -445,9 +523,9 @@ def test_single_parent_runs_only_unary_refinement_strategies():
     context.add_hypothesis(parent)
     agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
     responses = [
-        '{"title": "Feasible", "hypothesis": "A feasible hypothesis."}',
-        '{"title": "Simple", "hypothesis": "A simple hypothesis."}',
-        '{"title": "Grounded", "hypothesis": "A grounded hypothesis."}',
+        '{"title": "Feasible", "hypothesis": "A feasible hypothesis.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it."}',
+        '{"title": "Simple", "hypothesis": "A simple hypothesis.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it."}',
+        '{"title": "Grounded", "hypothesis": "A grounded hypothesis.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it."}',
     ]
 
     with patch("app.agents.call_llm", side_effect=responses):
@@ -473,7 +551,7 @@ def test_evolution_injects_meta_review_feedback():
 
     with patch(
         "app.agents.call_llm",
-        return_value='{"title": "Feasible", "hypothesis": "A feasible hypothesis addressing critiques."}',
+        return_value='{"title": "Feasible", "hypothesis": "A feasible hypothesis addressing critiques.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it."}',
     ) as call_llm:
         agent.evolve_hypotheses(context, _goal(top_k=1))
 
@@ -481,3 +559,134 @@ def test_evolution_injects_meta_review_feedback():
     assert "Prior cycle meta-review feedback to address:" in prompt
     assert "Explore orthogonal mechanisms." in prompt
     assert "Use out_of_box strategy." in prompt
+
+
+def test_evolution_prompt_requires_rationale_and_feasibility_sections():
+    _, first, _ = _context()
+    prompt = build_evolution_prompt("feasibility", [first], _goal())
+
+    assert '"rationale"' in prompt
+    assert '"feasibility"' in prompt
+    assert "A candidate without a rationale and a feasibility plan is rejected." in prompt
+
+
+def test_evolution_child_without_sections_is_repaired_once():
+    context, parent, _ = _context()
+    agent = EvolutionAgent(strategies=("feasibility",), max_candidates_per_cycle=1)
+    responses = [
+        '{"title": "Planless", "hypothesis": "Inhibit X and see what happens.", "evidence_source_ids": ["paper:1"]}',
+        '{"title": "Planned", "hypothesis": "Inhibit X before treatment and measure restored sensitivity.", '
+        '"rationale": "Parent evidence ties X to resistance.", '
+        '"feasibility": "Hold out 30% of the cohort, compare against the untreated baseline, and reject the '
+        'claim if sensitivity is unchanged.", "evidence_source_ids": ["paper:1"]}',
+    ]
+
+    with patch("app.agents.call_llm", side_effect=responses) as call_llm:
+        children = agent.evolve_hypotheses(context, _goal(top_k=1))
+
+    assert call_llm.call_count == 2
+    repair_prompt = call_llm.call_args.args[0]
+    assert "missing_rationale" in repair_prompt
+    assert len(children) == 1
+    assert children[0].title == "Planned"
+    assert parent.hypothesis_id in children[0].parent_ids
+
+
+def test_evolved_hypothesis_text_carries_labelled_sections():
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=("feasibility",), max_candidates_per_cycle=1)
+    response = (
+        '{"title": "Planned", "hypothesis": "Hypothesis: Inhibit X before treatment.", '
+        '"rationale": "Parent evidence ties X to resistance.", '
+        '"feasibility": "Compare against the untreated baseline; unchanged sensitivity rejects it.", '
+        '"evidence_source_ids": ["paper:1"]}'
+    )
+
+    with patch("app.agents.call_llm", return_value=response):
+        children = agent.evolve_hypotheses(context, _goal(top_k=1))
+
+    text = children[0].text
+    assert text.startswith("Hypothesis: Inhibit X before treatment.")
+    assert "\n\nRationale: Parent evidence ties X to resistance." in text
+    assert "\n\nFeasibility: Compare against the untreated baseline;" in text
+    # A model that labels its own claim must not produce "Hypothesis: Hypothesis:".
+    assert text.count("Hypothesis:") == 1
+
+
+def _reviewed(hypothesis_id: str, **scores) -> Hypothesis:
+    """A parent whose review passes everywhere except the given dimensions."""
+    hypothesis = Hypothesis(hypothesis_id, "Seed", "A seed hypothesis.")
+    hypothesis.reflection_report = ReflectionReport(
+        alignment_score=8.0,
+        novelty_score=scores.get("novelty_score", 8.0),
+        feasibility_score=scores.get("feasibility_score", 8.0),
+        plausibility_score=scores.get("plausibility_score", 8.0),
+        testability_score=scores.get("testability_score", 8.0),
+        evidence_quality_score=scores.get("evidence_quality_score", 8.0),
+        expected_research_value_score=8.0,
+        recommendation="ACCEPT",
+        assumptions=scores.get("assumptions", []),
+    )
+    return hypothesis
+
+
+def test_strategy_selection_targets_the_weakest_reviewed_dimension():
+    """Blind rotation can leave a parent's worst dimension unaddressed."""
+
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
+
+    feasibility_first = agent._strategies_for_cycle(context, [_reviewed("H1", feasibility_score=2.0)])
+    assert feasibility_first[0] == "feasibility"
+
+    grounding_first = agent._strategies_for_cycle(context, [_reviewed("H1", evidence_quality_score=2.0)])
+    assert grounding_first[0] == "grounding"
+
+    testability_first = agent._strategies_for_cycle(context, [_reviewed("H1", testability_score=2.0)])
+    assert testability_first[0] == "simplification"
+
+
+def test_the_largest_gap_is_addressed_first():
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+
+    parent = _reviewed("H1", feasibility_score=4.5, evidence_quality_score=1.0)
+
+    assert agent._strategies_for_cycle(context, [parent])[0] == "grounding"
+
+
+def test_a_contradicted_assumption_prioritizes_the_feasibility_strategy():
+    from app.models import AssumptionVerdict
+
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
+
+    parent = _reviewed(
+        "H1",
+        assumptions=[
+            AssumptionVerdict(assumption="Blocking X restores sensitivity.", status="INVALID", fundamental=False)
+        ],
+    )
+
+    assert agent._strategies_for_cycle(context, [parent])[0] == "feasibility"
+
+
+def test_weighting_respects_the_parent_count_guard():
+    """A lone parent cannot run the strategies that need two, however weak it is."""
+
+    context, _, _ = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+
+    selected = agent._strategies_for_cycle(context, [_reviewed("H1", novelty_score=1.0)])
+
+    assert "out_of_box" not in selected
+    assert "combination" not in selected
+    assert "inspiration" not in selected
+
+
+def test_unreviewed_parents_keep_the_rotation_order():
+    context, first, second = _context()
+    context.iteration_number = 1
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
+
+    assert agent._strategies_for_cycle(context, [first, second]) == ["simplification", "grounding"]

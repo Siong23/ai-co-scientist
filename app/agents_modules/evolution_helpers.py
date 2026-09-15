@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from difflib import SequenceMatcher
-from typing import Literal
+from typing import Any, Literal
 
 from ..models import Hypothesis, ResearchGoal
 from ..utils import generate_unique_id, logger, redact_secrets
@@ -39,6 +39,8 @@ _MAX_CLAIM_TEXT_CHARS = 400
 _MAX_CLAIM_SOURCE_IDS = 6
 _MAX_EVIDENCE_SOURCES = 6
 _MAX_EVIDENCE_EXCERPT_CHARS = 800
+_MAX_EVIDENCE_REFS_PER_SOURCE = 3
+_MAX_EVIDENCE_REF_TEXT_CHARS = 500
 _MAX_META_REVIEW_ITEMS = 3
 _MAX_META_REVIEW_TEXT_CHARS = 800
 
@@ -91,7 +93,7 @@ def _json_objects(response: str):
                 yield payload
 
 
-def _parse_evolution_response(response: str) -> tuple[dict[str, str] | None, str]:
+def _parse_evolution_response(response: str) -> tuple[dict[str, Any] | None, str]:
     if not response or not response.strip():
         return None, "empty_response"
     if response.lstrip().lower().startswith("error:"):
@@ -104,13 +106,36 @@ def _parse_evolution_response(response: str) -> tuple[dict[str, str] | None, str
         title = normalised.get("title")
         text = normalised.get("hypothesis", normalised.get("text"))
         if isinstance(title, str) and title.strip() and isinstance(text, str) and text.strip():
-            return {"title": title.strip(), "text": text.strip()}, "accepted"
+            parsed: dict[str, Any] = {"title": title.strip(), "text": text.strip()}
+            raw_source_ids = normalised.get("evidence_source_ids")
+            if isinstance(raw_source_ids, list):
+                parsed["evidence_source_ids"] = list(
+                    dict.fromkeys(
+                        source_id.strip()
+                        for source_id in raw_source_ids
+                        if isinstance(source_id, str) and source_id.strip()
+                    )
+                )
+            raw_evidence_refs = normalised.get("evidence_refs")
+            if isinstance(raw_evidence_refs, list):
+                parsed["evidence_refs"] = list(
+                    dict.fromkeys(
+                        ref_id.strip() for ref_id in raw_evidence_refs if isinstance(ref_id, str) and ref_id.strip()
+                    )
+                )
+            # Absent sections stay absent rather than becoming empty strings, so
+            # the quality gate can tell them apart and ask for a repair.
+            for section in ("rationale", "feasibility"):
+                value = normalised.get(section)
+                if isinstance(value, str) and value.strip():
+                    parsed[section] = value.strip()
+            return parsed, "accepted"
 
     reason = "missing_required_fields" if found_object else "no_json_object"
     return None, reason
 
 
-def parse_evolution_response(response: str) -> dict[str, str] | None:
+def parse_evolution_response(response: str) -> dict[str, Any] | None:
     """Parse a validated JSON hypothesis from common local-model output shapes."""
     parsed, _ = _parse_evolution_response(response)
     return parsed
@@ -120,16 +145,59 @@ def _normalise_hypothesis_text(text: str) -> str:
     return " ".join(re.findall(r"\w+", text.casefold()))
 
 
+#: A model that echoes a parent's formatting labels its claim itself; composing
+#: on top of that would persist "Hypothesis: Hypothesis: ...".
+_HYPOTHESIS_LABEL = re.compile(r"^\s*hypothesis\s*:\s*", flags=re.IGNORECASE)
+
+
+def compose_hypothesis_text(candidate: Mapping[str, Any]) -> str:
+    """Render a candidate's sections the way Generation renders its own.
+
+    Evolution returns the claim, its rationale, and its feasibility plan as
+    separate JSON fields, while the persisted hypothesis text is the labelled
+    document that reviewers, the tournament, and the evaluation harness all
+    read. A candidate carrying neither section -- Reflection builds one that
+    way -- keeps its text unchanged.
+    """
+    body = str(candidate.get("text") or candidate.get("hypothesis") or "").strip()
+    rationale = str(candidate.get("rationale") or "").strip()
+    feasibility = str(candidate.get("feasibility") or "").strip()
+    if not rationale and not feasibility:
+        return body
+
+    sections = [f"Hypothesis: {_HYPOTHESIS_LABEL.sub('', body)}"]
+    if rationale:
+        sections.append(f"Rationale: {rationale}")
+    if feasibility:
+        sections.append(f"Feasibility: {feasibility}")
+    return "\n\n".join(sections)
+
+
 def validate_evolution_candidate(
-    candidate: Mapping[str, str],
+    candidate: Mapping[str, Any],
     parents: Sequence[Hypothesis],
     strategy: EvolutionStrategy,
+    *,
+    available_evidence_source_ids: Sequence[str] = (),
+    evidence_ref_source_ids: Mapping[str, str] | None = None,
+    require_sections: bool = False,
 ) -> str | None:
-    """Return a deterministic rejection reason for non-evolutionary output."""
+    """Return a deterministic rejection reason for non-evolutionary output.
+
+    ``require_sections`` enforces the rationale and feasibility fields that the
+    Evolution schema asks for. Reflection reuses this gate for a revised
+    hypothesis it rebuilds from prose alone, so the requirement stays opt-in.
+    """
     text = str(candidate.get("text") or candidate.get("hypothesis") or "").strip()
     normalised = _normalise_hypothesis_text(text)
     if not normalised:
         return "empty_hypothesis"
+
+    if require_sections:
+        for section in ("rationale", "feasibility"):
+            value = candidate.get(section)
+            if not isinstance(value, str) or not value.strip():
+                return f"missing_{section}"
 
     if len(re.findall(r"\bhypothesis\s*:", text, flags=re.IGNORECASE)) > 1:
         return "multiple_hypotheses"
@@ -147,17 +215,69 @@ def validate_evolution_candidate(
         similarity = SequenceMatcher(None, parent_text, normalised).ratio()
         if similarity >= _NEAR_DUPLICATE_THRESHOLD:
             return f"near_duplicate_parent:{parent.hypothesis_id}"
+
+    available_ids = {str(source_id).strip() for source_id in available_evidence_source_ids if str(source_id).strip()}
+    if available_ids:
+        selected_ids = candidate.get("evidence_source_ids")
+        if not isinstance(selected_ids, list):
+            return "missing_evidence_source_ids"
+        if not selected_ids:
+            return "no_valid_evidence_source_ids"
+        unknown_ids = [source_id for source_id in selected_ids if source_id not in available_ids]
+        if unknown_ids:
+            return "unknown_evidence_source_ids:" + ",".join(unknown_ids)
+
+    available_ref_ids = set(evidence_ref_source_ids or ())
+    if available_ref_ids:
+        selected_refs = candidate.get("evidence_refs")
+        if not isinstance(selected_refs, list):
+            return "missing_evidence_refs"
+        if not selected_refs:
+            return "no_valid_evidence_refs"
+        unknown_refs = [ref_id for ref_id in selected_refs if ref_id not in available_ref_ids]
+        if unknown_refs:
+            return "unknown_evidence_refs:" + ",".join(unknown_refs)
+        selected_source_ids = set(candidate.get("evidence_source_ids") or ())
+        mismatched_refs = [
+            ref_id for ref_id in selected_refs if evidence_ref_source_ids[ref_id] not in selected_source_ids
+        ]
+        if mismatched_refs:
+            return "evidence_ref_source_mismatch:" + ",".join(mismatched_refs)
     return None
 
 
 def _build_quality_repair_prompt(
     original_prompt: str,
-    candidate: Mapping[str, str],
+    candidate: Mapping[str, Any],
     rejection_reason: str,
 ) -> str:
     guidance = {
         "multiple_hypotheses": "Return one unified causal claim with one coherent validation plan.",
         "stitched_combination": "Synthesize the parents into one mechanism; do not list or concatenate them.",
+        "missing_evidence_source_ids": (
+            "Add evidence_source_ids and select only the supplied sources that directly support the new hypothesis."
+        ),
+        "no_valid_evidence_source_ids": (
+            "Select at least one supplied source that directly supports the new hypothesis."
+        ),
+        "unknown_evidence_source_ids": (
+            "Use only exact source_id values from the supplied evidence and remove invented or unavailable IDs."
+        ),
+        "missing_evidence_refs": (
+            "Add evidence_refs and select only exact chunk_id values whose passages directly support the new hypothesis."
+        ),
+        "no_valid_evidence_refs": "Select at least one supplied evidence passage that directly supports the new hypothesis.",
+        "unknown_evidence_refs": "Use only exact chunk_id values shown in the supplied evidence.",
+        "evidence_ref_source_mismatch": (
+            "Every selected chunk_id must belong to one of the selected evidence_source_ids."
+        ),
+        "missing_rationale": (
+            "Add a rationale explaining why the claim follows from the selected evidence and why it matters."
+        ),
+        "missing_feasibility": (
+            "Add a feasibility section naming the data, splits, baseline, measurable outcome, and the result "
+            "that would reject the hypothesis."
+        ),
     }.get(
         rejection_reason.split(":", 1)[0],
         "Make a substantive change to the mechanism, prediction, or decisive experiment; do not merely rephrase the parent.",
@@ -289,11 +409,23 @@ def resolve_parent_evidence(
     return resolved
 
 
-def _evidence_context(
+def _evidence_source_aliases(source: Mapping) -> tuple[str, ...]:
+    """Return stable identifiers that may refer to one evidence record."""
+
+    return tuple(
+        dict.fromkeys(
+            value
+            for field in ("source_id", "parent_source_id", "id", "url")
+            if (value := str(source.get(field) or "").strip())
+        )
+    )
+
+
+def _bounded_evidence_payload(
     evidence_sources: Sequence[Mapping],
     *,
     limit: int = _MAX_EVIDENCE_SOURCES,
-) -> str:
+) -> list[dict[str, Any]]:
     evidence = []
     seen = set()
     for source in evidence_sources:
@@ -303,19 +435,59 @@ def _evidence_context(
             continue
         seen.add(marker)
         title = str(source.get("title") or "Untitled source").strip()
-        excerpt = str(
-            source.get("abstract") or source.get("summary") or source.get("content") or source.get("text") or ""
-        ).strip()
-        evidence.append(
-            {
-                "source_id": source_id,
-                "title": _bounded_text(title, _MAX_REVIEW_TEXT_CHARS),
-                "excerpt": _bounded_text(excerpt, _MAX_EVIDENCE_EXCERPT_CHARS),
-            }
-        )
+        evidence_refs = []
+        raw_refs = source.get("evidence_refs", ())
+        if isinstance(raw_refs, (list, tuple)):
+            for raw_ref in raw_refs:
+                if not isinstance(raw_ref, Mapping):
+                    continue
+                chunk_id = str(raw_ref.get("chunk_id") or "").strip()
+                text = str(raw_ref.get("text") or "").strip()
+                if not chunk_id or not text:
+                    continue
+                evidence_refs.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "excerpt": _bounded_text(text, _MAX_EVIDENCE_REF_TEXT_CHARS),
+                    }
+                )
+                if len(evidence_refs) >= _MAX_EVIDENCE_REFS_PER_SOURCE:
+                    break
+        item: dict[str, Any] = {
+            "source_id": source_id,
+            "title": _bounded_text(title, _MAX_REVIEW_TEXT_CHARS),
+        }
+        if evidence_refs:
+            item["evidence_refs"] = evidence_refs
+        else:
+            excerpt = str(
+                source.get("abstract") or source.get("summary") or source.get("content") or source.get("text") or ""
+            ).strip()
+            item["excerpt"] = _bounded_text(excerpt, _MAX_EVIDENCE_EXCERPT_CHARS)
+        evidence.append(item)
         if len(evidence) >= limit:
-            return json.dumps(evidence, indent=2, ensure_ascii=False)
-    return json.dumps(evidence, indent=2, ensure_ascii=False)
+            break
+    return evidence
+
+
+def _evidence_context(
+    evidence_sources: Sequence[Mapping],
+    *,
+    limit: int = _MAX_EVIDENCE_SOURCES,
+) -> str:
+    return json.dumps(
+        _bounded_evidence_payload(evidence_sources, limit=limit),
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def _evidence_ref_source_ids(evidence_sources: Sequence[Mapping]) -> dict[str, str]:
+    return {
+        str(ref["chunk_id"]): str(source["source_id"])
+        for source in _bounded_evidence_payload(evidence_sources)
+        for ref in source.get("evidence_refs", ())
+    }
 
 
 def _format_evolution_meta_review(feedback: Sequence[Mapping] | str | None) -> str:
@@ -390,8 +562,26 @@ Top-ranked parent hypotheses and their existing reviews:
 Evidence already attached to the parents:
 {_evidence_context(resolved_evidence)}
 
+Evidence selection rules:
+- Reassess evidence against the NEW hypothesis and the research goal.
+- Select the smallest subset of supplied sources that directly supports the new hypothesis.
+- Do not automatically inherit every parent source. Omit sources that support only discarded parent claims,
+  tangential methods, or a different domain or dataset.
+- Copy source IDs exactly from the supplied evidence. Do not invent IDs.
+- When chunk-level passages are supplied, select the smallest set of exact chunk_id values that directly supports
+  the new hypothesis. Do not retain unrelated passages from an otherwise relevant paper.
+
+Output structure:
+- title: a short descriptive name.
+- hypothesis: one clear, self-contained and empirically testable claim.
+- rationale: why the claim follows from the selected evidence and why it matters.
+- feasibility: a concrete method for testing the claim, naming the dataset and splits, the baseline it is
+  compared against, the measurable outcome, and the result that would reject the hypothesis.
+- evidence_source_ids / evidence_refs: the selections described above.
+Every field is required. A candidate without a rationale and a feasibility plan is rejected.
+
 Return only valid JSON with this exact schema:
-{{"title": "concise title", "hypothesis": "detailed, self-contained and empirically testable hypothesis"}}
+{{"title": "concise title", "hypothesis": "detailed, self-contained and empirically testable hypothesis", "rationale": "why the claim follows from the selected evidence", "feasibility": "dataset, splits, baseline, measurable outcome, and rejection criterion", "evidence_source_ids": ["exact supplied source_id"], "evidence_refs": ["exact supplied chunk_id"]}}
 """.strip()
 
 
@@ -406,15 +596,22 @@ def call_llm_for_evolution(
     quality_repair_attempts: int = 1,
     transport_retry_attempts: int = 2,
     meta_review_feedback: Sequence[Mapping] | str | None = None,
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     """Create one evolved candidate through the shared, mockable LLM boundary."""
+    resolved_evidence = resolve_parent_evidence(parents) if evidence_sources is None else list(evidence_sources)
     base_prompt = build_evolution_prompt(
         strategy,
         parents,
         research_goal,
-        evidence_sources=evidence_sources,
+        evidence_sources=resolved_evidence,
         meta_review_feedback=meta_review_feedback,
     )
+    available_evidence_source_ids = list(
+        dict.fromkeys(
+            alias for source in resolved_evidence[:_MAX_EVIDENCE_SOURCES] for alias in _evidence_source_aliases(source)
+        )
+    )
+    evidence_ref_source_ids = _evidence_ref_source_ids(resolved_evidence)
     prompt = base_prompt
     quality_rejections: list[str] = []
     response = ""
@@ -445,7 +642,14 @@ def call_llm_for_evolution(
         if parsed is None:
             break
 
-        quality_rejection = validate_evolution_candidate(parsed, parents, strategy)
+        quality_rejection = validate_evolution_candidate(
+            parsed,
+            parents,
+            strategy,
+            available_evidence_source_ids=available_evidence_source_ids,
+            evidence_ref_source_ids=evidence_ref_source_ids,
+            require_sections=True,
+        )
         if quality_rejection is None:
             reason = "accepted_after_quality_repair" if quality_rejections else "accepted"
             break
@@ -491,23 +695,81 @@ def call_llm_for_evolution(
 
 
 def create_evolved_hypothesis(
-    candidate: Mapping[str, str],
+    candidate: Mapping[str, Any],
     parents: Sequence[Hypothesis],
     strategy: EvolutionStrategy,
     *,
     evidence_sources: Sequence[Mapping] | None = None,
 ) -> Hypothesis:
     """Create a tournament-ready child while retaining lineage and evidence."""
-    evolved = Hypothesis(generate_unique_id("E"), candidate["title"], candidate["text"])
+    evolved = Hypothesis(generate_unique_id("E"), candidate["title"], compose_hypothesis_text(candidate))
     evolved.parent_ids = list(dict.fromkeys(parent.hypothesis_id for parent in parents))
     evolved.evolution_strategy = strategy
-    evolved.evidence_source_ids = list(
-        dict.fromkeys(source_id for parent in parents for source_id in parent.evidence_source_ids)
-    )
     evolved.references = [reference for parent in parents for reference in parent.references]
 
     resolved_evidence = resolve_parent_evidence(parents) if evidence_sources is None else list(evidence_sources)
-    evolved.evidence_sources = [dict(source) for source in resolved_evidence]
+    requested_source_ids = candidate.get("evidence_source_ids")
+    if isinstance(requested_source_ids, list):
+        source_by_alias = {alias: source for source in resolved_evidence for alias in _evidence_source_aliases(source)}
+        selected_sources = []
+        selected_source_ids = []
+        seen_sources = set()
+        requested_ref_ids = candidate.get("evidence_refs")
+        selected_ref_ids = (
+            {str(value).strip() for value in requested_ref_ids if isinstance(value, str) and str(value).strip()}
+            if isinstance(requested_ref_ids, list)
+            else set()
+        )
+        for requested_id in requested_source_ids:
+            source = source_by_alias.get(str(requested_id).strip())
+            if source is None:
+                continue
+            source_id = str(source.get("source_id") or source.get("id") or source.get("url") or "").strip()
+            if not source_id or source_id in seen_sources:
+                continue
+            selected_source = dict(source)
+            if selected_ref_ids:
+                raw_refs = source.get("evidence_refs", ())
+                selected_refs = (
+                    [
+                        dict(ref)
+                        for ref in raw_refs
+                        if isinstance(ref, Mapping) and str(ref.get("chunk_id") or "").strip() in selected_ref_ids
+                    ]
+                    if isinstance(raw_refs, (list, tuple))
+                    else []
+                )
+                if not selected_refs:
+                    continue
+                selected_source["evidence_refs"] = selected_refs
+                selected_source["selected_chunk_ids"] = [
+                    str(ref["chunk_id"])
+                    for ref in selected_refs
+                    if ref.get("evidence_type") == "full_text" and ref.get("chunk_id")
+                ]
+                selected_source["context_chunk_ids"] = list(selected_source["selected_chunk_ids"])
+            seen_sources.add(source_id)
+            selected_source_ids.append(source_id)
+            selected_sources.append(selected_source)
+        evolved.evidence_source_ids = selected_source_ids
+        evolved.evidence_sources = selected_sources
+        evolved.evidence_refs = [
+            ref_id
+            for ref_id in candidate.get("evidence_refs", [])
+            if isinstance(ref_id, str)
+            and any(
+                str(ref.get("chunk_id") or "") == ref_id
+                for source in selected_sources
+                for ref in source.get("evidence_refs", ())
+                if isinstance(ref, Mapping)
+            )
+        ]
+    else:
+        # Compatibility for deterministic callers and pre-change cached responses.
+        evolved.evidence_source_ids = list(
+            dict.fromkeys(source_id for parent in parents for source_id in parent.evidence_source_ids)
+        )
+        evolved.evidence_sources = [dict(source) for source in resolved_evidence]
     return evolved
 
 

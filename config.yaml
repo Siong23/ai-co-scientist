@@ -12,12 +12,12 @@ lmstudio_base_url: "http://100.117.90.5:1234/v1"
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
 
-llm_model: "unsloth/qwen3.8-27b"
+llm_model: "qwen/qwen3.8-27b"
 # llm_model: "qwen/qwen3.8-27b"
 # Dedicated model for generating executable PyTorch experiments.
-code_generation_model: "unsloth/qwen3.8-27b"
+code_generation_model: "qwen/qwen3.8-27b"
 # query_rewrite_model: "qwen/qwen3.6-35b-a3b"
-query_rewrite_model: "unsloth/qwen3.8-27b"
+query_rewrite_model: "qwen/qwen3.8-27b"
 
 
 # Number of hypotheses to generate
@@ -88,10 +88,21 @@ elo_k_factor: 32
 # pairwise tournament debates. A smaller, faster model reduces latency when many
 # comparisons run in parallel.
 # ranking_llm_model: "qwen/qwen3.6-35b-a3b"
-ranking_llm_model: "unsloth/qwen3.8-27b"
+ranking_llm_model: "qwen/qwen3.8-27b"
 # set ranking model to "null" to use the main llm_model for pairwise tournament debates. A smaller, faster model reduces latency when many comparisons run in parallel.
 
 ranking:
+  # Multi-turn scientific debate for the strongest candidates. Both sides argue
+  # before a judge adjudicates, which is markedly more reliable than a single
+  # comparison on closely matched top ideas. It costs two extra ranking-model
+  # calls per match, so only pairs where both hypotheses sit in the current
+  # top-k use it; every other match keeps the single-turn judge. Keep this well
+  # below num_hypotheses: a cycle's active field is often only three or four
+  # candidates, and a top-k that covers all of them debates every match instead
+  # of the decisive one. Set debate_enabled false, or debate_top_k 0, for
+  # single-turn ranking only.
+  debate_enabled: true
+  debate_top_k: 2
   proximity_guided_matching: true
   # Bound tournament latency: prioritize nearby Elo/proximity competitors
   # instead of comparing every possible pair in one cycle.
@@ -101,6 +112,14 @@ ranking:
 # blocking one another serially. Tune this to the local server's capacity.
 reflection:
   max_workers: 3
+  # Deep verification decomposes a hypothesis into the assumptions it depends
+  # on and judges each one independently, which catches an unsound step that a
+  # single combined review scores past. It costs one extra call per hypothesis.
+  # An assumption the hypothesis proposes to test stays UNCERTAIN; only a
+  # contradicted assumption downgrades the verdict, and only a fundamental one
+  # rejects the hypothesis outright.
+  deep_verification_enabled: true
+  max_assumptions: 6
 
 # Synthesize actual review/debate feedback using the selected research model.
 # Invalid or unavailable model output falls back to deterministic summaries.

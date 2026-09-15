@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 
 # import random
@@ -265,6 +266,23 @@ def format_reflection_report(
     else:
         output.append("No claim assessments provided.")
 
+    assumptions = getattr(report, "assumptions", None) or []
+
+    if assumptions:
+        output.extend(["", "Deep Verification of Assumptions:"])
+        for assumption in assumptions:
+            scope = "fundamental" if getattr(assumption, "fundamental", False) else "peripheral"
+            output.append(
+                f"- [{getattr(assumption, 'status', 'UNCERTAIN')}, {scope}] {getattr(assumption, 'assumption', '')}"
+            )
+        summary = getattr(report, "deep_verification_summary", "")
+        if summary:
+            output.append(f"Verification summary: {summary}")
+        output.append(
+            "An UNCERTAIN assumption is unsettled, not refuted; do not penalize a "
+            "hypothesis for proposing something that has yet to be tested."
+        )
+
     output.extend(
         [
             "",
@@ -298,6 +316,30 @@ def format_reflection_report(
     )
 
     return "\n".join(output)
+
+
+def presentation_order(hypo_a: Hypothesis, hypo_b: Hypothesis) -> tuple[Hypothesis, Hypothesis]:
+    """Assign a match's A/B slots from the pair's IDs rather than from Elo.
+
+    Tournament pairs are built highest-Elo-first, so presenting them in that
+    order would always seat the incumbent leader in slot A.  Any positional bias
+    in the judge would then accumulate in the leader's favour instead of
+    averaging out.  Deriving the orientation from a digest of both IDs keeps a
+    given pair stable across reruns, which preserves Elo reproducibility, while
+    spreading orientations evenly across the field.
+
+    The result depends only on the pair, not on the order the two hypotheses
+    were passed in, so a caller cannot reintroduce its own ordering bias.
+    """
+    if hypo_a.hypothesis_id == hypo_b.hypothesis_id:
+        return hypo_a, hypo_b
+
+    by_id = {hypo_a.hypothesis_id: hypo_a, hypo_b.hypothesis_id: hypo_b}
+    first_id, second_id = sorted(by_id)
+    digest = hashlib.blake2b(f"{first_id}|{second_id}".encode("utf-8"), digest_size=8).digest()
+    if digest[0] & 1:
+        return by_id[second_id], by_id[first_id]
+    return by_id[first_id], by_id[second_id]
 
 
 def generate_debate_argument(
@@ -461,6 +503,39 @@ def judge_debate(
         model=_get_ranking_model(),
         reasoning="off",
     )
+
+
+def run_debate_rounds(
+    hypo_a: Hypothesis,
+    hypo_b: Hypothesis,
+    review_a: str,
+    review_b: str,
+    research_goal: ResearchGoal,
+) -> str | None:
+    """Argue both sides of a match, then adjudicate the two arguments.
+
+    Returns ``None`` when either argument could not be generated, so the caller
+    falls back to the single-turn judge.  Adjudicating a debate in which only
+    one side was actually argued would hand the match to whichever hypothesis
+    the transport happened to serve.
+    """
+    argument_a = generate_debate_argument(hypo_a, hypo_b, review_a, review_b, research_goal)
+    if argument_a.startswith("Error:"):
+        logger.warning(
+            "Debate argument for %s failed; falling back to the single-turn judge.",
+            hypo_a.hypothesis_id,
+        )
+        return None
+
+    argument_b = generate_debate_argument(hypo_b, hypo_a, review_b, review_a, research_goal)
+    if argument_b.startswith("Error:"):
+        logger.warning(
+            "Debate argument for %s failed; falling back to the single-turn judge.",
+            hypo_b.hypothesis_id,
+        )
+        return None
+
+    return judge_debate(hypo_a, hypo_b, argument_a, argument_b, research_goal)
 
 
 def judge_hypotheses(
@@ -654,12 +729,19 @@ def run_pairwise_debate(
     hypoA: Hypothesis,
     hypoB: Hypothesis,
     research_goal: ResearchGoal,
+    *,
+    use_debate: bool = False,
 ) -> PairwiseDecision:
     """
     Compare two hypotheses using their structured ReflectionReports.
 
     Ranking must not perform an evidence-based comparison when either
     hypothesis has not been successfully reviewed.
+
+    ``use_debate`` runs the multi-turn scientific debate instead of the
+    single-turn judge.  It costs two extra ranking-model calls, so the caller
+    decides which matches deserve it; the default keeps the cheap path.  The
+    outcome is always expressed relative to this call's argument order.
     """
 
     report_a = hypoA.reflection_report
@@ -735,13 +817,24 @@ def run_pairwise_debate(
     # LLM ranking judge
     # ------------------------------------------------------------
 
-    response = judge_hypotheses(
-        hypoA,
-        hypoB,
-        reviewA,
-        reviewB,
-        research_goal,
-    )
+    response = None
+    if use_debate:
+        response = run_debate_rounds(
+            hypoA,
+            hypoB,
+            reviewA,
+            reviewB,
+            research_goal,
+        )
+
+    if response is None:
+        response = judge_hypotheses(
+            hypoA,
+            hypoB,
+            reviewA,
+            reviewB,
+            research_goal,
+        )
 
     try:
         outcome = parse_pairwise_result(response)

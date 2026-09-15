@@ -229,7 +229,10 @@ concepts and empirical findings objectively.
 
 For each candidate:
 
-1. Verify that every Source ID exists in the supplied evidence.
+1. Verify that every Source ID and evidence_refs chunk ID exists in the supplied
+   evidence. Retain the smallest set of passages that directly supports the
+   final hypothesis; exclude background passages that support neither its
+   mechanism nor its evaluation.
 2. Check whether the cited sources actually entail each established statement
    in the rationale. A proposed relationship may remain an explicitly labeled
    hypothesis, but it must not be presented as an established fact.
@@ -307,11 +310,98 @@ Return only valid JSON:
         "hypothesis": "...",
         "rationale": "...",
         "feasibility": "include metric, baseline, and rejection criterion",
-        "source_ids": ["exact supplied Source ID"]
+        "source_ids": ["exact supplied Source ID"],
+        "evidence_refs": ["exact supplied chunk_id"]
       }
     }
   ]
 }"""
+
+
+def _index_document_evidence_refs(documents: List[Document]) -> dict[str, dict]:
+    """Index substantive retrieved passages by their exact persisted chunk ID."""
+
+    indexed: dict[str, dict] = {}
+    for document in documents:
+        metadata = document.metadata
+        source_id = str(metadata.get("source_id") or "").strip()
+        raw_refs = metadata.get("evidence_refs", ())
+        if not isinstance(raw_refs, (list, tuple)):
+            continue
+        for raw_ref in raw_refs:
+            if not isinstance(raw_ref, dict):
+                continue
+            chunk_id = str(raw_ref.get("chunk_id") or "").strip()
+            if not chunk_id:
+                continue
+            evidence_ref = dict(raw_ref)
+            evidence_ref["source_id"] = str(evidence_ref.get("source_id") or source_id).strip()
+            if not str(evidence_ref.get("text") or "").strip() and evidence_ref.get("evidence_type") == "abstract_only":
+                evidence_ref["text"] = str(metadata.get("abstract") or metadata.get("summary") or "").strip()
+            if evidence_ref["source_id"] and str(evidence_ref.get("text") or "").strip():
+                indexed.setdefault(chunk_id, evidence_ref)
+    return indexed
+
+
+def _select_hypothesis_evidence(
+    sources: List[Dict],
+    source_ids: List[str],
+    requested_ref_ids: object,
+    available_evidence_refs: dict[str, dict],
+) -> tuple[List[str], List[str], List[Dict]]:
+    """Return citation IDs and source copies pruned to the cited passages."""
+
+    if not isinstance(requested_ref_ids, list):
+        source_by_id = {
+            str(source.get("source_id")): source
+            for source in sources
+            if isinstance(source, dict) and source.get("source_id")
+        }
+        return (
+            source_ids,
+            [],
+            [dict(source_by_id[source_id]) for source_id in source_ids if source_id in source_by_id],
+        )
+
+    selected_ref_ids = list(
+        dict.fromkeys(
+            ref_id
+            for value in requested_ref_ids
+            if isinstance(value, str)
+            and (ref_id := value.strip())
+            and ref_id in available_evidence_refs
+            and str(available_evidence_refs[ref_id].get("source_id") or "") in source_ids
+        )
+    )
+    if not selected_ref_ids:
+        return source_ids, [], []
+
+    refs_by_source: dict[str, List[Dict]] = {}
+    for ref_id in selected_ref_ids:
+        evidence_ref = dict(available_evidence_refs[ref_id])
+        refs_by_source.setdefault(str(evidence_ref["source_id"]), []).append(evidence_ref)
+
+    selected_source_ids = [source_id for source_id in source_ids if source_id in refs_by_source]
+    source_by_id = {
+        str(source.get("source_id")): source
+        for source in sources
+        if isinstance(source, dict) and source.get("source_id")
+    }
+    selected_sources: List[Dict] = []
+    for source_id in selected_source_ids:
+        source = source_by_id.get(source_id)
+        if source is None:
+            continue
+        selected = dict(source)
+        selected["evidence_refs"] = refs_by_source[source_id]
+        selected["selected_chunk_ids"] = [
+            str(ref["chunk_id"])
+            for ref in refs_by_source[source_id]
+            if ref.get("evidence_type") == "full_text" and ref.get("chunk_id")
+        ]
+        selected["context_chunk_ids"] = list(selected["selected_chunk_ids"])
+        selected_sources.append(selected)
+    return selected_source_ids, selected_ref_ids, selected_sources
 
 
 class GenerationAgent:
@@ -404,11 +494,29 @@ class GenerationAgent:
             return ""
         latest = context.meta_review_feedback[-1]
         critiques = latest.get("meta_review_critique", [])
-        next_steps = (latest.get("research_overview", {}) or {}).get("suggested_next_steps", [])
+        overview = latest.get("research_overview", {}) or {}
+        next_steps = overview.get("suggested_next_steps", [])
         sections = []
         if critiques:
             critique_text = "\n".join(f"- {c}" for c in critiques)
             sections.append(f"Prior cycle review critique:\n{critique_text}")
+
+        # The overview maps what previous cycles already covered, which is what
+        # lets this cycle push into an unexplored area instead of re-deriving a
+        # neighbour of an existing hypothesis.
+        areas = [area for area in (overview.get("research_areas") or []) if isinstance(area, dict)]
+        if areas:
+            lines = []
+            for area in areas:
+                lines.append(f"- {area.get('area', '')}: {area.get('rationale', '')}")
+                for experiment in area.get("example_experiments") or []:
+                    lines.append(f"  - Example experiment: {experiment}")
+            sections.append(
+                "Research areas already covered, with why each matters:\n"
+                + "\n".join(lines)
+                + "\nExtend or move beyond these areas; do not restate a hypothesis that already covers one."
+            )
+
         if next_steps:
             steps_text = "\n".join(f"- {s}" for s in next_steps)
             sections.append(f"Prior cycle recommended next steps:\n{steps_text}")
@@ -1544,6 +1652,7 @@ Your refined contribution:
                 candidate_context,
                 candidate_source_ids,
                 model=research_goal.llm_model,
+                available_evidence_refs=_index_document_evidence_refs(merged_documents),
             )
 
             if synthesis_error or updated_synthesis is None:
@@ -2171,6 +2280,7 @@ Your refined contribution:
 
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
+        available_evidence_refs = _index_document_evidence_refs(retrieved_documents)
 
         # ==================================================================
         # Step 4: Literature Synthesis
@@ -2183,6 +2293,7 @@ Your refined contribution:
             retrieved_context,
             allowed_source_ids,
             model=research_goal.llm_model,
+            available_evidence_refs=available_evidence_refs,
         )
 
         if synthesis_error or synthesis is None:
@@ -2231,6 +2342,7 @@ Your refined contribution:
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
         retrieved_context = format_documents_for_prompt(retrieved_documents)
         allowed_source_ids = {str(document.metadata["source_id"]) for document in retrieved_documents}
+        available_evidence_refs = _index_document_evidence_refs(retrieved_documents)
         for warning in synthesis.warnings:
             if warning not in context.last_generation_diagnostics["warnings"]:
                 context.last_generation_diagnostics["warnings"].append(warning)
@@ -2373,12 +2485,15 @@ Your refined contribution:
             "- feasibility: a concise practical method for testing the claim, "
             "including measurable outcomes where supported.\n"
             "- source_ids: the exact retrieved Source IDs supporting it.\n"
-            "Return exactly these five fields and no additional prose sections "
+            "- evidence_refs: the smallest set of exact chunk_id values that directly support it.\n"
+            "Return exactly these six fields and no additional prose sections "
             "inside each item.\n"
             "Include only exact Source IDs present in the retrieved evidence. "
             "Do not invent Source IDs. Every hypothesis must cite the specific "
             "retrieved sources supporting it in source_ids; cite more than one "
-            "source when the claim combines evidence from multiple sources.\n"
+            "source when the claim combines evidence from multiple sources. "
+            "Every evidence_refs entry must be an exact chunk_id shown in the "
+            "retrieved articles; exclude tangential passages.\n"
         )
 
         # ==================================================================
@@ -2423,6 +2538,7 @@ Your refined contribution:
                 allowed_source_ids,
                 model=research_goal.llm_model,
                 system_prompt=(HYPOTHESIS_AUDITOR_SYSTEM_PROMPT),
+                available_evidence_refs=available_evidence_refs,
             )
 
             if audit_error or audits is None:
@@ -2527,15 +2643,26 @@ Your refined contribution:
                 ),
             )
 
+            (
+                valid_source_ids,
+                valid_evidence_ref_ids,
+                selected_evidence_sources,
+            ) = _select_hypothesis_evidence(
+                context.last_retrieved_sources,
+                valid_source_ids,
+                idea.get("evidence_refs"),
+                available_evidence_refs,
+            )
+            if not selected_evidence_sources:
+                error = (
+                    f"Generated hypothesis has no valid retrieved evidence passages: {idea.get('title', 'Untitled')}"
+                )
+                logger.warning(error)
+                errors.append(error)
+                continue
             hypothesis.evidence_source_ids = valid_source_ids
-            source_by_id = {
-                str(source.get("source_id")): source
-                for source in context.last_retrieved_sources
-                if isinstance(source, dict) and source.get("source_id")
-            }
-            hypothesis.evidence_sources = [
-                dict(source_by_id[source_id]) for source_id in valid_source_ids if source_id in source_by_id
-            ]
+            hypothesis.evidence_refs = valid_evidence_ref_ids
+            hypothesis.evidence_sources = selected_evidence_sources
 
             audit_report = idea.get("_audit_report")
 

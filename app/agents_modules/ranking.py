@@ -9,7 +9,7 @@ from typing import Iterable, List, Mapping, Optional
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
 from ..utils import logger, redact_secrets
-from .ranking_helpers import run_pairwise_debate, update_elo, update_elo_tie
+from .ranking_helpers import presentation_order, run_pairwise_debate, update_elo, update_elo_tie
 
 
 class RankingAgent:
@@ -24,6 +24,7 @@ class RankingAgent:
         """Rank active hypotheses, optionally comparing only newly introduced ones."""
         # Use k_factor from research_goal
         k_factor = research_goal.elo_k_factor
+        ranking_config = config.get("ranking", {})
 
         if len(hypotheses) < 2:
             logger.info("Not enough hypotheses to run a tournament.")
@@ -57,7 +58,7 @@ class RankingAgent:
             return
 
         pair_scores = {}
-        if proximity_data and config.get("ranking", {}).get("proximity_guided_matching", True):
+        if proximity_data and ranking_config.get("proximity_guided_matching", True):
             proximity_graph = proximity_data.get("graph", proximity_data)
             adjacency = proximity_graph.get("adjacency_graph", {})
             for h_a, h_b in pairs:
@@ -88,9 +89,24 @@ class RankingAgent:
                 pair[1].hypothesis_id,
             )
         )
-        max_matches = int(config.get("ranking", {}).get("max_matches_per_cycle", 0))
+        max_matches = int(ranking_config.get("max_matches_per_cycle", 0))
         if max_matches > 0:
             pairs = pairs[:max_matches]
+
+        # The multi-turn debate is materially more accurate than the single-turn
+        # judge on closely matched top candidates, and costs two extra model
+        # calls per match, so it is reserved for pairs where both hypotheses
+        # currently lead the field.  active_hypotheses is already Elo-ordered.
+        # A top-k as large as the field debates every match rather than the
+        # decisive one, which is why the configured default stays small.
+        debate_ids: set[str] = set()
+        debate_top_k = int(ranking_config.get("debate_top_k", 2))
+        if ranking_config.get("debate_enabled", True) and debate_top_k > 0:
+            debate_ids = {hypothesis.hypothesis_id for hypothesis in active_hypotheses[:debate_top_k]}
+
+        # Slots are assigned from the pair's IDs so that the higher-rated
+        # hypothesis does not always occupy slot A.  See presentation_order.
+        pairs = [presentation_order(pair[0], pair[1]) for pair in pairs]
 
         for h in active_hypotheses:
             logger.debug(
@@ -104,11 +120,12 @@ class RankingAgent:
         # ---- Parallel LLM Debates ----
         def run_match(pair):
             hA, hB = pair
+            use_debate = hA.hypothesis_id in debate_ids and hB.hypothesis_id in debate_ids
             try:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] START {hA.hypothesis_id} vs {hB.hypothesis_id}")
-                decision = run_pairwise_debate(hA, hB, research_goal)
+                decision = run_pairwise_debate(hA, hB, research_goal, use_debate=use_debate)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] END {hA.hypothesis_id} vs {hB.hypothesis_id}")
-                return hA, hB, decision
+                return hA, hB, decision, use_debate
 
             except Exception as e:
                 logger.error(
@@ -127,7 +144,7 @@ class RankingAgent:
             if result is None:
                 continue
 
-            hA, hB, decision = result
+            hA, hB, decision, used_debate = result
 
             # ------------------------------------------------------------
             # Safety gate: never update Elo without valid Reflection scores
@@ -180,5 +197,8 @@ class RankingAgent:
                     "scores_a": decision.scores_a,
                     "scores_b": decision.scores_b,
                     "criteria": decision.decisive_criteria,
+                    # Which comparison actually produced this outcome, so a run
+                    # report can tell a debated match from a single-turn one.
+                    "debate": used_debate,
                 }
             )

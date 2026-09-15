@@ -180,6 +180,83 @@ def test_meta_review_empty_context_never_calls_model():
     assert result["synthesis_mode"] == "heuristic"
 
 
+def _capture_reflection_prompt(context):
+    """Run one review against a stubbed model and return the prompt it received."""
+    hypothesis = Hypothesis("H1", "Slice control", "Hypothesis: A specific mechanism with measurable predictions.")
+    context.add_hypothesis(hypothesis)
+    review = json.dumps(
+        {
+            "alignment_score": 8,
+            "novelty_score": 7,
+            "feasibility_score": 7,
+            "plausibility_score": 7,
+            "testability_score": 8,
+            "evidence_quality_score": 6,
+            "expected_research_value_score": 7,
+            "strengths": ["Clear mechanism"],
+            "weaknesses": ["No power analysis"],
+            "sub_claims": [],
+            "proposed_tests": ["Measure p99 latency against the baseline."],
+            "comment": "Reasonable but under-specified.",
+            "references": [],
+        }
+    )
+    prompts = []
+
+    def fake_llm(prompt, **_kwargs):
+        prompts.append(prompt)
+        return review
+
+    with patch("app.agents_modules.reflection_helpers._call_llm", fake_llm):
+        ReflectionAgent(max_workers=1).review_hypotheses([hypothesis], context, ResearchGoal("goal"))
+
+    assert prompts
+    return prompts[0]
+
+
+def test_recurring_meta_review_critiques_reach_the_next_reflection_prompt():
+    context = ContextMemory()
+    context.meta_review_feedback.append(
+        {
+            "meta_review_critique": [
+                "Reviews repeatedly miss that the baseline is never specified.",
+                "Reviews accept unjustified latency thresholds.",
+            ],
+            "research_overview": {"suggested_next_steps": ["Evolve the top two hypotheses."]},
+        }
+    )
+
+    prompt = _capture_reflection_prompt(context)
+
+    assert "Reviews repeatedly miss that the baseline is never specified." in prompt
+    assert "Reviews accept unjustified latency thresholds." in prompt
+    # The critiques are a coverage checklist about earlier hypotheses, so the
+    # reviewer must not read them as findings against the hypothesis at hand.
+    assert "not this one" in prompt
+    assert "do not lower a score for an issue this hypothesis avoids" in prompt
+    # Next steps steer Generation and Evolution, not a peer review.
+    assert "Evolve the top two hypotheses." not in prompt
+
+
+def test_reflection_prompt_carries_no_meta_review_block_before_the_first_synthesis():
+    prompt = _capture_reflection_prompt(ContextMemory())
+
+    assert "Recurring critiques" not in prompt
+
+
+def test_reflection_meta_review_block_is_bounded():
+    context = ContextMemory()
+    context.meta_review_feedback.append(
+        {"meta_review_critique": [f"Critique {index} " + "x" * 900 for index in range(9)]}
+    )
+
+    prompt = _capture_reflection_prompt(context)
+
+    assert "Critique 4" in prompt
+    assert "Critique 5" not in prompt
+    assert "x" * 600 not in prompt
+
+
 def test_proximity_duplicate_keeps_higher_elo_candidate_without_unpack_error():
     context = ContextMemory()
     weaker, stronger = reviewed("A"), reviewed("B")
@@ -192,3 +269,96 @@ def test_proximity_duplicate_keeps_higher_elo_candidate_without_unpack_error():
     assert weaker.is_active is False
     assert stronger.is_active is True
     assert result["near_duplicates"][0]["canonical_id"] == "B"
+
+
+def test_meta_review_maps_research_areas_into_the_overview():
+    """The overview is the map of covered ground the next cycle plans against."""
+
+    context = ContextMemory()
+    context.add_hypothesis(reviewed("A"))
+    with patch(
+        "app.agents.call_llm",
+        return_value=json.dumps(
+            {
+                "critiques": ["Control groups are consistently underspecified"],
+                "next_steps": ["Specify negative controls"],
+                "research_areas": [
+                    {
+                        "area": "Transporter inhibition",
+                        "rationale": "Every accepted hypothesis so far targets efflux.",
+                        "example_experiments": ["Knock down the transporter and re-measure sensitivity."],
+                    },
+                    {"area": "No rationale given"},
+                ],
+            }
+        ),
+    ):
+        result = MetaReviewAgent().summarize_and_feedback(context, {}, research_goal=ResearchGoal("goal"))
+
+    areas = result["research_overview"]["research_areas"]
+    assert [area["area"] for area in areas] == ["Transporter inhibition"]
+    assert areas[0]["example_experiments"] == ["Knock down the transporter and re-measure sensitivity."]
+
+
+def test_meta_review_keeps_its_critiques_when_the_areas_are_malformed():
+    context = ContextMemory()
+    context.add_hypothesis(reviewed("A"))
+    with patch(
+        "app.agents.call_llm",
+        return_value=json.dumps(
+            {
+                "critiques": ["Control groups are consistently underspecified"],
+                "next_steps": ["Specify negative controls"],
+                "research_areas": "not a list",
+            }
+        ),
+    ):
+        result = MetaReviewAgent().summarize_and_feedback(context, {}, research_goal=ResearchGoal("goal"))
+
+    assert result["synthesis_mode"] == "llm"
+    assert result["research_overview"]["research_areas"] == []
+
+
+def test_generation_prompt_carries_the_research_overview():
+    from app.agents_modules.generation import GenerationAgent
+
+    context = ContextMemory()
+    context.meta_review_feedback.append(
+        {
+            "meta_review_critique": ["Control groups are underspecified"],
+            "research_overview": {
+                "suggested_next_steps": ["Specify negative controls"],
+                "research_areas": [
+                    {
+                        "area": "Transporter inhibition",
+                        "rationale": "Every accepted hypothesis so far targets efflux.",
+                        "example_experiments": ["Knock down the transporter."],
+                    }
+                ],
+            },
+        }
+    )
+
+    formatted = GenerationAgent._format_meta_review_feedback(GenerationAgent.__new__(GenerationAgent), context)
+
+    assert "Transporter inhibition: Every accepted hypothesis so far targets efflux." in formatted
+    assert "Example experiment: Knock down the transporter." in formatted
+    assert "do not restate a hypothesis that already covers one" in formatted
+    assert "Control groups are underspecified" in formatted
+
+
+def test_generation_prompt_is_unchanged_without_research_areas():
+    from app.agents_modules.generation import GenerationAgent
+
+    context = ContextMemory()
+    context.meta_review_feedback.append(
+        {
+            "meta_review_critique": ["Control groups are underspecified"],
+            "research_overview": {"suggested_next_steps": ["Specify negative controls"]},
+        }
+    )
+
+    formatted = GenerationAgent._format_meta_review_feedback(GenerationAgent.__new__(GenerationAgent), context)
+
+    assert "Research areas already covered" not in formatted
+    assert "Control groups are underspecified" in formatted

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Sequence
 
 from ..config import config
 from ..models import ContextMemory, Hypothesis, ResearchGoal
@@ -15,6 +15,21 @@ from .evolution_helpers import (
     create_evolved_hypothesis,
     resolve_parent_evidence,
 )
+
+# Reflection's ACCEPT rubric passes a hypothesis at 5 and above, so a score
+# below that is the gap an evolution strategy has to close.
+_ACCEPT_THRESHOLD = 5.0
+
+# Which strategy repairs which measured weakness.  Plausibility and feasibility
+# share a strategy because its instruction covers both: repair invalid
+# assumptions, and describe an implementable validation path.
+_WEAKNESS_STRATEGIES: dict[str, EvolutionStrategy] = {
+    "feasibility_score": "feasibility",
+    "plausibility_score": "feasibility",
+    "evidence_quality_score": "grounding",
+    "testability_score": "simplification",
+    "novelty_score": "out_of_box",
+}
 
 
 class EvolutionAgent:
@@ -56,12 +71,56 @@ class EvolutionAgent:
             ),
         )
 
-    def _strategies_for_cycle(self, context: ContextMemory, parent_count: int) -> list[EvolutionStrategy]:
-        """Rotate through the strategy library while respecting parent-count requirements."""
+    @staticmethod
+    def _strategy_deficits(parents: Sequence[Hypothesis]) -> dict[EvolutionStrategy, float]:
+        """Score how badly each strategy is needed by the parents under review.
+
+        Rotating blindly through the library means the strategy that addresses
+        a parent's actual weakness may not come round for several cycles, so a
+        hypothesis can be evolved repeatedly without its worst dimension ever
+        being worked on.  Reflection already measured those dimensions; this
+        turns them into selection pressure.
+
+        Each dimension contributes how far the worst parent falls below the
+        review rubric's ACCEPT threshold, so a strategy is prioritized in
+        proportion to the size of the gap it addresses.
+        """
+        deficits: dict[EvolutionStrategy, float] = {}
+        for parent in parents:
+            report = getattr(parent, "reflection_report", None)
+            if report is None:
+                continue
+            for field, strategy in _WEAKNESS_STRATEGIES.items():
+                score = getattr(report, field, None)
+                if not isinstance(score, (int, float)):
+                    continue
+                gap = max(0.0, _ACCEPT_THRESHOLD - float(score))
+                if gap > 0:
+                    deficits[strategy] = max(deficits.get(strategy, 0.0), gap)
+
+            # A peripheral assumption the deep verification review contradicted
+            # is exactly what the feasibility strategy exists to repair.
+            if any(assumption.status == "INVALID" for assumption in getattr(report, "assumptions", []) or []):
+                deficits["feasibility"] = max(deficits.get("feasibility", 0.0), _ACCEPT_THRESHOLD)
+        return deficits
+
+    def _strategies_for_cycle(self, context: ContextMemory, parents: Sequence[Hypothesis]) -> list[EvolutionStrategy]:
+        """Order the strategy library by what the parents actually need.
+
+        Rotation still sets the baseline order, so a cycle whose parents carry
+        no reviews behaves exactly as before and the whole library keeps being
+        explored over time.  Measured weaknesses only reorder that baseline.
+        """
         if not self.strategies:
             return []
+        parent_count = len(parents)
         start = (context.iteration_number * self.max_candidates_per_cycle) % len(self.strategies)
-        ordered = self.strategies[start:] + self.strategies[:start]
+        ordered = list(self.strategies[start:] + self.strategies[:start])
+
+        deficits = self._strategy_deficits(parents)
+        if deficits:
+            ordered.sort(key=lambda strategy: -deficits.get(strategy, 0.0))
+
         selected = []
         for strategy in ordered:
             if parent_count < 2 and strategy in {"combination", "inspiration", "out_of_box"}:
@@ -85,7 +144,7 @@ class EvolutionAgent:
             parent_count,
             getattr(context, "proximity_analysis", None),
         )
-        strategies = self._strategies_for_cycle(context, len(top_candidates))
+        strategies = self._strategies_for_cycle(context, top_candidates)
 
         def evolve_one(strategy: EvolutionStrategy) -> tuple[Hypothesis | None, list[dict]]:
             diagnostics: list[dict] = []

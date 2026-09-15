@@ -50,6 +50,7 @@ def test_reflection_reviews_run_concurrently_and_commit_in_input_order():
 
     with (
         patch("app.agents_modules.reflection.call_llm_for_reflection", side_effect=review),
+        patch("app.agents_modules.reflection.call_llm_for_deep_verification", return_value={}),
         patch(
             "app.agents_modules.reflection.evaluate_claims",
             return_value={"claims": [], "overall_confidence": 8.0},

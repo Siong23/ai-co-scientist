@@ -39,14 +39,9 @@ VALID_SPECIFICATION = {
     "selected_hypothesis": {
         "hypothesis_id": "H-1",
         "title": "Adaptive PQC selection",
-        "text": (
-            "Adaptive PQC selection reduces 5G handshake latency "
-            "under bursty load."
-        ),
+        "text": ("Adaptive PQC selection reduces 5G handshake latency under bursty load."),
     },
-    "research_goal": {
-        "description": "Test a new model for 5G security orchestration."
-    },
+    "research_goal": {"description": "Test a new model for 5G security orchestration."},
     "scientific_evaluation": {},
     "code_generation_requirements": {
         "framework": "PyTorch",
@@ -87,9 +82,7 @@ def test_code_generation_agent_generates_valid_experiment(monkeypatch):
             "epochs": 3,
             "batch_size": 32,
         },
-        "assumptions": [
-            "The dataset is tabular and time-ordered."
-        ],
+        "assumptions": ["The dataset is tabular and time-ordered."],
         "dependencies": [
             "torch",
             "pandas",
@@ -133,27 +126,15 @@ def test_code_generation_agent_generates_valid_experiment(monkeypatch):
 
 def test_code_generation_agent_extracts_fenced_python_response():
     result = CodeGenerationAgent.extract_fenced_python(
-        "Here is the experiment:\n"
-        "```python\n"
-        "import torch\n"
-        "print('ok')\n"
-        "```"
+        "Here is the experiment:\n```python\nimport torch\nprint('ok')\n```"
     )
 
     assert result is not None
-    assert result["pytorch_code"] == (
-        "import torch\n"
-        "print('ok')"
-    )
+    assert result["pytorch_code"] == ("import torch\nprint('ok')")
 
 
 def test_code_generation_agent_recovers_unterminated_fenced_python():
-    result = CodeGenerationAgent.extract_fenced_python(
-        "```python\n"
-        "import os\n"
-        "import torch\n"
-        "print('partial'"
-    )
+    result = CodeGenerationAgent.extract_fenced_python("```python\nimport os\nimport torch\nprint('partial'")
 
     assert result is not None
     # The leading imports must survive. Recovering the source from the first
@@ -204,9 +185,7 @@ def test_code_generation_agent_continues_truncated_experiment(monkeypatch):
 
     assert result["success"] is True
     assert len(calls) == 2
-    assert calls[1]["system_prompt"] == (
-        CodeGenerationAgent.CONTINUATION_SYSTEM_PROMPT
-    )
+    assert calls[1]["system_prompt"] == (CodeGenerationAgent.CONTINUATION_SYSTEM_PROMPT)
 
     code = result["pytorch_code"]
 
@@ -217,9 +196,7 @@ def test_code_generation_agent_continues_truncated_experiment(monkeypatch):
 
 def test_code_generation_agent_keeps_complete_code_unchanged(monkeypatch):
     def fail_call_llm(*args, **kwargs):
-        raise AssertionError(
-            "A complete experiment must not be continued."
-        )
+        raise AssertionError("A complete experiment must not be continued.")
 
     monkeypatch.setattr(
         "app.agents_modules.code_generation_agent._call_llm",
@@ -234,9 +211,7 @@ def test_code_generation_agent_keeps_complete_code_unchanged(monkeypatch):
 
 def test_code_generation_agent_does_not_continue_invalid_python(monkeypatch):
     def fail_call_llm(*args, **kwargs):
-        raise AssertionError(
-            "Invalid Python must not be continued."
-        )
+        raise AssertionError("Invalid Python must not be continued.")
 
     monkeypatch.setattr(
         "app.agents_modules.code_generation_agent._call_llm",
@@ -244,11 +219,7 @@ def test_code_generation_agent_does_not_continue_invalid_python(monkeypatch):
     )
 
     agent = CodeGenerationAgent(model="test-model")
-    source = (
-        "import torch\n"
-        "this is not valid Python\n"
-        + "print(1)\n" * 60
-    )
+    source = "import torch\nthis is not valid Python\n" + "print(1)\n" * 60
 
     with pytest.raises(ValueError, match="not valid Python"):
         agent.continue_truncated_code(source)
@@ -270,10 +241,7 @@ def test_code_repair_prompt_is_bounded(monkeypatch):
     def fake_call_llm(*args, **kwargs):
         captured["prompt"] = args[0] if args else ""
         captured["kwargs"] = kwargs
-        return (
-            "import torch\n"
-            "print('fixed')"
-        )
+        return "import torch\nprint('fixed')"
 
     monkeypatch.setattr(
         "app.agents_modules.code_generation_agent._call_llm",
@@ -285,9 +253,7 @@ def test_code_repair_prompt_is_bounded(monkeypatch):
     result = agent.repair_generated_code(
         specification={
             "dataset": {"name": "5G-NIDD"},
-            "selected_hypothesis": {
-                "text": "test hypothesis"
-            },
+            "selected_hypothesis": {"text": "test hypothesis"},
             "large_provenance": "x" * 200000,
         },
         generated_code="x" * 200000,
@@ -302,10 +268,7 @@ def test_code_repair_prompt_is_bounded(monkeypatch):
     # The bound holds a full-length experiment plus both bounded logs, so the
     # repair model sees the whole file instead of its tail.
     assert len(captured["prompt"]) < 90000
-    assert (
-        captured["kwargs"]["max_tokens"]
-        == agent.REPAIR_MAX_TOKENS
-    )
+    assert captured["kwargs"]["max_tokens"] == agent.REPAIR_MAX_TOKENS
 
 
 def test_code_generation_agent_rejects_invalid_python():
@@ -314,10 +277,7 @@ def test_code_generation_agent_rejects_invalid_python():
         "experiment_plan": {},
         "assumptions": [],
         "dependencies": [],
-        "pytorch_code": (
-            "import torch\n"
-            "this is not valid Python"
-        ),
+        "pytorch_code": ("import torch\nthis is not valid Python"),
     }
 
     with pytest.raises(ValueError, match="not valid Python"):
@@ -330,9 +290,7 @@ def test_code_generation_agent_rejects_invalid_python():
 
 
 def test_experiment_runner_collects_standard_output_files(tmp_path):
-    runner = ExperimentRunner(
-        output_directory=tmp_path / "runs"
-    )
+    runner = ExperimentRunner(output_directory=tmp_path / "runs")
 
     run_directory = runner.create_run_directory("demo_run")
 
@@ -351,24 +309,18 @@ def test_experiment_runner_collects_standard_output_files(tmp_path):
         encoding="utf-8",
     )
 
-    (run_directory / "best_model.pt").write_bytes(
-        b"checkpoint"
-    )
+    (run_directory / "best_model.pt").write_bytes(b"checkpoint")
 
     outputs = runner.collect_outputs(run_directory)
 
     assert outputs["metrics"]["accuracy"] == 0.91
     assert outputs["training_history"]["loss"] == [1.0, 0.5]
     assert outputs["experiment_summary"]["status"] == "ok"
-    assert outputs["checkpoint_path"].endswith(
-        "best_model.pt"
-    )
+    assert outputs["checkpoint_path"].endswith("best_model.pt")
 
 
 def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations():
-    execution = {
-        "success": True
-    }
+    execution = {"success": True}
 
     outputs = {
         "metrics": {
@@ -381,13 +333,9 @@ def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations(
             "evaluation_seconds": 1.0,
             "total_execution_seconds": 2.0,
         },
-        "training_history": {
-            "train_loss": [0.5]
-        },
+        "training_history": {"train_loss": [0.5]},
         "checkpoint_path": "best_model.pt",
-        "visualizations": [
-            "loss_visualization.png"
-        ],
+        "visualizations": ["loss_visualization.png"],
     }
 
     validation = ExperimentRunner.validate_outputs(
@@ -397,13 +345,78 @@ def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations(
 
     assert validation["valid"] is False
 
-    assert "NaN or infinite" in " ".join(
-        validation["warnings"]
+    assert "NaN or infinite" in " ".join(validation["warnings"])
+
+    assert "Missing required visualizations" in " ".join(validation["warnings"])
+
+
+def _classification_metrics():
+    return {
+        "accuracy": 0.99,
+        "precision_weighted": 0.99,
+        "recall_weighted": 0.99,
+        "f1_weighted": 0.99,
+        "confusion_matrix": [[11825, 2], [33, 18140]],
+    }
+
+
+def _complete_outputs(**overrides):
+    outputs = {
+        "metrics": _classification_metrics(),
+        "training_history": {"train_loss": [0.5]},
+        "checkpoint_path": "best_model.pt",
+        "visualizations": [
+            "loss_visualization.png",
+            "accuracy_visualization.png",
+            "confusion_matrix_visualization.png",
+            "performance_metrics_visualization.png",
+        ],
+    }
+    outputs.update(overrides)
+    return outputs
+
+
+def test_run_timings_may_come_from_the_experiment_summary():
+    """A completed run must not be rejected over which file holds its timings."""
+
+    outputs = _complete_outputs(
+        experiment_summary={
+            "training_seconds": 21.16,
+            "evaluation_seconds": 0.32,
+            "total_execution_seconds": 28.0,
+        }
     )
 
-    assert "Missing required visualizations" in " ".join(
-        validation["warnings"]
+    validation = ExperimentRunner.validate_outputs({"success": True}, outputs)
+
+    assert validation["valid"] is True
+    assert validation["warnings"] == []
+
+
+def test_timings_are_still_required_somewhere():
+    validation = ExperimentRunner.validate_outputs(
+        {"success": True},
+        _complete_outputs(experiment_summary={"status": "ok"}),
     )
+
+    assert validation["valid"] is False
+    assert "missing required fields" in " ".join(validation["warnings"])
+
+
+def test_a_nonfinite_summary_timing_does_not_satisfy_the_contract():
+    validation = ExperimentRunner.validate_outputs(
+        {"success": True},
+        _complete_outputs(
+            experiment_summary={
+                "training_seconds": float("nan"),
+                "evaluation_seconds": 0.32,
+                "total_execution_seconds": 28.0,
+            }
+        ),
+    )
+
+    assert validation["valid"] is False
+    assert "training_seconds" in " ".join(validation["warnings"])
 
 
 # ============================================================
@@ -453,16 +466,12 @@ def test_experiment_runner_installs_missing_python_library(
         fake_install_package,
     )
 
-    success, message = runner._install_package(
-        "fake_missing_library"
-    )
+    success, message = runner._install_package("fake_missing_library")
 
     assert success is True
     assert message == "installed"
 
-    assert installed == [
-        "fake_missing_library"
-    ]
+    assert installed == ["fake_missing_library"]
 
 
 # ============================================================
@@ -496,17 +505,11 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
         timeout_seconds=10,
     )
 
-    run_directory = runner.create_run_directory(
-        "generic_llm_repair"
-    )
+    run_directory = runner.create_run_directory("generic_llm_repair")
 
-    original_code = (
-        "raise ValueError('some generated experiment error')\n"
-    )
+    original_code = "raise ValueError('some generated experiment error')\n"
 
-    repaired_code = (
-        "print('experiment repaired successfully')\n"
-    )
+    repaired_code = "print('experiment repaired successfully')\n"
 
     code_path = runner.prepare_generated_code(
         original_code,
@@ -529,10 +532,7 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
             }
         )
 
-        assert (
-            "some generated experiment error"
-            in stderr
-        )
+        assert "some generated experiment error" in stderr
 
         # Simulate the LLM returning corrected code.
         return (
@@ -551,24 +551,17 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
         SimpleNamespace(
             returncode=1,
             stdout="",
-            stderr=(
-                "Traceback (most recent call last):\n"
-                "ValueError: some generated experiment error\n"
-            ),
+            stderr=("Traceback (most recent call last):\nValueError: some generated experiment error\n"),
         ),
         SimpleNamespace(
             returncode=0,
-            stdout=(
-                "experiment repaired successfully\n"
-            ),
+            stdout=("experiment repaired successfully\n"),
             stderr="",
         ),
     ]
 
     def fake_subprocess_run(*args, **kwargs):
-        assert process_results, (
-            "Unexpected extra experiment execution"
-        )
+        assert process_results, "Unexpected extra experiment execution"
 
         # Before the second execution, simulate what the
         # ExperimentRunner should do after receiving repaired code.
@@ -614,16 +607,12 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
 
     assert len(repair_calls) == 1
 
-    repaired_file = code_path.read_text(
-        encoding="utf-8"
-    )
+    repaired_file = code_path.read_text(encoding="utf-8")
 
     assert repaired_file == repaired_code
 
-    assert (
-        "some generated experiment error"
-        not in repaired_file
-    )
+    assert "some generated experiment error" not in repaired_file
+
 
 def test_experiment_runner_does_not_use_hard_coded_error_fix(
     tmp_path,
@@ -640,9 +629,7 @@ def test_experiment_runner_does_not_use_hard_coded_error_fix(
         timeout_seconds=10,
     )
 
-    run_directory = runner.create_run_directory(
-        "generic_error"
-    )
+    run_directory = runner.create_run_directory("generic_error")
 
     code_path = runner.prepare_generated_code(
         "raise RuntimeError('completely unrelated failure')\n",
@@ -680,10 +667,7 @@ def test_experiment_runner_does_not_use_hard_coded_error_fix(
     process = SimpleNamespace(
         returncode=1,
         stdout="",
-        stderr=(
-            "Traceback (most recent call last):\n"
-            "RuntimeError: completely unrelated failure\n"
-        ),
+        stderr=("Traceback (most recent call last):\nRuntimeError: completely unrelated failure\n"),
     )
 
     monkeypatch.setattr(
@@ -699,10 +683,7 @@ def test_experiment_runner_does_not_use_hard_coded_error_fix(
     assert result["success"] is False
 
     assert repair_calls
-    assert (
-        "completely unrelated failure"
-        in repair_calls[0]["stderr"]
-    )
+    assert "completely unrelated failure" in repair_calls[0]["stderr"]
 
 
 # ============================================================
@@ -727,9 +708,7 @@ def test_experiment_runner_includes_stderr_in_nonzero_exit_error(
         timeout_seconds=10,
     )
 
-    run_directory = runner.create_run_directory(
-        "stderr_details"
-    )
+    run_directory = runner.create_run_directory("stderr_details")
 
     code_path = runner.prepare_generated_code(
         "raise RuntimeError('external server failure')",
@@ -773,9 +752,7 @@ def test_experiment_runner_executes_relative_code_path_from_run_directory(
         timeout_seconds=10,
     )
 
-    run_directory = runner.create_run_directory(
-        "relative_path"
-    )
+    run_directory = runner.create_run_directory("relative_path")
 
     code_path = runner.prepare_generated_code(
         "print('experiment ran')",
@@ -845,9 +822,7 @@ def test_experiment_orchestrator_selects_best_accepted_hypothesis(
             self.text = text
             self.elo_score = elo_score
             self.is_active = True
-            self.reflection_report = FakeReport(
-                recommendation
-            )
+            self.reflection_report = FakeReport(recommendation)
 
     better = FakeHypothesis(
         "H-2",
@@ -880,19 +855,11 @@ def test_experiment_orchestrator_selects_best_accepted_hypothesis(
 
     orchestrator = ExperimentOrchestrator()
 
-    candidates = orchestrator.get_experiment_candidates(
-        context
-    )
+    candidates = orchestrator.get_experiment_candidates(context)
 
-    assert [
-        h.hypothesis_id for h in candidates
-    ] == ["H-2", "H-1"]
+    assert [h.hypothesis_id for h in candidates] == ["H-2", "H-1"]
 
-    assert (
-        orchestrator.select_best_hypothesis(context)
-        .hypothesis_id
-        == "H-2"
-    )
+    assert orchestrator.select_best_hypothesis(context).hypothesis_id == "H-2"
 
 
 def test_experiment_orchestrator_delegates_execution_to_runner(
@@ -980,13 +947,9 @@ def test_code_generation_agent_live_lmstudio_call():
     in config.yaml.
     """
 
-    agent = CodeGenerationAgent(
-        model="qwen/qwen3.8-27b"
-    )
+    agent = CodeGenerationAgent(model="qwen/qwen3.8-27b")
 
-    result = agent.generate(
-        VALID_SPECIFICATION
-    )
+    result = agent.generate(VALID_SPECIFICATION)
 
     assert isinstance(result, dict)
     assert "success" in result
@@ -1002,17 +965,11 @@ def test_code_generation_agent_live_lmstudio_call():
         )
         assert len(result["pytorch_code"]) > 0
 
-        assert (
-            "import torch" in result["pytorch_code"]
-            or "torch" in result["pytorch_code"].lower()
-        )
+        assert "import torch" in result["pytorch_code"] or "torch" in result["pytorch_code"].lower()
     else:
         assert len(result["errors"]) > 0
 
-        print(
-            f"Code generation failed: "
-            f"{result['errors']}"
-        )
+        print(f"Code generation failed: {result['errors']}")
 
 
 @pytest.mark.integration
@@ -1028,16 +985,11 @@ def test_lmstudio_native_chat_endpoint_is_reachable():
         get_lmstudio_native_chat_url,
     )
 
-    native_url = (
-        get_lmstudio_native_chat_url()
-    )
+    native_url = get_lmstudio_native_chat_url()
 
     payload = {
         "model": "qwen/qwen3.8-27b",
-        "input": (
-            "Hello, please respond with "
-            "a single word."
-        ),
+        "input": ("Hello, please respond with a single word."),
         "temperature": 0.5,
         "max_output_tokens": 10,
         "reasoning": "off",
@@ -1055,22 +1007,13 @@ def test_lmstudio_native_chat_endpoint_is_reachable():
         assert response.status_code in [
             200,
             500,
-        ], (
-            f"Unexpected status "
-            f"{response.status_code} from LM Studio "
-            f"at {native_url}"
-        )
+        ], f"Unexpected status {response.status_code} from LM Studio at {native_url}"
 
     except requests.ConnectionError as exc:
-        pytest.skip(
-            f"LM Studio not reachable at "
-            f"{native_url}: {exc}"
-        )
+        pytest.skip(f"LM Studio not reachable at {native_url}: {exc}")
 
     except requests.Timeout:
-        pytest.skip(
-            f"LM Studio timeout at {native_url}"
-        )
+        pytest.skip(f"LM Studio timeout at {native_url}")
 
 
 @pytest.mark.integration
@@ -1084,9 +1027,7 @@ def test_call_llm_resolves_configured_model():
 
     configured_model = get_lmstudio_model()
 
-    assert configured_model, (
-        "No LLM model configured"
-    )
+    assert configured_model, "No LLM model configured"
 
     result = call_llm(
         "Respond with the word 'acknowledged'.",
@@ -1099,10 +1040,7 @@ def test_call_llm_resolves_configured_model():
     assert len(result) > 0
 
     if not result.startswith("Error:"):
-        print(
-            f"LM Studio response: "
-            f"{result[:100]}"
-        )
+        print(f"LM Studio response: {result[:100]}")
 
 
 @pytest.mark.integration
@@ -1120,28 +1058,15 @@ def test_display_generated_pytorch_code(capsys):
     print("Calling LM Studio CodeGenerationAgent...")
     print("=" * 80)
 
-    agent = CodeGenerationAgent(
-        model="qwen/qwen3.8-27b"
-    )
+    agent = CodeGenerationAgent(model="qwen/qwen3.8-27b")
 
-    result = agent.generate(
-        VALID_SPECIFICATION
-    )
+    result = agent.generate(VALID_SPECIFICATION)
 
-    print(
-        f"\nGeneration Success: "
-        f"{result['success']}"
-    )
+    print(f"\nGeneration Success: {result['success']}")
 
-    print(
-        f"Model Used: "
-        f"{result['model']}"
-    )
+    print(f"Model Used: {result['model']}")
 
-    print(
-        f"Generation Time: "
-        f"{result['generation_seconds']:.2f}s"
-    )
+    print(f"Generation Time: {result['generation_seconds']:.2f}s")
 
     if result["success"]:
         print("\n" + "=" * 80)
@@ -1174,9 +1099,7 @@ def test_display_generated_pytorch_code(capsys):
             result["assumptions"],
             1,
         ):
-            print(
-                f"  {i}. {assumption}"
-            )
+            print(f"  {i}. {assumption}")
 
         print("\n" + "=" * 80)
         print("DEPENDENCIES")
@@ -1186,9 +1109,7 @@ def test_display_generated_pytorch_code(capsys):
             result["dependencies"],
             1,
         ):
-            print(
-                f"  {i}. {dependency}"
-            )
+            print(f"  {i}. {dependency}")
 
         print("\n" + "=" * 80)
         print("GENERATED PYTORCH CODE")
@@ -1204,16 +1125,9 @@ def test_display_generated_pytorch_code(capsys):
             str,
         )
 
-        assert len(
-            result["pytorch_code"]
-        ) > 0
+        assert len(result["pytorch_code"]) > 0
 
-        assert (
-            "import torch"
-            in result["pytorch_code"]
-            or "torch"
-            in result["pytorch_code"].lower()
-        )
+        assert "import torch" in result["pytorch_code"] or "torch" in result["pytorch_code"].lower()
 
     else:
         print("\nGeneration Failed:")
@@ -1221,7 +1135,4 @@ def test_display_generated_pytorch_code(capsys):
         for error in result["errors"]:
             print(f"  - {error}")
 
-        assert False, (
-            f"Code generation failed: "
-            f"{result['errors']}"
-        )
+        assert False, f"Code generation failed: {result['errors']}"
