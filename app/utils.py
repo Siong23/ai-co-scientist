@@ -3,6 +3,7 @@ import os
 import random
 import threading
 import time
+import math
 from contextlib import contextmanager
 from typing import Dict, List, Optional
 
@@ -322,6 +323,12 @@ def call_llm(
     reasoning: Optional[str] = None,
 ) -> str:
     """Call LM Studio, using its native API when reasoning is configured."""
+    if temperature is None or not math.isfinite(float(temperature)):
+        logger.warning(
+            "Invalid LLM temperature=%r; using default temperature 0.2.",
+            temperature,
+        )
+        temperature = 0.2
     selected_model = get_lmstudio_model(model)
     if not selected_model:
         logger.error("LM Studio model is not configured.")

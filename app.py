@@ -16,6 +16,9 @@ from app.data.dataset_manager import DatasetManager
 from app.experiments.experiment_orchestrator import (
     ExperimentOrchestrator,
 )
+from app.experiments.experiment_comparator import (
+    ExperimentComparator,
+)
 from app.models import ContextMemory, ResearchGoal
 from app.research_state import LocalJSONResearchStateStore, ResearchStateError
 from app.research_trace import format_research_trace_html, merge_trace_event, normalize_trace_event
@@ -45,6 +48,7 @@ from app.utils import (
 # Global state for the Gradio app
 global_context = ContextMemory()
 supervisor = SupervisorAgent()
+experiment_comparator = ExperimentComparator()
 current_research_goal: Optional[ResearchGoal] = None
 research_state_store = LocalJSONResearchStateStore(
     root_dir=(config.get("research_state", {}) or {}).get("directory") or None
@@ -333,6 +337,7 @@ def format_execution_time(seconds: float) -> str:
 
 def format_experiment_results_html(
     experiment_result: Dict[str, Any],
+    comparison_result: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Format automated experiment results for the Gradio UI.
@@ -447,6 +452,11 @@ def format_experiment_results_html(
         "Not available",
     )
 
+    comparison_html = ""
+
+    if comparison_result:
+        comparison_html = format_comparison_html(comparison_result)
+
     return f"""
     <div style="
         margin-top: 20px;
@@ -487,6 +497,213 @@ def format_experiment_results_html(
             training history, and visualizations are saved
             in the run history.
         </p>
+    </div>
+
+    {comparison_html}
+    """
+
+
+def format_comparison_html(
+    comparison_result: Dict[str, Any],
+) -> str:
+    """
+    Format paper vs automated experiment comparison for the Gradio UI.
+    """
+
+    if not comparison_result:
+        return ""
+
+    import html as html_lib
+
+    paper_result = comparison_result.get(
+        "paper_result",
+        {},
+    )
+
+    experiment_result = comparison_result.get(
+        "experiment_result",
+        {},
+    )
+
+    comparability = comparison_result.get(
+        "comparability",
+        {},
+    )
+
+    if not isinstance(comparability, dict):
+        comparability = {}
+
+    explanation = comparison_result.get(
+        "explanation",
+        {},
+    ) or {}
+
+    if not isinstance(explanation, dict):
+        explanation = {}
+
+    errors = comparison_result.get(
+        "errors",
+        [],
+    )
+
+    if not isinstance(errors, list):
+        errors = [str(errors)]
+
+    conclusion = (
+        comparison_result.get("conclusion")
+        or explanation.get("overall_assessment")
+        or comparability.get("reason")
+        or "; ".join(str(error) for error in errors)
+        or "No comparison conclusion was generated."
+    )
+
+    status = comparison_result.get(
+        "status",
+        "unknown",
+    )
+
+    status_label = str(status).replace(
+        "_",
+        " ",
+    ).title()
+
+    paper_metrics = paper_result.get(
+        "metrics",
+        {},
+    )
+
+    experiment_metrics = experiment_result.get(
+        "metrics",
+        {},
+    )
+
+    if not isinstance(paper_metrics, dict):
+        paper_metrics = {}
+
+    if not isinstance(experiment_metrics, dict):
+        experiment_metrics = {}
+
+    def format_metric(value: Any) -> str:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f"{value:.2%}"
+
+        return "Not available"
+
+    return f"""
+    <div style="
+        margin-top: 20px;
+        padding: 20px;
+        border: 2px solid #6f42c1;
+        border-radius: 8px;
+    ">
+
+        <h2>📊 Paper vs Automated Experiment</h2>
+
+        <h3>
+            Status:
+            {html_lib.escape(status_label)}
+        </h3>
+
+        <div style="
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        ">
+
+            <div style="
+                padding: 15px;
+                border: 1px solid #ccc;
+                border-radius: 8px;
+            ">
+                <h3>📄 Rank #1 / Published Evidence</h3>
+
+                <p>
+                    <strong>Accuracy:</strong>
+                    {html_lib.escape(
+                        format_metric(paper_metrics.get("accuracy"))
+                    )}
+                </p>
+
+                <p>
+                    <strong>Weighted Precision:</strong>
+                    {html_lib.escape(
+                        format_metric(
+                            paper_metrics.get("precision_weighted")
+                        )
+                    )}
+                </p>
+
+                <p>
+                    <strong>Weighted Recall:</strong>
+                    {html_lib.escape(
+                        format_metric(
+                            paper_metrics.get("recall_weighted")
+                        )
+                    )}
+                </p>
+
+                <p>
+                    <strong>Weighted F1:</strong>
+                    {html_lib.escape(
+                        format_metric(
+                            paper_metrics.get("f1_weighted")
+                        )
+                    )}
+                </p>
+            </div>
+
+            <div style="
+                padding: 15px;
+                border: 1px solid #ccc;
+                border-radius: 8px;
+            ">
+                <h3>🧪 Automated Experiment</h3>
+
+                <p>
+                    <strong>Accuracy:</strong>
+                    {html_lib.escape(
+                        format_metric(experiment_metrics.get("accuracy"))
+                    )}
+                </p>
+
+                <p>
+                    <strong>Weighted Precision:</strong>
+                    {html_lib.escape(
+                        format_metric(
+                            experiment_metrics.get("precision_weighted")
+                        )
+                    )}
+                </p>
+
+                <p>
+                    <strong>Weighted Recall:</strong>
+                    {html_lib.escape(
+                        format_metric(
+                            experiment_metrics.get("recall_weighted")
+                        )
+                    )}
+                </p>
+
+                <p>
+                    <strong>Weighted F1:</strong>
+                    {html_lib.escape(
+                        format_metric(
+                            experiment_metrics.get("f1_weighted")
+                        )
+                    )}
+                </p>
+            </div>
+
+        </div>
+
+        <hr>
+
+        <h3>📝 Comparison Conclusion</h3>
+
+        <p>
+            {html_lib.escape(str(conclusion))}
+        </p>
+
     </div>
     """
 
@@ -582,6 +799,13 @@ def execute_cycle(
             }
         )
 
+        comparison_result = {
+            "success": False,
+            "status": "not_started",
+            "conclusion": "Comparison was not started.",
+            "errors": [],
+        }
+
         if hypothesis_pipeline_enabled:
             dataset_manager = DatasetManager(
                 dataset_name="5G-NIDD",
@@ -603,6 +827,21 @@ def execute_cycle(
                 execute_generated_code=True,
                 timeout_seconds=(EXPERIMENT_TIMEOUT_SECONDS),
             )
+            selected_hypothesis = (
+                experiment_result
+                .get("experiment_preparation", {})
+                .get("selected_hypothesis", {})
+            )
+
+            # print("\n===== DEBUG EXPERIMENT RESULT =====")
+            # print(experiment_result)
+            # print("===================================\n")
+
+            if experiment_result.get("success", False):
+                comparison_result = experiment_comparator.compare(
+                    selected_hypothesis,
+                    experiment_result.get("execution", {}),
+                )
         else:
             experiment_result = {
                 "success": False,
@@ -613,7 +852,19 @@ def execute_cycle(
                 "errors": [],
             }
 
+        if not hypothesis_pipeline_enabled:
+            comparison_result = {
+                "success": False,
+                "status": "skipped_for_research_type",
+                "conclusion": (
+                    "Paper comparison was skipped because this research mode "
+                    "does not produce a hypothesis candidate."
+                ),
+                "errors": [],
+            }
+
         cycle_details["experiment_result"] = experiment_result
+        cycle_details["comparison_result"] = comparison_result
 
         if experiment_result.get("status") == "skipped_for_research_type":
             pass
@@ -662,6 +913,25 @@ def execute_cycle(
             )
 
         print("\n" + "=" * 60)
+        print("PAPER VS AUTOMATED EXPERIMENT COMPARISON")
+        print("=" * 60)
+
+        explanation = comparison_result.get("explanation") or {}
+
+        print(
+            explanation.get(
+                "overall_assessment",
+                "No comparison conclusion was generated.",
+            )
+        )
+
+        print("=" * 60)
+
+        print("\n===== COMPARISON RESULT DEBUG =====")
+        print(comparison_result)
+        print("===================================")
+
+        print("\n" + "=" * 60)
         print("COMPLETE AUTOMATED PIPELINE FINISHED")
         print("=" * 60)
 
@@ -691,7 +961,7 @@ def execute_cycle(
             {},
         )
 
-        experiment_results_html = format_experiment_results_html(experiment_result)
+        experiment_results_html = format_experiment_results_html(experiment_result, comparison_result)
 
         results_html += experiment_results_html
 

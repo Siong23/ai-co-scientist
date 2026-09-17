@@ -132,6 +132,139 @@ def test_save_run_persists_experiment_result(tmp_path, monkeypatch):
     assert saved["experiment_result"] == experiment_result
 
 
+def test_save_run_persists_comparison_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
+
+    comparison_result = {
+        "success": True,
+        "status": "completed",
+        "conclusion": "The automated experiment achieved better performance.",
+        "comparability": {
+            "comparable": True,
+            "reason": "Both experiments use the same evaluation metrics.",
+        },
+        "paper_metrics": {
+            "accuracy": 0.91,
+            "precision_weighted": 0.89,
+            "recall_weighted": 0.90,
+            "f1_weighted": 0.895,
+        },
+        "experiment_metrics": {
+            "accuracy": 0.95,
+            "precision_weighted": 0.94,
+            "recall_weighted": 0.93,
+            "f1_weighted": 0.935,
+        },
+    }
+
+    details = {
+        "experiment_result": {
+            "success": True,
+        },
+        "comparison_result": comparison_result,
+    }
+
+    save_run(
+        research_goal=ResearchGoal(description="Compare experiment results"),
+        cycle_details=details,
+        status="done",
+        references_html="",
+        results_html="",
+        experiment_result=details["experiment_result"],
+        run_id="run-comparison",
+    )
+
+    saved = json.loads(
+        (tmp_path / "runs" / "run-comparison.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert saved["cycle_details"]["comparison_result"] == comparison_result
+
+
+def test_report_renders_paper_vs_experiment_comparison(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
+
+    comparison_result = {
+        "success": True,
+        "status": "completed",
+        "conclusion": "The automated experiment achieved better performance.",
+        "comparability": {
+            "comparable": True,
+            "reason": "Both experiments use the same evaluation metrics.",
+        },
+        "paper_metrics": {
+            "accuracy": 0.91,
+            "precision_weighted": 0.89,
+            "recall_weighted": 0.90,
+            "f1_weighted": 0.895,
+        },
+        "experiment_metrics": {
+            "accuracy": 0.95,
+            "precision_weighted": 0.94,
+            "recall_weighted": 0.93,
+            "f1_weighted": 0.935,
+        },
+    }
+
+    details = {
+        "experiment_result": {
+            "success": True,
+        },
+        "comparison_result": comparison_result,
+    }
+
+    run = save_run(
+        research_goal=ResearchGoal(
+            description="Paper versus automated experiment"
+        ),
+        cycle_details=details,
+        status="done",
+        references_html="",
+        results_html="",
+        experiment_result=details["experiment_result"],
+        run_id="run-comparison-report",
+    )
+
+    report = render_report(run)
+
+    assert "Paper vs Automated Experiment" in report
+    assert "The automated experiment achieved better performance." in report
+    assert "0.91" in report
+    assert "0.95" in report
+
+
+def test_report_renders_unsuccessful_comparison(tmp_path, monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
+
+    comparison_result = {
+        "success": False,
+        "status": "incomplete",
+        "error": "No comparable paper metrics were found.",
+    }
+
+    details = {
+        "comparison_result": comparison_result,
+    }
+
+    run = save_run(
+        research_goal=ResearchGoal(
+            description="Comparison without paper metrics"
+        ),
+        cycle_details=details,
+        status="done",
+        references_html="",
+        results_html="",
+        run_id="run-comparison-failed",
+    )
+
+    report = render_report(run)
+
+    assert "Paper vs Automated Experiment" in report
+    assert "No comparable paper metrics were found." in report
+
+
 def test_report_renders_experiment_visualizations(tmp_path, monkeypatch):
     monkeypatch.setenv("CO_SCIENTIST_RUNS_DIR", str(tmp_path))
     visualization_path = tmp_path / "experiment" / "loss_visualization.png"

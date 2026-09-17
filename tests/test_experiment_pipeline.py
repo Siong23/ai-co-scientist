@@ -19,6 +19,7 @@ Integration tests (live LM Studio):
 import ast
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -350,6 +351,57 @@ def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations(
     assert "Missing required visualizations" in " ".join(validation["warnings"])
 
 
+def test_experiment_runner_rejects_metrics_missing_total_execution_seconds():
+    """
+    Regression test for incomplete metrics.json output.
+
+    The generated experiment must include total_execution_seconds
+    in metrics.json. This test ensures ExperimentRunner rejects
+    metrics.json when that required field is missing.
+    """
+    execution = {
+        "success": True
+    }
+
+    outputs = {
+        "metrics": {
+            "accuracy": 0.999175,
+            "precision_weighted": 0.9991756449662996,
+            "recall_weighted": 0.999175,
+            "f1_weighted": 0.9991750865944501,
+            "confusion_matrix": [
+                [15761, 7],
+                [26, 24206],
+            ],
+            "training_seconds": 39.23,
+            "evaluation_seconds": 0.54,
+            # Deliberately missing:
+            # "total_execution_seconds": ...
+        },
+        "training_history": {
+            "train_loss": [0.5]
+        },
+        "checkpoint_path": "best_model.pt",
+        "visualizations": [
+            "loss_visualization.png",
+            "accuracy_visualization.png",
+            "confusion_matrix_visualization.png",
+            "performance_metrics_visualization.png",
+        ],
+    }
+
+    validation = ExperimentRunner.validate_outputs(
+        execution,
+        outputs,
+    )
+
+    assert validation["valid"] is False
+
+    warnings = " ".join(validation["warnings"])
+
+    assert "total_execution_seconds" in warnings
+
+
 def _classification_metrics():
     return {
         "accuracy": 0.99,
@@ -472,6 +524,81 @@ def test_experiment_runner_installs_missing_python_library(
     assert message == "installed"
 
     assert installed == ["fake_missing_library"]
+
+
+def test_experiment_runner_rejects_invalid_package_name():
+    """
+    Verify that unsafe/invalid package names are rejected before
+    pip is executed.
+    """
+    runner = ExperimentRunner()
+
+    success, message = runner._install_package(
+        "invalid package name!"
+    )
+
+    assert success is False
+    assert "Rejected invalid package name" in message
+
+
+def test_experiment_runner_maps_python_module_to_pypi_package(
+    monkeypatch,
+):
+    """
+    Verify that Python import names are mapped to their corresponding
+    PyPI package names.
+    """
+    runner = ExperimentRunner()
+
+    captured_command = []
+
+    def fake_run(command, **kwargs):
+        captured_command.append(command)
+
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Successfully installed scikit-learn",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        fake_run,
+    )
+
+    success, output = runner._install_package("sklearn")
+
+    assert success is True
+    assert "scikit-learn" in captured_command[0]
+    assert "sklearn" not in captured_command[0][-1]
+
+
+def test_experiment_runner_handles_dependency_install_timeout(
+    monkeypatch,
+):
+    """
+    Verify that a timed-out pip installation is converted into a
+    structured failure rather than raising an exception.
+    """
+    runner = ExperimentRunner()
+
+    def fake_subprocess_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=kwargs["timeout"],
+        )
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        fake_subprocess_run,
+    )
+
+    success, output = runner._install_package(
+        "some_package"
+    )
+
+    assert success is False
+    assert "Timed out while installing some_package" in output
 
 
 # ============================================================
@@ -686,6 +813,138 @@ def test_experiment_runner_does_not_use_hard_coded_error_fix(
     assert "completely unrelated failure" in repair_calls[0]["stderr"]
 
 
+def test_experiment_runner_stops_after_max_experiment_attempts(
+    monkeypatch,
+    tmp_path,
+):
+    """
+    Verify that ExperimentRunner does not retry indefinitely.
+
+    The current implementation limits execution to 10 attempts.
+    """
+    runner = ExperimentRunner(
+        output_directory=tmp_path,
+        timeout_seconds=10,
+    )
+
+    run_directory = runner.create_run_directory("max_attempt_test")
+
+    code_path = runner.prepare_generated_code(
+        "print('test')",
+        run_directory,
+    )
+
+    execution_calls = []
+
+    def fake_subprocess_run(*args, **kwargs):
+        execution_calls.append(args)
+
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="RuntimeError: experiment failed",
+        )
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        fake_subprocess_run,
+    )
+
+    monkeypatch.setattr(
+        runner,
+        "_repair_experiment_with_llm",
+        lambda **kwargs: (
+            False,
+            "",
+            "No repair available",
+        ),
+    )
+
+    result = runner.execute(
+        code_path=code_path,
+        run_directory=run_directory,
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "repair_failed"
+
+    assert result["experiment_attempts"] == 1
+    assert len(execution_calls) == 1
+
+
+def test_experiment_runner_stops_at_max_experiment_attempts(
+    monkeypatch,
+    tmp_path,
+):
+    """
+    Verify that the experiment execution loop is bounded at
+    MAX_EXPERIMENT_ATTEMPTS = 10.
+    """
+    runner = ExperimentRunner(
+        output_directory=tmp_path,
+        timeout_seconds=10,
+    )
+
+    run_directory = runner.create_run_directory(
+        "max_attempt_test"
+    )
+
+    code_path = runner.prepare_generated_code(
+        "print('test')",
+        run_directory,
+    )
+
+    execution_calls = []
+
+    def fake_subprocess_run(command, **kwargs):
+        execution_calls.append(command)
+
+        attempt_number = len(execution_calls)
+
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "ModuleNotFoundError: No module named "
+                f"'fake_dependency_{attempt_number}'"
+            ),
+        )
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        fake_subprocess_run,
+    )
+
+    installed_modules = []
+
+    def fake_install_package(module_name):
+        installed_modules.append(module_name)
+        return True, f"Installed {module_name}"
+
+    monkeypatch.setattr(
+        runner,
+        "_install_package",
+        fake_install_package,
+    )
+
+    result = runner.execute(
+        code_path=code_path,
+        run_directory=run_directory,
+    )
+
+    # The runner must stop after the maximum of 10 attempts.
+    assert len(execution_calls) == 10
+
+    # The experiment must not be reported as successful.
+    assert result["success"] is False
+
+    # The runner should finish with a failure status.
+    assert result["status"] == "failed"
+
+    # Verify that dependency recovery was attempted 10 times.
+    assert len(installed_modules) == 10
+
+
 # ============================================================
 # ExperimentRunner - General Execution
 # ============================================================
@@ -767,6 +1026,195 @@ def test_experiment_runner_executes_relative_code_path_from_run_directory(
     assert result["success"] is True
     assert result["return_code"] == 0
     assert result["stdout"].strip() == "experiment ran"
+
+
+def test_experiment_runner_handles_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    """
+    Verify that a subprocess timeout is handled gracefully and
+    returned as a structured failed execution result.
+    """
+    runner = ExperimentRunner(
+        output_directory=tmp_path,
+        timeout_seconds=5,
+    )
+
+    run_directory = runner.create_run_directory(
+        "timeout_test"
+    )
+
+    code_path = runner.prepare_generated_code(
+        "print('test')",
+        run_directory,
+    )
+
+    def fake_subprocess_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=kwargs["timeout"],
+            output="partial stdout",
+            stderr="partial stderr",
+        )
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        fake_subprocess_run,
+    )
+
+    result = runner.execute(
+        code_path=code_path,
+        run_directory=run_directory,
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "timeout"
+
+    assert result["timeout_seconds"] == 5
+
+    assert "timeout" in result["error"].lower()
+
+    assert Path(result["stdout_path"]).exists()
+    assert Path(result["stderr_path"]).exists()
+
+
+def test_experiment_runner_rejects_successful_execution_with_missing_outputs(
+    monkeypatch,
+    tmp_path,
+):
+    """
+    A Python experiment can exit with return code 0 while failing
+    to produce the required ML experiment artifacts.
+
+    The Runner must therefore return invalid_outputs rather than
+    treating the experiment as a successful ML experiment.
+    """
+    runner = ExperimentRunner(
+        output_directory=tmp_path,
+        timeout_seconds=10,
+    )
+
+    def fake_subprocess_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Training finished successfully.",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        fake_subprocess_run,
+    )
+
+    monkeypatch.setattr(
+        runner,
+        "_repair_experiment_with_llm",
+        lambda **kwargs: (
+            False,
+            "",
+            "No repair available",
+        ),
+    )
+
+    result = runner.run(
+        generated_code="print('Training finished successfully.')"
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "invalid_outputs"
+
+    assert result["execution"]["success"] is True
+
+    assert result["output_validation"]["valid"] is False
+
+    assert result["errors"]
+
+    assert any(
+        "metrics.json" in error
+        for error in result["errors"]
+    )
+
+
+def test_experiment_runner_writes_valid_runner_result_json(
+    monkeypatch,
+    tmp_path,
+):
+    """
+    Verify that run() writes runner_result.json and that the file
+    contains the expected top-level structure.
+    """
+    runner = ExperimentRunner(
+        output_directory=tmp_path,
+        timeout_seconds=10,
+    )
+
+    def fake_subprocess_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Training completed.",
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "subprocess.run",
+        fake_subprocess_run,
+    )
+
+    result = runner.run(
+        generated_code="print('Training completed.')"
+    )
+
+    assert result["run_directory"] is not None
+
+    run_directory = Path(
+        result["run_directory"]
+    )
+
+    result_path = run_directory / "runner_result.json"
+
+    assert result_path.exists()
+
+    saved_result = json.loads(
+        result_path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert isinstance(saved_result, dict)
+
+    assert "success" in saved_result
+    assert "status" in saved_result
+    assert "run_directory" in saved_result
+    assert "generated_code_path" in saved_result
+    assert "dataset_path" in saved_result
+    assert "execution" in saved_result
+    assert "outputs" in saved_result
+    assert "output_validation" in saved_result
+    assert "total_execution_seconds" in saved_result
+    assert "errors" in saved_result
+
+    assert saved_result["run_directory"] == result["run_directory"]
+
+    assert isinstance(
+        saved_result["execution"],
+        dict,
+    )
+
+    assert isinstance(
+        saved_result["outputs"],
+        dict,
+    )
+
+    assert isinstance(
+        saved_result["output_validation"],
+        dict,
+    )
+
+    assert isinstance(
+        saved_result["errors"],
+        list,
+    )
 
 
 # ============================================================

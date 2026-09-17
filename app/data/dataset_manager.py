@@ -19,6 +19,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
+
 
 class DatasetManager:
     """
@@ -163,4 +165,109 @@ class DatasetManager:
                 2,
             ),
             "last_modified": dataset_file.stat().st_mtime,
+        }
+
+
+    # ========================================================
+    # Dataset Schema Inspection
+    # ========================================================
+
+    def inspect_schema(
+        self,
+        dataset_path: Optional[str] = None,
+        sample_rows: int = 1000,
+    ) -> dict:
+        """
+        Inspect the dataset schema without loading the entire
+        dataset into memory.
+        The method is dataset-agnostic and does not assume a
+        fixed target-column name. It provides schema information
+        that can be passed to the AI/code-generation agent.
+        """
+
+        path = dataset_path or self.get_latest_dataset()
+
+        self.validate_dataset(path)
+
+        dataset_file = Path(path).expanduser().resolve()
+
+        df = pd.read_csv(
+            dataset_file,
+            nrows=sample_rows,
+        )
+
+        columns = df.columns.tolist()
+
+        column_types = {
+            column: str(df[column].dtype)
+            for column in columns
+        }
+
+        numeric_columns = [
+            column
+            for column in columns
+            if pd.api.types.is_numeric_dtype(df[column])
+        ]
+
+        categorical_columns = [
+            column
+            for column in columns
+            if not pd.api.types.is_numeric_dtype(df[column])
+        ]
+
+        target_candidates = []
+
+        for column in columns:
+            series = df[column]
+
+            unique_count = series.nunique(dropna=True)
+            candidate_reasons = []
+
+            if not pd.api.types.is_numeric_dtype(series):
+                candidate_reasons.append("categorical")
+
+            if unique_count <= 50:
+                candidate_reasons.append(
+                    f"low_cardinality_{unique_count}"
+                )
+
+            normalized_name = (
+                str(column)
+                .strip()
+                .lower()
+            )
+
+            label_keywords = (
+                "label",
+                "target",
+                "class",
+                "category",
+                "attack",
+            )
+
+            if any(
+                keyword in normalized_name
+                for keyword in label_keywords
+            ):
+                candidate_reasons.append(
+                    "label_like_column_name"
+                )
+
+            if candidate_reasons:
+                target_candidates.append({
+                    "column": column,
+                    "dtype": str(series.dtype),
+                    "unique_values": unique_count,
+                    "reasons": candidate_reasons,
+                })
+
+        return {
+            "dataset_name": self.dataset_name,
+            "dataset_path": str(dataset_file),
+            "row_count_sampled": len(df),
+            "columns": columns,
+            "column_types": column_types,
+            "numeric_columns": numeric_columns,
+            "categorical_columns": categorical_columns,
+            "target_candidates": target_candidates,
         }

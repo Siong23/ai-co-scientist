@@ -22,7 +22,7 @@ RUNS_DIR_ENV = "CO_SCIENTIST_RUNS_DIR"
 # by the current template from one left over by an older version. Bump the
 # version whenever render_report()'s output changes in a way that should
 # invalidate reports already on disk.
-REPORT_TEMPLATE_MARKER = "<!-- co-scientist-report-template: v1 -->"
+REPORT_TEMPLATE_MARKER = "<!-- co-scientist-report-template: v2 -->"
 
 SECRET_PATTERNS = [
     re.compile(r"sk-or-v1-[A-Za-z0-9_-]+"),
@@ -155,6 +155,7 @@ def save_run(
     results_html: str,
     log_file: Optional[str] = None,
     experiment_result: Optional[Dict[str, Any]] = None,
+    comparison_result: Optional[Dict[str, Any]] = None,
     run_id: Optional[str] = None,
     created_at: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
@@ -170,6 +171,7 @@ def save_run(
             "references_html": references_html,
             "results_html": results_html,
             "experiment_result": experiment_result,
+            "comparison_result": comparison_result,
         }
     )
     get_runs_dir().mkdir(parents=True, exist_ok=True)
@@ -289,6 +291,9 @@ def render_report(run: Dict[str, Any]) -> str:
     experiment_result = run.get("experiment_result")
     if isinstance(experiment_result, dict) and experiment_result:
         html_parts.append(_experiment_report_section(experiment_result))
+    comparison_result = (run.get("cycle_details", {}).get("comparison_result"))
+    if isinstance(comparison_result, dict) and comparison_result:
+        html_parts.append(_comparison_report_section(comparison_result))
     if research_trace:
         html_parts.extend(
             [
@@ -811,6 +816,102 @@ def _experiment_report_section(
     parts.append("</section>")
 
     return "\n".join(parts)
+
+
+def _comparison_report_section(
+    comparison_result: Dict[str, Any],
+) -> str:
+    """Render the paper-vs-automated-experiment comparison."""
+
+    if not isinstance(comparison_result, dict):
+        return ""
+
+    success = comparison_result.get("success", False)
+    status = comparison_result.get("status", "unknown")
+    conclusion = comparison_result.get("conclusion", "")
+    error = comparison_result.get("error", "")
+
+    html = [
+        "<section>",
+        "<h2>Paper vs Automated Experiment</h2>",
+        f"<p><strong>Status:</strong> {_escape(status)}</p>",
+    ]
+
+    if conclusion:
+        html.append(
+            f"<p><strong>Conclusion:</strong> {_escape(conclusion)}</p>"
+        )
+
+    comparability = comparison_result.get("comparability")
+    if isinstance(comparability, dict):
+        comparable = comparability.get("comparable")
+
+        if comparable is not None:
+            html.append(
+                f"<p><strong>Comparable:</strong> {_escape(comparable)}</p>"
+            )
+
+        reason = comparability.get("reason")
+        if reason:
+            html.append(
+                f"<p><strong>Reason:</strong> {_escape(reason)}</p>"
+            )
+
+    paper_metrics = comparison_result.get("paper_metrics")
+    experiment_metrics = comparison_result.get("experiment_metrics")
+
+    if isinstance(paper_metrics, dict) or isinstance(experiment_metrics, dict):
+        html.append("<h3>Metric Comparison</h3>")
+        html.append("<table>")
+        html.append(
+            "<thead>"
+            "<tr>"
+            "<th>Metric</th>"
+            "<th>Paper</th>"
+            "<th>Automated Experiment</th>"
+            "</tr>"
+            "</thead>"
+        )
+        html.append("<tbody>")
+
+        metric_names = set()
+
+        if isinstance(paper_metrics, dict):
+            metric_names.update(paper_metrics.keys())
+
+        if isinstance(experiment_metrics, dict):
+            metric_names.update(experiment_metrics.keys())
+
+        for metric in sorted(metric_names):
+            paper_value = (
+                paper_metrics.get(metric)
+                if isinstance(paper_metrics, dict)
+                else None
+            )
+            experiment_value = (
+                experiment_metrics.get(metric)
+                if isinstance(experiment_metrics, dict)
+                else None
+            )
+
+            html.append(
+                "<tr>"
+                f"<td>{_escape(metric)}</td>"
+                f"<td>{_escape(paper_value)}</td>"
+                f"<td>{_escape(experiment_value)}</td>"
+                "</tr>"
+            )
+
+        html.append("</tbody></table>")
+
+    if not success and error:
+        html.append(
+            f"<p><strong>Error:</strong> {_escape(error)}</p>"
+        )
+
+    html.append("</section>")
+
+    return "".join(html)
 
 
 def write_report(run: Dict[str, Any]) -> Path:
