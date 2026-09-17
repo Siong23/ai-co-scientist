@@ -1162,6 +1162,65 @@ class ChromaPaperLibrary:
             return False
         return self.verify_indexed_source(normalized_source_id).ok
 
+    def get_source_chunks(
+        self,
+        source_id: str,
+    ) -> list[PaperChunk]:
+        """
+        Return all indexed chunks for one exact source in chunk order.
+        """
+
+        normalized_source_id = str(source_id or "").strip()
+
+        if not normalized_source_id:
+            return []
+
+        records = self._stored_source_records(
+            normalized_source_id
+        )
+
+        chunks = []
+
+        for stored_id, (
+            retrieval_text,
+            metadata,
+        ) in records.items():
+
+            document = Document(
+                page_content=retrieval_text,
+                metadata=dict(metadata),
+            )
+
+            chunk = self._paper_chunk_from_document(
+                document
+            )
+
+            if not chunk.chunk_id:
+                chunk = replace(
+                    chunk,
+                    chunk_id=str(stored_id),
+                )
+
+            chunks.append(chunk)
+
+        chunks.sort(
+            key=lambda chunk: (
+                chunk.chunk_index
+                if isinstance(chunk.chunk_index, int)
+                and chunk.chunk_index >= 0
+                else 10**9,
+
+                chunk.page_start
+                if isinstance(chunk.page_start, int)
+                and chunk.page_start >= 0
+                else 10**9,
+
+                str(chunk.chunk_id or ""),
+            )
+        )
+
+        return chunks
+
     def search_many(
         self,
         queries: Sequence[Any],

@@ -62,6 +62,7 @@ from typing import Any, Dict, List, Optional
 
 from ..agents_modules.code_generation_agent import CodeGenerationAgent
 from .experiment_runner import ExperimentRunner
+from .experiment_comparator import ExperimentComparator
 from ..data.dataset_manager import DatasetManager
 from ..utils import logger
 
@@ -179,6 +180,13 @@ class ExperimentOrchestrator:
             output_directory=RUNS_DIR,
             python_executable=self.python_executable,
         )
+
+        self.experiment_runner = ExperimentRunner(
+            output_directory=RUNS_DIR,
+            python_executable=self.python_executable,
+        )
+
+        self.experiment_comparator = ExperimentComparator()
 
     # ========================================================
     # Directory Management
@@ -1675,6 +1683,61 @@ class ExperimentOrchestrator:
             )
 
     # ========================================================
+    # Compare Experiment Results
+    # ========================================================
+
+    def compare_experiment_results(
+        self,
+        hypothesis: Dict[str, Any],
+        execution_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Compare successful automated experiment results against
+        the evidence sources associated with the selected
+        Rank #1 hypothesis.
+        """
+
+        if not isinstance(hypothesis, dict):
+            raise TypeError(
+                "hypothesis must be a dictionary."
+            )
+
+        if not isinstance(execution_result, dict):
+            raise TypeError(
+                "execution_result must be a dictionary."
+            )
+
+        if not execution_result.get("success", False):
+            return {
+                "success": False,
+                "status": "experiment_failed",
+                "errors": [
+                    "Comparison skipped because the automated "
+                    "experiment did not complete successfully."
+                ],
+            }
+
+        evidence_sources = (
+            hypothesis.get("evidence_sources")
+            or []
+        )
+
+        if not evidence_sources:
+            return {
+                "success": False,
+                "status": "no_evidence_sources",
+                "errors": [
+                    "Comparison skipped because the selected "
+                    "hypothesis has no evidence sources."
+                ],
+            }
+
+        return self.experiment_comparator.compare(
+            hypothesis=hypothesis,
+            experiment_result=execution_result,
+        )
+
+    # ========================================================
     # Full Experiment Pipeline
     # ========================================================
 
@@ -1740,6 +1803,7 @@ class ExperimentOrchestrator:
             "experiment_preparation": preparation,
             "code_generation": None,
             "execution": None,
+            "comparison": None,
             "errors": list(
                 preparation.get(
                     "errors",
@@ -1845,6 +1909,36 @@ class ExperimentOrchestrator:
                 result["errors"].extend(
                     execution.get("errors", [])
                 )
+
+            # ------------------------------------------------
+            # Compare successful experiment with paper evidence
+            # ------------------------------------------------
+            if (
+                execution.get("success", False)
+                and output_validation.get("valid", True)
+            ):
+                try:
+                    comparison = (
+                        self.compare_experiment_results(
+                            hypothesis=preparation[
+                                "selected_hypothesis"
+                            ],
+                            execution_result=execution,
+                        )
+                    )
+
+                    result["comparison"] = comparison
+
+                except Exception as error:
+                    result["comparison"] = {
+                        "success": False,
+                        "status": "comparison_error",
+                        "errors": [str(error)],
+                    }
+
+                    result["errors"].append(
+                        f"Experiment comparison failed: {error}"
+                    )
 
 
         # ----------------------------------------------------
