@@ -534,6 +534,14 @@ class ResearchRetriever:
             200,
             int(tavily_config.get("max_chunk_chars", 1600)),
         )
+        # Web search is the only billed retrieval provider here, so repeats are
+        # served from a local cache and each cycle gets a hard call budget.
+        tavily_cache_directory = (
+            str(tavily_config.get("cache_directory", "results/tavily_cache"))
+            if tavily_config.get("cache_enabled", True)
+            else None
+        )
+        tavily_cache_ttl_seconds = max(0.0, float(tavily_config.get("cache_ttl_hours", 168))) * 3600
         self.tavily = (
             TavilySearchTool(
                 max_results=tavily_results,
@@ -541,6 +549,10 @@ class ResearchRetriever:
                 search_chunks_per_source=int(tavily_config.get("search_chunks_per_source", 3)),
                 extract_depth=str(tavily_config.get("extract_depth", "basic")),
                 extract_chunks_per_source=int(tavily_config.get("extract_chunks_per_source", 3)),
+                cache_directory=tavily_cache_directory,
+                cache_ttl_seconds=tavily_cache_ttl_seconds,
+                max_searches_per_cycle=int(tavily_config.get("max_searches_per_cycle", 20)),
+                max_extracts_per_cycle=int(tavily_config.get("max_extracts_per_cycle", 10)),
             )
             if tavily_config.get("enabled", True)
             else None

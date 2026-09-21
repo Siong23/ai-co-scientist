@@ -348,11 +348,12 @@ tavily:
   enabled: true
   results_per_query: 10
   # The original research goal is searched against academic providers first.
-  # Tavily joins expanded/corrective retrieval when that academic evidence is
-  # absent or fails the evidence-coverage check.
+  # Expanded retrieval then follows the query planner's own routing, so only
+  # queries routed to web/official/news reach Tavily; corrective rounds force
+  # web search once the routed evidence fails the evidence-coverage check.
   # Search first returns URLs plus bounded relevance snippets for local reranking.
   # Only the top URLs are then sent to Extract and admitted as web evidence.
-  search_depth: "advanced"
+  search_depth: "basic"
   search_chunks_per_source: 3
   max_extract_results: 5
   extract_depth: "basic"
@@ -360,4 +361,16 @@ tavily:
   # Extracted passages are reranked locally against their assigned sub-question.
   max_evidence_chunks: 8
   max_chunk_chars: 1600
+  # Tavily is the only billed retrieval provider, and one cycle issues web
+  # queries from expanded retrieval, every corrective round, and each reflection
+  # claim check. Identical requests are therefore served from a local cache, and
+  # a cycle stops calling Tavily once it spends its budget; retrieval continues
+  # with the academic providers. The per-cycle limits are a fuse against runaway
+  # retrieval, not a throttle: a normal cycle stays well below them. Set
+  # enabled:false to stop calling Tavily altogether.
+  cache_enabled: true
+  cache_directory: "results/tavily_cache"
+  cache_ttl_hours: 48
+  max_searches_per_cycle: 60
+  max_extracts_per_cycle: 30
 

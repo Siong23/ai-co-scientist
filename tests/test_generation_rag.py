@@ -2598,6 +2598,51 @@ def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():
     assert semantic_stats["status"] == "rate_limited"
 
 
+def test_academic_routed_queries_do_not_reach_tavily():
+    """Paid web search is skipped for queries the planner routed to papers."""
+
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.semantic_scholar = None
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.arxiv = Mock()
+    retriever.arxiv.search_papers.return_value = []
+    retriever.tavily = Mock(is_configured=True, last_error_status=None, last_error_detail="")
+    retriever.tavily.search.return_value = []
+
+    retriever._search_sources(
+        (
+            SearchQuery("routed to papers", source_type="academic"),
+            SearchQuery("routed to the web", source_type="web"),
+        ),
+        include_arxiv=True,
+    )
+
+    retriever.tavily.search.assert_called_once_with(query="routed to the web")
+    assert retriever.arxiv.search_papers.call_count == 1
+
+
+def test_forced_web_search_still_sends_academic_queries_to_tavily():
+    """Corrective rounds keep overriding the planner's routing on purpose."""
+
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.semantic_scholar = None
+    retriever.springer = None
+    retriever.elsevier = None
+    retriever.arxiv = Mock()
+    retriever.arxiv.search_papers.return_value = []
+    retriever.tavily = Mock(is_configured=True, last_error_status=None, last_error_detail="")
+    retriever.tavily.search.return_value = []
+
+    retriever._search_sources(
+        (SearchQuery("routed to papers", source_type="academic"),),
+        include_arxiv=False,
+        force_web=True,
+    )
+
+    retriever.tavily.search.assert_called_once_with(query="routed to papers")
+
+
 def test_provider_http_failure_is_not_reported_as_zero_yield():
     retriever = ArxivRAGRetriever(query_count=2, top_k=1)
     retriever.semantic_scholar = None
@@ -3307,7 +3352,10 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
         "arXiv:2222.2222",
     ]
     assert mock_retrieve.call_count == 2
-    assert all(call.kwargs["force_web"] is True for call in mock_retrieve.call_args_list)
+    # Expanded retrieval follows the planner's routing; only the corrective round
+    # forces web search.
+    assert mock_retrieve.call_args_list[0].kwargs.get("force_web", False) is False
+    assert mock_retrieve.call_args_list[1].kwargs["force_web"] is True
     assert mock_retrieve.call_args_list[1].kwargs["rerank_query"] == "scientific goal"
     gap_plan = mock_retrieve.call_args_list[1].args[1]
     assert gap_plan.query_texts == (

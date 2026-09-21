@@ -35,6 +35,8 @@ from app.run_store import (
     write_report,
 )
 from app.runtime_logging import configure_runtime_logging
+from app.tools.tavily_search import cycle_usage as web_search_usage
+from app.tools.tavily_search import reset_cycle_usage as reset_web_search_usage
 from app.utils import (
     classify_llm_error,
     execution_budget,
@@ -753,6 +755,9 @@ def execute_cycle(
         # Start timing the cycle execution
         start_time = time.perf_counter()
 
+        # Tavily bills per request, so each cycle accounts for its own spend.
+        reset_web_search_usage()
+
         print("\n" + "=" * 60)
         print("AI CO-SCIENTIST AUTOMATED PIPELINE")
         print("=" * 60)
@@ -989,6 +994,16 @@ def execute_cycle(
         cycle_details["execution_time_formatted"] = formatted_time
 
         logger.info(f"Cycle execution time: {formatted_time}")
+
+        web_usage = web_search_usage()
+        cycle_details["web_search_usage"] = web_usage
+        logger.info(
+            "Tavily usage this cycle: %d search call(s), %d extract call(s), %d served from cache, %d skipped on budget.",
+            web_usage.get("search_calls", 0),
+            web_usage.get("extract_calls", 0),
+            web_usage.get("search_cache_hits", 0) + web_usage.get("extract_cache_hits", 0),
+            web_usage.get("budget_skips", 0),
+        )
 
         # Log all steps and hypotheses
         steps = cycle_details.get("steps", {})
