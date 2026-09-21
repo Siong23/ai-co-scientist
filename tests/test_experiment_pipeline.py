@@ -476,6 +476,54 @@ def test_a_nonfinite_summary_timing_does_not_satisfy_the_contract():
 # ============================================================
 
 
+def test_experiment_runner_stops_retrying_once_the_cycle_budget_is_gone(
+    tmp_path,
+    monkeypatch,
+):
+    import threading
+    import time
+
+    from app.experiments import experiment_runner as runner_module
+    from app.utils import execution_budget
+
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+
+    code_path = run_directory / "generated_experiment.py"
+    code_path.write_text("raise SystemExit(1)", encoding="utf-8")
+
+    runner = ExperimentRunner(
+        output_directory=tmp_path / "runs",
+        timeout_seconds=10,
+    )
+
+    attempts = []
+
+    def fake_subprocess_run(command, **kwargs):
+        attempts.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "RuntimeError: boom")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        runner,
+        "_repair_experiment_with_llm",
+        lambda **kwargs: (True, "print('repaired')", "repaired"),
+    )
+
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with execution_budget(time.monotonic() + 600, cancel_event):
+        result = runner.execute(
+            code_path=code_path,
+            run_directory=run_directory,
+        )
+
+    assert len(attempts) == 1
+    assert result["success"] is False
+    assert result["status"] == "cancelled_no_cycle_budget"
+
+
 def test_experiment_runner_extracts_missing_python_library(
     tmp_path,
 ):

@@ -43,7 +43,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..utils import logger
+from ..utils import execution_cancelled, execution_remaining_seconds, logger
 
 
 class ExperimentRunner:
@@ -791,6 +791,27 @@ class ExperimentRunner:
                     MAX_EXPERIMENT_ATTEMPTS,
                 )
 
+                # Retries and LLM repairs share the cycle budget, so stop once
+                # it is gone instead of running work the caller has abandoned.
+                if attempt > 1 and execution_cancelled():
+                    result.update(
+                        {
+                            "success": False,
+                            "status": "cancelled_no_cycle_budget",
+                            "error": ("The cycle budget ran out before the experiment could be retried."),
+                            "repair_attempts": repair_attempts,
+                            "dependency_install_attempts": dependency_install_attempts,
+                            "experiment_attempts": attempt - 1,
+                        }
+                    )
+
+                    break
+
+                attempt_timeout_seconds = self.timeout_seconds
+                remaining_budget_seconds = execution_remaining_seconds()
+                if remaining_budget_seconds is not None:
+                    attempt_timeout_seconds = max(1, int(min(attempt_timeout_seconds, remaining_budget_seconds)))
+
                 process = subprocess.run(
                     command,
                     cwd=str(run_directory),
@@ -800,7 +821,7 @@ class ExperimentRunner:
                     ),
                     capture_output=True,
                     text=True,
-                    timeout=self.timeout_seconds,
+                    timeout=attempt_timeout_seconds,
                 )
 
                 stdout = process.stdout or ""
