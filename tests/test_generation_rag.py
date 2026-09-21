@@ -375,6 +375,50 @@ def test_query_rewriting_uses_selected_model_and_zero_temperature():
     assert "Never search for a bare metric or outcome fragment" in normalized_rewriter_system_prompt
 
 
+def test_a_missing_prior_art_intent_takes_a_repeated_intent_slot():
+    """Dropping the plan would leave novelty judged against no prior work."""
+
+    repeated_intents = ["support", "support", "support", "counterevidence", "counterevidence"]
+    plan_payload = json.dumps(
+        {
+            "queries": [
+                {
+                    "query": f"Malaysia colonial history {index}",
+                    "purpose": "Run retrieval",
+                    "sub_question": "What evidence addresses the goal?",
+                    "source_type": "academic",
+                    "preferred_domains": [],
+                    "freshness": None,
+                    "evidence_requirement_id": "goal_scope",
+                    "hypothesis_id": "primary_hypothesis",
+                    "search_intent": intent,
+                }
+                for index, intent in enumerate(repeated_intents)
+            ],
+            "required_terms": ["Malaysia", "Malaya"],
+            "explicit_requirements": [{"id": "goal_scope", "goal_quote": "brief describe the malaysia history"}],
+            "exploration_directions": ["Compare alternative historical interpretations."],
+        }
+    )
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_research_plan_payload(), plan_payload],
+    ):
+        plan, error = call_llm_for_search_queries(
+            "brief describe the malaysia history",
+            model="chosen-model",
+        )
+
+    assert error is None
+    assert plan is not None
+    assert len(plan.queries) == 5
+    intents = [query.search_intent for query in plan.queries]
+    assert "prior_art" in intents
+    assert "support" in intents
+    assert "counterevidence" in intents
+
+
 def test_query_rewriting_retries_truncated_research_plan_once():
     truncated_plan = '{"research_goal": "brief describe the malaysia history", "research_type": "discovery"'
 

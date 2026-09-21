@@ -875,6 +875,17 @@ def call_llm_for_search_queries(
                     for index in range(len(normalized_queries) - 1, -1, -1)
                     if normalized_queries[index].search_intent == "goal"
                 ]
+                # A plan with no generic query still has room: an intent the
+                # planner repeated can give up one slot while keeping its first
+                # query. Losing the whole plan over this costs the cycle its
+                # prior-art search, which is what novelty is judged against.
+                seen_intents: set[str] = set()
+                for index, planned_query in enumerate(normalized_queries):
+                    if planned_query.search_intent in seen_intents:
+                        if index not in replaceable:
+                            replaceable.append(index)
+                    else:
+                        seen_intents.add(planned_query.search_intent)
                 for synthesized in synthesized_queries:
                     if len(normalized_queries) < query_count:
                         normalized_queries.append(synthesized)
