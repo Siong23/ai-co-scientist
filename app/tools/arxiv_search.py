@@ -44,7 +44,10 @@ _QUERY_STOP_WORDS = {
 }
 
 
-def build_arxiv_query(query: str, *, max_concepts: int = 6) -> str:
+# arXiv ANDs every concept, and its corpus is small enough that a sixth term
+# empties the result set: the same goal returns five papers at four concepts and
+# nothing at six.
+def build_arxiv_query(query: str, *, max_concepts: int = 4) -> str:
     """Convert a natural-language need into a bounded field-aware arXiv query.
 
     Existing arXiv field syntax is preserved. Natural-language searches retain
@@ -56,12 +59,22 @@ def build_arxiv_query(query: str, *, max_concepts: int = 6) -> str:
     if not normalized or _ARXIV_FIELD_CLAUSE.search(normalized):
         return normalized
 
-    concepts: list[str] = []
+    phrases: list[str] = []
     consumed_parts: set[str] = set()
     for compound in re.findall(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\b", normalized):
         phrase = compound.replace("-", " ").casefold()
-        concepts.append(f'all:"{phrase}"')
+        clause = f'all:"{phrase}"'
+        if clause not in phrases:
+            phrases.append(clause)
         consumed_parts.update(phrase.split())
+
+    # Requiring every compound at once matches nothing: one paper rarely carries
+    # three exact phrases, and a goal naming three of them returned zero results.
+    # One OR group keeps their recall, and it counts as a single concept so the
+    # plain terms below still bound the query.
+    concepts: list[str] = []
+    if phrases:
+        concepts.append(phrases[0] if len(phrases) == 1 else "(" + " OR ".join(phrases) + ")")
 
     tokens = re.findall(r"\b[A-Za-z0-9][A-Za-z0-9+._]*\b", normalized)
     prioritized = [token for token in tokens if any(char.isdigit() for char in token) or token.isupper()]
