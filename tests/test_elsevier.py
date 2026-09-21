@@ -41,11 +41,56 @@ def test_search_uses_api_key_and_normalizes_scopus_entries(monkeypatch):
     assert papers[0]["arxiv_id"] == "elsevier:2-s2.0-85123456789"
     assert papers[0]["authors"] == ["Alice Researcher", "Bob Scientist"]
     assert papers[0]["arxiv_url"] == "https://doi.org/10.1016/j.test.2025.001"
-    assert mock_get.call_args.kwargs["params"] == {"query": "immunotherapy", "count": 3}
+    assert mock_get.call_args.kwargs["params"] == {
+        "query": "immunotherapy",
+        "count": 3,
+        "view": "COMPLETE",
+    }
     assert mock_get.call_args.kwargs["headers"] == {
         "Accept": "application/json",
         "X-ELS-APIKey": "elsevier-test-key",
     }
+
+
+def test_a_research_goal_is_reduced_to_scopus_matchable_terms(monkeypatch):
+    """Scopus ANDs every term, so prose has to be cut down to content words."""
+
+    monkeypatch.setenv("ELSEVIER_API_KEY", "elsevier-test-key")
+    tool = ElsevierSearchTool()
+    goal = (
+        "Develop an AI-driven self-optimizing 5G network architecture capable of "
+        "dynamically adjusting radio resources, network slices, handover policies, "
+        "and energy-saving mechanisms according to changing network conditions."
+    )
+
+    with patch("app.tools.elsevier_search.requests.get", return_value=_response([_entry()])) as mock_get:
+        tool.search_papers(goal)
+
+    assert mock_get.call_args.kwargs["params"]["query"] == (
+        "AI-driven self-optimizing 5G network architecture dynamically"
+    )
+
+
+def test_boolean_operator_words_are_dropped_from_the_query(monkeypatch):
+    """A query opening with "and" is rejected by Scopus as invalid input."""
+
+    monkeypatch.setenv("ELSEVIER_API_KEY", "elsevier-test-key")
+    tool = ElsevierSearchTool()
+
+    with patch("app.tools.elsevier_search.requests.get", return_value=_response([_entry()])) as mock_get:
+        tool.search_papers("and energy-saving mechanisms according")
+
+    assert mock_get.call_args.kwargs["params"]["query"] == "energy-saving mechanisms"
+
+
+def test_a_query_of_only_filler_words_still_searches_those_words(monkeypatch):
+    monkeypatch.setenv("ELSEVIER_API_KEY", "elsevier-test-key")
+    tool = ElsevierSearchTool()
+
+    with patch("app.tools.elsevier_search.requests.get", return_value=_response([_entry()])) as mock_get:
+        tool.search_papers("the of for")
+
+    assert mock_get.call_args.kwargs["params"]["query"] == "the of for"
 
 
 def test_search_records_rate_limit(monkeypatch):

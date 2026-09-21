@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from typing import Any
 
 import requests
@@ -12,6 +13,59 @@ from .pdf_urls import find_pdf_url
 
 _DEFAULT_TIMEOUT = 15
 _DEFAULT_SEARCH_URL = "https://api.elsevier.com/content/search/scopus"
+# Scopus reads these as search operators, so a query that merely contains one
+# in prose is rejected with HTTP 400 "Error translating query".
+_SCOPUS_OPERATORS = frozenset({"and", "or", "not", "pre", "w", "near", "onear"})
+# Every remaining term is ANDed together, so prose filler collapses the result
+# set to nothing. Content words are kept and the rest is dropped.
+_SCOPUS_STOP_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "of",
+        "to",
+        "for",
+        "with",
+        "by",
+        "from",
+        "in",
+        "on",
+        "at",
+        "as",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "that",
+        "this",
+        "these",
+        "those",
+        "its",
+        "their",
+        "can",
+        "could",
+        "should",
+        "would",
+        "may",
+        "might",
+        "must",
+        "will",
+        "shall",
+        "develop",
+        "capable",
+        "according",
+        "using",
+        "based",
+        "toward",
+        "towards",
+        "under",
+        "into",
+    }
+)
+# Six content words still match broadly; eight already return zero on Scopus.
+_MAX_QUERY_WORDS = 6
 
 
 class ElsevierSearchTool:
@@ -38,6 +92,10 @@ class ElsevierSearchTool:
         if not query or not self.is_configured:
             return []
 
+        scopus_query = self._scopus_query(query)
+        if not scopus_query:
+            return []
+
         limit = min(max_results if max_results is not None else self.max_results, 200)
         headers = {"Accept": "application/json", "X-ELS-APIKey": self.api_key}
         if self.institution_token:
@@ -46,7 +104,9 @@ class ElsevierSearchTool:
         try:
             response = requests.get(
                 self.search_url,
-                params={"query": query, "count": limit},
+                # The default STANDARD view omits dc:description, which would
+                # drop every record at the abstract filter below.
+                params={"query": scopus_query, "count": limit, "view": "COMPLETE"},
                 headers=headers,
                 timeout=_DEFAULT_TIMEOUT,
             )
@@ -60,13 +120,30 @@ class ElsevierSearchTool:
             usable_papers = [paper for paper in papers if paper.get("abstract")]
             from ..utils import logger
 
-            logger.debug("Elsevier Scopus returned %d usable paper(s) for query %r.", len(usable_papers), query)
+            logger.debug(
+                "Elsevier Scopus returned %d usable paper(s) for query %r (sent as %r).",
+                len(usable_papers),
+                query,
+                scopus_query,
+            )
             return usable_papers
         except Exception as exc:
             from ..utils import logger, redact_secrets
 
             logger.error("Elsevier Scopus search failed for query %r: %s", query, redact_secrets(str(exc)))
             return []
+
+    @staticmethod
+    def _scopus_query(query: str, max_words: int = _MAX_QUERY_WORDS) -> str:
+        """Reduce a natural-language query to terms Scopus can actually match."""
+
+        words = [word.strip("-") for word in re.sub(r"[^\w\s-]", " ", query).split() if word.strip("-")]
+        keywords = [
+            word
+            for word in words
+            if word.casefold() not in _SCOPUS_OPERATORS and word.casefold() not in _SCOPUS_STOP_WORDS
+        ]
+        return " ".join((keywords or words)[:max_words])
 
     @classmethod
     def _format_paper(cls, entry: dict[str, Any]) -> dict[str, Any]:
