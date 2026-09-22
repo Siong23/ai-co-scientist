@@ -134,6 +134,19 @@ def execution_cancelled() -> bool:
     )
 
 
+def execution_remaining_seconds() -> float | None:
+    """Return the seconds left in the current cycle budget, if one is set."""
+
+    with _execution_budget_lock:
+        cancel_event = _execution_cancel_event
+        deadline = _execution_deadline
+    if cancel_event is not None and cancel_event.is_set():
+        return 0.0
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
 def _request_timeout() -> float:
     """Bound a provider call by both its configured timeout and cycle deadline."""
 

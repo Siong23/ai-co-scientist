@@ -825,6 +825,84 @@ def test_execute_cycle_reports_bounded_quality_gate_without_claiming_timeout(gra
     assert "reached its compute budget" not in result["status"]
 
 
+def test_execute_cycle_skips_experiment_without_enough_cycle_budget(gradio_app_module, monkeypatch, tmp_path):
+    import threading
+
+    from app.models import ContextMemory, ResearchGoal
+    from app.utils import execution_budget
+
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    run_experiment = Mock()
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", run_experiment)
+
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    with execution_budget(time.monotonic() + 5, threading.Event()):
+        result = gradio_app_module.execute_cycle(
+            ResearchGoal(description="Experiment budget test"),
+            ContextMemory(),
+            cycle_supervisor,
+        )
+
+    run_experiment.assert_not_called()
+    experiment_result = result["cycle_details"]["experiment_result"]
+    assert experiment_result["status"] == "skipped_no_cycle_budget"
+    assert "CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS" in experiment_result["reason"]
+    assert "Automated Experiment Skipped" in result["results_html"]
+    assert "timed out" not in result["status"]
+
+
+def test_execute_cycle_caps_experiment_timeout_to_remaining_budget(gradio_app_module, monkeypatch, tmp_path):
+    import threading
+
+    from app.models import ContextMemory, ResearchGoal
+    from app.utils import execution_budget
+
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    captured = {}
+
+    def fake_run_experiment(self, **kwargs):
+        captured.update(kwargs)
+        return {"success": False, "status": "failed", "errors": ["stubbed experiment"]}
+
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", fake_run_experiment)
+
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    remaining_seconds = gradio_app_module.EXPERIMENT_TIMEOUT_SECONDS - 120
+    with execution_budget(time.monotonic() + remaining_seconds, threading.Event()):
+        gradio_app_module.execute_cycle(
+            ResearchGoal(description="Experiment timeout clamp test"),
+            ContextMemory(),
+            cycle_supervisor,
+        )
+
+    assert captured["timeout_seconds"] <= remaining_seconds
+    assert captured["timeout_seconds"] < gradio_app_module.EXPERIMENT_TIMEOUT_SECONDS
+
+
 def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
     from app.run_store import RUNS_DIR_ENV

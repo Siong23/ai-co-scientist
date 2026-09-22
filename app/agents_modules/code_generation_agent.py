@@ -133,6 +133,13 @@ class CodeGenerationAgent:
         "fences, JSON, or commentary."
     )
 
+    REPAIR_SYSTEM_PROMPT = (
+        "You repair automatically generated Python experiment files.\n"
+        "You preserve the scientific objective and intended methodology.\n"
+        "You return the complete corrected Python source code only.\n"
+        "Do not return JSON, Markdown fences, explanations, or commentary."
+    )
+
     def __init__(
         self,
         model: Optional[str] = None,
@@ -493,6 +500,19 @@ class CodeGenerationAgent:
                 "Selected hypothesis does not contain usable text."
             )
 
+        reference_experiment = specification.get(
+            "reference_experiment",
+            {},
+        )
+
+        if reference_experiment is None:
+            reference_experiment = {}
+
+        if not isinstance(reference_experiment, dict):
+            raise ValueError(
+                "'reference_experiment' must be a dictionary."
+            )
+
     # ========================================================
     # Prompt Construction
     # ========================================================
@@ -563,7 +583,7 @@ IMPORTANT RULES:
     - The limitations of the experiment.  
 
 ============================================================
-2. EVIDENCE SOURCES
+2. EVIDENCE SOURCES AND REFERENCE EXPERIMENT
 ============================================================
 
 11. The selected hypothesis may include evidence sources from
@@ -591,187 +611,251 @@ IMPORTANT RULES:
     unless the generated implementation actually matches the
     paper's method, dataset, task, and evaluation procedure.
 
+17. The experiment specification may contain a
+    "reference_experiment" section extracted from the evidence sources.
+
+18. When reference_experiment is available, use it to guide the
+    generated experiment.
+
+19. If reference_experiment specifies a model or architecture
+    that is applicable to the selected experiment, implement that
+    architecture unless the selected hypothesis explicitly proposes
+    a scientifically justified modification. Do not copy an unrelated
+    model or architecture merely because it appears in an evidence source.
+
+20. If reference_experiment specifies a dataset, task, target variable,
+    preprocessing method, or experimental protocol, follow those details
+    whenever they are compatible with the selected experiment dataset
+    and execution environment.
+
+21. If reference_experiment specifies evaluation metrics, calculate
+    those metrics when they are applicable to the implemented task.
+
+22. Do not automatically use classification metrics such as accuracy,
+    precision, recall, or F1 for a non-classification experiment.
+
+23. For latency, security, optimization, orchestration, or control
+    experiments, use the hypothesis-specific metrics, such as:
+    - p99 latency;
+    - key freshness or key age;
+    - latency constraint violations;
+    - cryptographic overhead;
+    - risk;
+    - reward; or
+    - other metrics explicitly required by the hypothesis.
+
+24. Distinguish between:
+    - metrics reported by the evidence sources;
+    - metrics required by the selected hypothesis; and
+    - standard framework or execution metrics.
+
+25. If the reference experiment and selected hypothesis use different
+    models, datasets, tasks, or metrics, do not silently pretend that
+    the experiment is a direct reproduction.
+
+26. Record the experiment classification in the experiment metadata
+    using one of:
+    - "direct_reproduction";
+    - "scientific_adaptation"; or
+    - "proxy_experiment".
+
+27. The experiment metadata must record:
+    - reference model and architecture;
+    - implemented model and architecture;
+    - reference dataset and task;
+    - implemented dataset and task;
+    - reference evaluation metrics;
+    - implemented evaluation metrics;
+    - differences from the reference experiment;
+    - assumptions;
+    - adaptations; and
+    - limitations.
+
+28. If the evidence sources do not provide enough information to identify
+    the exact model, methodology, or metrics, do not invent those details.
+    Make the smallest reasonable assumption and record it explicitly.
+
 ============================================================
 2. DATASET
 ============================================================
 
-17. The experiment dataset is specified in the experiment specification.
+29. The experiment dataset is specified in the experiment specification.
 
-18. Do not replace the specified dataset with another dataset.
+30. Do not replace the specified dataset with another dataset.
 
-19. The dataset path may be provided through the DATASET_PATH environment variable.
+31. The dataset path may be provided through the DATASET_PATH environment variable.
 
-20. Prefer DATASET_PATH when it is available.
+32. Prefer DATASET_PATH when it is available.
+    
+33. Do not depend on a machine-specific absolute path as the only dataset location.
 
-21. Do not depend on a machine-specific absolute path as the only dataset location.
+34. Validate that the dataset exists before loading it.
 
-22. Validate that the dataset exists before loading it.
+35. Raise a clear and informative error if the dataset cannot be found.
 
-23. Raise a clear and informative error if the dataset cannot be found.
-
-24. Automatically identify and validate the target column according to the experiment specification.
+36. Automatically identify and validate the target column according to the experiment specification.
 
 ============================================================
 3. DATA PREPROCESSING
 ============================================================
 
-25. Include preprocessing appropriate for tabular/network intrusion data.
+37. Include preprocessing appropriate for tabular/network intrusion data.
 
-26. Handle numerical and categorical features appropriately.
+38. Handle numerical and categorical features appropriately.
 
-27. Never use unconditional df.dropna() on the entire dataset.
+39. Never use unconditional df.dropna() on the entire dataset.
 
-28. Missing numerical values must be handled using training-set statistics,
+40. Missing numerical values must be handled using training-set statistics,
     such as the training-set median.
 
-29. Missing categorical values must be handled explicitly using an
+41. Missing categorical values must be handled explicitly using an
     appropriate sentinel such as "Unknown".
 
-30. Fit imputers, encoders, and scalers using training data only.
+42. Fit imputers, encoders, and scalers using training data only.
 
-31. Apply fitted preprocessing to validation and test data without fitting
+43. Apply fitted preprocessing to validation and test data without fitting
     on those partitions.
 
-32. Verify that preprocessing produces valid data.
+44. Verify that preprocessing produces valid data.
 
-33. Verify that the processed dataset contains at least one usable sample.
+45. Verify that the processed dataset contains at least one usable sample.
 
-34. Verify that the processed features do not contain NaN or infinite values.
+46. Verify that the processed features do not contain NaN or infinite values.
 
-35. Raise a clear error if preprocessing produces invalid or empty data.
+47. Raise a clear error if preprocessing produces invalid or empty data.
 
 ============================================================
 4. DATA SPLITTING AND DATA LEAKAGE
 ============================================================
 
-36. Create separate training, validation, and test partitions.
+48. Create separate training, validation, and test partitions.
 
-37. Use stratified splitting for classification when appropriate.
+49. Use stratified splitting for classification when appropriate.
 
-38. Handle class-distribution problems gracefully.
+50. Handle class-distribution problems gracefully.
 
-39. Never use test data to fit preprocessing components.
+51. Never use test data to fit preprocessing components.
 
-40. Never use test data for model selection or hyperparameter tuning.
+52. Never use test data for model selection or hyperparameter tuning.
 
-41. Identify the target variable explicitly before preprocessing.
+53. Identify the target variable explicitly before preprocessing.
 
-42. Do not use the target variable itself as an input feature.
+54. Do not use the target variable itself as an input feature.
 
-43. Inspect feature names and experiment metadata for variables that may
+55. Inspect feature names and experiment metadata for variables that may
     directly encode, derive from, or reveal the target.
 
-44. Features such as attack labels, attack categories, attack tools,
+56. Features such as attack labels, attack categories, attack tools,
     outcome indicators, or post-event annotations may contain target
     information. Match them by case-insensitive substring, so that a
     column named "Attack Type" or "Attack Tool" is caught by the term
     "attack". Never narrow such a match with a second exact-name test:
     once a column matches, exclude it instead of reconsidering it.
 
-45. If a feature is clearly derived from the target or would not be
+57. If a feature is clearly derived from the target or would not be
     available at prediction time in a real-world intrusion-detection
     setting, exclude it from the predictive feature set.
 
-46. Do not remove potentially informative features merely because they are
+58. Do not remove potentially informative features merely because they are
     correlated with the target. Exclude a feature when there is a clear
     methodological, temporal, or target-leakage reason.
 
-47. Record excluded target-related features and the reason for excluding
+59. Record excluded target-related features and the reason for excluding
     them in the experiment summary.
 
-48. Ensure that the final feature set represents information that would
+60. Ensure that the final feature set represents information that would
     realistically be available to the intrusion-detection model at
     prediction time.
 
-49. Check for duplicated or near-duplicated records when appropriate,
+61. Check for duplicated or near-duplicated records when appropriate,
     particularly when unusually high validation or test performance occurs.
 
-50. Extremely high or perfect validation/test performance must not
+62. Extremely high or perfect validation/test performance must not
     automatically be interpreted as evidence of a successful model.
     Consider possible target leakage, duplicated records, or other
     methodological issues.
 
-51. Preserve the scientific intent of the hypothesis while preventing
+63. Preserve the scientific intent of the hypothesis while preventing
     methodological data leakage.
 
 ============================================================
 5. REPRODUCIBILITY
 ============================================================
 
-52. Set deterministic random seeds for Python, NumPy, and PyTorch where
+64. Set deterministic random seeds for Python, NumPy, and PyTorch where
     appropriate.
 
-53. When CUDA is available, configure PyTorch reproducibility appropriately.
+65. When CUDA is available, configure PyTorch reproducibility appropriately.
 
-54. Do not unnecessarily sacrifice performance for reproducibility.
+66. Do not unnecessarily sacrifice performance for reproducibility.
 
-55. Record the random seed in the final experiment summary.
+67. Record the random seed in the final experiment summary.
 
 ============================================================
 6. PYTORCH MODEL
 ============================================================
 
-56. Use PyTorch for the deep-learning experiment.
+68. Use PyTorch for the deep-learning experiment.
 
-57. Implement the architecture specified by the selected hypothesis.
+69. Implement the architecture specified by the selected hypothesis.
 
-58. Use torch.nn.Module appropriately.
+70. Use torch.nn.Module appropriately.
 
-59. Use an appropriate loss function.
+71. Use an appropriate loss function.
 
-60. Use an appropriate optimizer.
+72. Use an appropriate optimizer.
 
-61. Use model.train() during training.
+73. Use model.train() during training.
 
-62. Use model.eval() during validation and testing.
+74. Use model.eval() during validation and testing.
 
-63. Use torch.no_grad() during validation and testing when gradients are
+75. Use torch.no_grad() during validation and testing when gradients are
     not required.
 
-64. Save the best-performing model checkpoint according to validation
+76. Save the best-performing model checkpoint according to validation
     performance when appropriate.
 
-65. Reload the best checkpoint before final test evaluation when appropriate.
+77. Reload the best checkpoint before final test evaluation when appropriate.
 
 ============================================================
 7. GPU AND DEVICE HANDLING
 ============================================================
 
-66. Automatically detect whether CUDA is available.
+78. Automatically detect whether CUDA is available.
 
-67. Use:
+79. Use:
 
     torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-68. Fall back to CPU automatically when CUDA is unavailable.
+80. Fall back to CPU automatically when CUDA is unavailable.
 
-69. Never assume that a GPU is available.
+81. Never assume that a GPU is available.
 
-70. Print the selected device.
+82. Print the selected device.
 
-71. When CUDA is available, print the GPU name.
+83. When CUDA is available, print the GPU name.
 
-72. Move the model to the selected device.
+84. Move the model to the selected device.
 
-73. Move training, validation, and test tensors to the selected device
+85. Move training, validation, and test tensors to the selected device
     efficiently.
 
-74. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
+86. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
 
-75. Do not repeatedly transfer the same tensors between CPU and GPU inside
+87. Do not repeatedly transfer the same tensors between CPU and GPU inside
     performance-critical loops.
 
-76. When CUDA is available, consider using pin_memory=True in DataLoader.
+88. When CUDA is available, consider using pin_memory=True in DataLoader.
 
-77. When appropriate, use non_blocking=True for tensor transfers.
+89. When appropriate, use non_blocking=True for tensor transfers.
 
-78. The experiment must remain executable on CPU when CUDA is unavailable.
+90. The experiment must remain executable on CPU when CUDA is unavailable.
 
 ============================================================
 8. COMPUTATIONAL EFFICIENCY
 ============================================================
 
-79. The generated experiment must be suitable for automated execution on
+91. The generated experiment must be suitable for automated execution on
     a shared CPU/GPU server, and must complete within a few minutes when
     CUDA is unavailable and training runs on CPU. When the specified
     dataset exceeds 200000 rows, draw a stratified random sample of at
@@ -779,120 +863,120 @@ IMPORTANT RULES:
     seed, and report both the original and sampled row counts. This
     subsamples the specified dataset; it never substitutes a different one.
 
-80. Choose a batch size appropriate for the dataset size, model complexity,
+92. Choose a batch size appropriate for the dataset size, model complexity,
     and available hardware.
 
-81. For large tabular datasets with relatively small neural networks,
+93. For large tabular datasets with relatively small neural networks,
     prefer a moderately large batch size when GPU memory permits.
 
-82. Do not default to unnecessarily small batch sizes such as 32, 64, or
+94. Do not default to unnecessarily small batch sizes such as 32, 64, or
     128 for very large tabular datasets unless the experiment specifically
     requires them.
 
-83. When appropriate, consider batch sizes such as 512, 1024, 2048, or
+95. When appropriate, consider batch sizes such as 512, 1024, 2048, or
     another hardware-appropriate value.
 
-84. The selected batch size must remain safe for available GPU memory.
+96. The selected batch size must remain safe for available GPU memory.
     If necessary, use a smaller batch size to avoid out-of-memory errors.
 
-85. Do not automatically use an extremely large batch size.
+97. Do not automatically use an extremely large batch size.
 
-86. Do not create unnecessarily large models.
+98. Do not create unnecessarily large models.
 
-87. Do not use unnecessarily many layers, hidden units, or parameters unless
+99. Do not use unnecessarily many layers, hidden units, or parameters unless
     required by the hypothesis.
 
-88. Do not use an unnecessarily large number of training epochs.
+100. Do not use an unnecessarily large number of training epochs.
 
-89. Use a maximum epoch limit of 15 unless the hypothesis explicitly
+101. Use a maximum epoch limit of 15 unless the hypothesis explicitly
     requires a longer training schedule.
 
-90. Use early stopping based on validation performance when scientifically
+102. Use early stopping based on validation performance when scientifically
     appropriate and when it does not conflict with the experiment
     specification.
 
-91. Early stopping should stop training when validation performance has
+103. Early stopping should stop training when validation performance has
     converged and has not meaningfully improved for a reasonable patience
     period.
 
-92. Do not continue training for many additional epochs after validation
+104. Do not continue training for many additional epochs after validation
     performance has clearly converged.
 
-93. Use a reasonable early-stopping patience value rather than an
+105. Use a reasonable early-stopping patience value rather than an
     excessively large patience value.
 
-94. Avoid repeated dataset loading.
+106. Avoid repeated dataset loading.
 
-95. Avoid repeated preprocessing.
+107. Avoid repeated preprocessing.
 
-96. Avoid redundant model evaluation.
+108. Avoid redundant model evaluation.
 
-97. Avoid unnecessary computations inside the training loop.
+109. Avoid unnecessary computations inside the training loop.
 
-98. When the dataset is already loaded into memory, configure the DataLoader
+110. When the dataset is already loaded into memory, configure the DataLoader
     efficiently.
 
-99. When CUDA is available, consider pin_memory=True when it provides a
+111. When CUDA is available, consider pin_memory=True when it provides a
     benefit.
 
-100. When appropriate, use non_blocking=True for CPU-to-GPU tensor transfers.
+112. When appropriate, use non_blocking=True for CPU-to-GPU tensor transfers.
 
-101. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
+113. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
 
-102. Do not use unnecessarily expensive visualizations.
+114. Do not use unnecessarily expensive visualizations.
 
-103. Do not optimize for speed by changing the scientific objective.
+115. Do not optimize for speed by changing the scientific objective.
 
-104. If the hypothesis does not specify an exact batch size or number of
+116. If the hypothesis does not specify an exact batch size or number of
     epochs, choose values that provide a reasonable balance between
     scientific validity and computational efficiency.
 
-105. Do not artificially increase model size, batch size, or training
+117. Do not artificially increase model size, batch size, or training
     duration merely to increase GPU utilization.
 
-106. Computational-efficiency improvements must not change the research
+118. Computational-efficiency improvements must not change the research
     objective, target variable, dataset, or proposed model architecture.
 
 ============================================================
 9. OPTIONAL MIXED PRECISION
 ============================================================
 
-107. Mixed-precision training may be used when appropriate for the selected
+119. Mixed-precision training may be used when appropriate for the selected
     model and CUDA hardware.
 
-108. If mixed precision is used, it must safely fall back to normal precision
+120. If mixed precision is used, it must safely fall back to normal precision
     when CUDA is unavailable.
 
-109. Do not use mixed precision solely for the purpose of using GPU features
+121. Do not use mixed precision solely for the purpose of using GPU features
     if it is unlikely to provide a meaningful benefit.
 
 ============================================================
 10. TRAINING
 ============================================================
 
-110. Implement a complete training loop.
+122. Implement a complete training loop.
 
-111. Validate the model after each epoch when appropriate.
+123. Validate the model after each epoch when appropriate.
 
-112. Record training loss and validation metrics.
+124. Record training loss and validation metrics.
 
-113. Save the best model checkpoint.
+125. Save the best model checkpoint.
 
-114. Print concise training progress.
+126. Print concise training progress.
 
-115. Do not produce unnecessarily large console output.
+127. Do not produce unnecessarily large console output.
 
-116. Training must have a bounded maximum number of epochs.
+128. Training must have a bounded maximum number of epochs.
 
-117. Never create an infinite training loop.
+129. Never create an infinite training loop.
 
 ============================================================
 11. EVALUATION
 ============================================================
 
-118. Evaluate the final model on the held-out test set.
+130. Evaluate the final model on the held-out test set.
 
-119. For classification experiments, calculate:
+131. For classification experiments, calculate:
 
     - Accuracy
     - Weighted Precision
@@ -900,44 +984,44 @@ IMPORTANT RULES:
     - Weighted F1-score
     - Confusion Matrix
 
-120. Use additional metrics when required by the experiment specification.
+132. Use additional metrics when required by the experiment specification.
 
-121. Do not use the test set during model selection.
+133. Do not use the test set during model selection.
 
-122. Save evaluation metrics in metrics.json.
+134. Save evaluation metrics in metrics.json.
 
 ============================================================
 12. TIMING
 ============================================================
 
-123. Measure training execution time separately.
+135. Measure training execution time separately.
 
-124. Measure evaluation execution time separately.
+136. Measure evaluation execution time separately.
 
-125. Measure complete experiment wall-clock execution time.
+137. Measure complete experiment wall-clock execution time.
 
-126. Use time.perf_counter() for timing.
+138. Use time.perf_counter() for timing.
 
-127. Total experiment execution time must include all required work from
+139. Total experiment execution time must include all required work from
     experiment start until all required experiment artifacts have been
     generated and saved.
 
-128. Calculate the final total execution time using:
+140. Calculate the final total execution time using:
     total_execution_seconds = time.perf_counter() - SCRIPT_START_TIME
 
-129. The final value of total_execution_seconds MUST be stored in
+141. The final value of total_execution_seconds MUST be stored in
     metrics.json under the exact key "total_execution_seconds".
 
-130. metrics.json MUST contain all of the following timing fields:
+142. metrics.json MUST contain all of the following timing fields:
     - "training_seconds"
     - "evaluation_seconds"
     - "total_execution_seconds"
 
-131. Because total_execution_seconds represents the complete experiment
+143. Because total_execution_seconds represents the complete experiment
     wall-clock time, calculate it only after all required experiment work
     and artifacts have been completed.
 
-132. After calculating the final total_execution_seconds, update the
+144. After calculating the final total_execution_seconds, update the
     metrics dictionary with:
 
     metrics["total_execution_seconds"] = float(total_execution_seconds)
@@ -945,35 +1029,35 @@ IMPORTANT RULES:
     Then rewrite metrics.json so that the final metrics.json contains
     the completed timing information.
 
-133. Do not store total_execution_seconds only in experiment_summary.json.
+145. Do not store total_execution_seconds only in experiment_summary.json.
     It MUST also exist in metrics.json.
 
-134. The final metrics.json must be written only after all required metric
+146. The final metrics.json must be written only after all required metric
     values, including total_execution_seconds, are available.
 
-135. Record the selected device and GPU name when available.
+147. Record the selected device and GPU name when available.
 
 ============================================================
 13. VISUALIZATION
 ============================================================
 
-136. Generate useful visualizations relevant to the experiment.
+148. Generate useful visualizations relevant to the experiment.
 
-137. For training experiments, generate training-history visualizations
+149. For training experiments, generate training-history visualizations
     where appropriate.
 
-138. For classification experiments, generate a confusion matrix visualization.
+150. For classification experiments, generate a confusion matrix visualization.
 
-139. Generate a performance metrics visualization when appropriate.
+151. Generate a performance metrics visualization when appropriate.
 
-140. Do not display plots interactively.
+152. Do not display plots interactively.
 
-141. Use a non-interactive matplotlib backend suitable for remote/server
+153. Use a non-interactive matplotlib backend suitable for remote/server
      execution.
 
-142. Save all visualization files inside EXPERIMENT_OUTPUT_DIR.
+154. Save all visualization files inside EXPERIMENT_OUTPUT_DIR.
 
-143. Use these exact filenames when applicable:
+155. Use these exact filenames when applicable:
 
     loss_visualization.png
     accuracy_visualization.png
@@ -984,29 +1068,29 @@ IMPORTANT RULES:
 14. OUTPUT ARTIFACTS
 ============================================================
 
-144. The ExperimentRunner provides the environment variable
+156. The ExperimentRunner provides the environment variable
      EXPERIMENT_OUTPUT_DIR.
 
-145. All generated experiment artifacts MUST be saved inside
+157. All generated experiment artifacts MUST be saved inside
      EXPERIMENT_OUTPUT_DIR.
 
-146. Do not save experiment artifacts to arbitrary system directories.
+158. Do not save experiment artifacts to arbitrary system directories.
 
-147. Create EXPERIMENT_OUTPUT_DIR if it does not exist.
+159. Create EXPERIMENT_OUTPUT_DIR if it does not exist.
 
-148. Save these files using the exact filenames:
+160. Save these files using the exact filenames:
 
     metrics.json
     training_history.json
     best_model.pt
 
-149. Save all required visualization files inside the same output directory.
+161. Save all required visualization files inside the same output directory.
 
 ============================================================
 15. EXPERIMENT SUMMARY
 ============================================================
 
-150. Generate a final experiment summary containing, when applicable:
+162. Generate a final experiment summary containing, when applicable:
 
     - Experiment name
     - Research hypothesis
@@ -1027,93 +1111,93 @@ IMPORTANT RULES:
     - GPU name
     - Random seed
 
-151. Save the experiment summary in a structured JSON file.
+163. Save the experiment summary in a structured JSON file.
 
 ============================================================
 16. AUTOMATED SERVER EXECUTION
 ============================================================
 
-152. The generated experiment will run unattended.
+164. The generated experiment will run unattended.
 
-153. Do not require interactive user input.
+165. Do not require interactive user input.
 
-154. Do not use input().
+166. Do not use input().
 
-155. Do not require a graphical desktop environment.
+167. Do not require a graphical desktop environment.
 
-156. Do not open interactive matplotlib windows.
+168. Do not open interactive matplotlib windows.
 
-157. Do not require manual confirmation.
+169. Do not require manual confirmation.
 
-158. Do not assume files have been manually created by the user.
+170. Do not assume files have been manually created by the user.
 
-159. Use environment variables and portable paths where appropriate.
+171. Use environment variables and portable paths where appropriate.
 
 ============================================================
 17. DEPENDENCIES
 ============================================================
 
-160. Use only libraries that are required by the experiment.
+172. Use only libraries that are required by the experiment.
 
-161. Avoid unnecessary dependencies.
+173. Avoid unnecessary dependencies.
 
-162. Do not include unused imports.
+174. Do not include unused imports.
 
-163. Use commonly available scientific Python libraries where appropriate.
+175. Use commonly available scientific Python libraries where appropriate.
 
-164. Do not introduce unnecessary external packages merely for convenience.
+176. Do not introduce unnecessary external packages merely for convenience.
 
 ============================================================
 18. CODE QUALITY
 ============================================================
 
-165. Generate clean, readable, modular Python code.
+177. Generate clean, readable, modular Python code.
 
-166. Use meaningful variable and function names.
+178. Use meaningful variable and function names.
 
-167. Use functions for logically separate operations.
+179. Use functions for logically separate operations.
 
-168. Include concise comments explaining important implementation choices.
+180. Include concise comments explaining important implementation choices.
 
-169. Avoid duplicated code.
+181. Avoid duplicated code.
 
-170. Keep configuration values clearly defined.
+182. Keep configuration values clearly defined.
 
-171. Do not generate pseudocode.
+183. Do not generate pseudocode.
 
-172. Do not generate incomplete code.
+184. Do not generate incomplete code.
 
-173. Do not use TODO placeholders.
+185. Do not use TODO placeholders.
 
-174. Do not use "pass" as a replacement for required functionality.
+186. Do not use "pass" as a replacement for required functionality.
 
-175. Do not leave required functions unimplemented.
+187. Do not leave required functions unimplemented.
 
 ============================================================
 19. HARDWARE INDEPENDENCE
 ============================================================
 
-176. Do not assume that a larger GPU is required.
+188. Do not assume that a larger GPU is required.
 
-177. Generate code that efficiently uses the available hardware.
+189. Generate code that efficiently uses the available hardware.
 
-178. Do not artificially increase model size or batch size merely to increase
+190. Do not artificially increase model size or batch size merely to increase
      GPU utilization.
 
-179. If the model or dataset is small, recognize that GPU acceleration may
+191. If the model or dataset is small, recognize that GPU acceleration may
      provide limited benefit.
 
-180. Preserve CPU compatibility.
+192. Preserve CPU compatibility.
 
 ============================================================
 20. PYTORCH COMPATIBILITY
 ============================================================
 
-181. Target the installed PyTorch API.
+193. Target the installed PyTorch API.
 
-182. Do not use unsupported arguments for the installed PyTorch version.
+194. Do not use unsupported arguments for the installed PyTorch version.
 
-183. In particular, do not pass verbose to
+195. In particular, do not pass verbose to
      torch.optim.lr_scheduler.ReduceLROnPlateau because the project's
      installed PyTorch version may not support that argument.
 
@@ -1121,9 +1205,9 @@ IMPORTANT RULES:
 21. FINAL REQUIREMENTS
 ============================================================
 
-184. The final generated file must be complete and executable Python.
+196. The final generated file must be complete and executable Python.
 
-185. The experiment must automatically:
+197. The experiment must automatically:
 
     1. Load the specified local dataset.
     2. Validate the dataset.
@@ -1143,48 +1227,219 @@ IMPORTANT RULES:
    16. Record training, evaluation, and total execution time.
    17. Generate a final experiment summary.
 
-186. Most importantly, preserve the scientific intent of the selected
+198. Most importantly, preserve the scientific intent of the selected
      Rank #1 hypothesis while making the generated implementation robust,
      reproducible, efficient, and suitable for automated execution.
 
-187. Return ONLY complete executable Python source code when generating the
-     experiment.
+199. Return exactly one valid JSON object with the keys:
+     model_recommendation, experiment_plan, assumptions, dependencies,
+     and pytorch_code.
+
+     The pytorch_code field must contain the complete executable Python
+     source code.
+
+     Do not return Markdown fences, explanations, or text outside the
+     JSON object.
 """.strip()
+
+    @staticmethod
+    def _compact_reference_experiment(
+        reference_experiment: Any,
+    ) -> Dict[str, Any]:
+        """
+        Reduce the reference experiment to the scientifically relevant
+        information needed for code generation.
+
+        Large extracted text fields are intentionally excluded because
+        the structured experiment details already contain the relevant
+        methodology, metrics, configurations, and reported results.
+        """
+        if not isinstance(reference_experiment, dict):
+            return {}
+
+        compact: Dict[str, Any] = {
+            "available": reference_experiment.get(
+                "available",
+                True,
+            ),
+            "source_count": reference_experiment.get(
+                "source_count",
+                0,
+            ),
+            "sources": [],
+        }
+
+        sources = reference_experiment.get(
+            "sources",
+            [],
+        )
+
+        if not isinstance(sources, list):
+            return compact
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+
+            experiment_details = source.get(
+                "experiment_details",
+                {},
+            )
+
+            if not isinstance(
+                experiment_details,
+                dict,
+            ):
+                experiment_details = {}
+
+            compact_source = {
+                "source_url": source.get(
+                    "source_url"
+                ),
+                "source_id": source.get(
+                    "source_id"
+                ),
+                "source_type": source.get(
+                    "source_type"
+                ),
+                "experiment_details": experiment_details,
+            }
+
+            compact["sources"].append(
+                compact_source
+            )
+
+        return compact
 
     def build_user_prompt(
         self,
         specification: Dict[str, Any],
     ) -> str:
         """
-        Build the user prompt containing the complete experiment
-        specification.
+        Build a compact user prompt containing only the information
+        required for scientifically faithful code generation.
+
+        Large provenance and duplicated evidence content are excluded
+        to reduce LLM context size and generation latency.
         """
-        prompt_specification = dict(specification)
+
         selected_hypothesis = specification.get(
             "selected_hypothesis",
             {},
         )
-        if isinstance(selected_hypothesis, dict):
-            prompt_specification["selected_hypothesis"] = {
-                key: selected_hypothesis.get(key)
-                for key in (
-                    "hypothesis_id",
-                    "title",
-                    "text",
-                    "evidence_source_ids",
-                    "evidence_sources",
-                )
-            }
 
-        prompt_specification.pop(
-            "ai_co_scientist_provenance",
-            None,
+        if not isinstance(
+            selected_hypothesis,
+            dict,
+        ):
+            selected_hypothesis = {}
+
+        evidence_sources = (
+            selected_hypothesis.get(
+                "evidence_sources",
+                [],
+            )
         )
-        prompt_specification["scientific_evaluation"] = {}
+
+        compact_evidence_sources = []
+
+        if isinstance(
+            evidence_sources,
+            list,
+        ):
+            for source in evidence_sources:
+                if not isinstance(
+                    source,
+                    dict,
+                ):
+                    continue
+
+                compact_source = {}
+
+                for key in (
+                    "source_id",
+                    "id",
+                    "url",
+                    "title",
+                    "name",
+                    "summary",
+                    "description",
+                    "source_type",
+                ):
+                    value = source.get(key)
+
+                    if value not in (
+                        None,
+                        "",
+                        [],
+                        {},
+                    ):
+                        compact_source[key] = value
+
+                compact_evidence_sources.append(
+                    compact_source
+                )
+
+        compact_hypothesis = {
+            "hypothesis_id": selected_hypothesis.get(
+                "hypothesis_id"
+            ),
+            "title": selected_hypothesis.get(
+                "title"
+            ),
+            "text": selected_hypothesis.get(
+                "text"
+            ),
+            "evidence_source_ids": selected_hypothesis.get(
+                "evidence_source_ids",
+                [],
+            ),
+            "evidence_sources": compact_evidence_sources,
+        }
+
+        compact_specification = {
+            "dataset": specification.get(
+                "dataset",
+                {},
+            ),
+            "dataset_schema": specification.get(
+                "dataset_schema",
+                {},
+            ),
+            "research_goal": specification.get(
+                "research_goal",
+                {},
+            ),
+            "selected_hypothesis": compact_hypothesis,
+            "reference_experiment": (
+                self._compact_reference_experiment(
+                    specification.get(
+                        "reference_experiment",
+                        {},
+                    )
+                )
+            ),
+            "experiment_design": specification.get(
+                "experiment_design",
+                {},
+            ),
+            "code_generation_requirements": specification.get(
+                "code_generation_requirements",
+                {},
+            ),
+            "evaluation_metrics": specification.get(
+                "evaluation_metrics",
+                [],
+            ),
+            "expected_artifacts": specification.get(
+                "expected_artifacts",
+                {},
+            ),
+        }
 
         specification_json = json.dumps(
             self._to_serializable(
-                prompt_specification
+                compact_specification
             ),
             ensure_ascii=False,
             indent=2,
@@ -1196,13 +1451,16 @@ experiment described by the following AI Co-Scientist experiment
 specification.
 
 The selected hypothesis is the Rank #1 hypothesis from the AI
-Co-Scientist workflow. Its evidence sources are provided as
-scientific guidance. Use them to understand the proposed method,
-experimental context, and relevant evaluation approach.
+Co-Scientist workflow. Its evidence sources and reference experiment
+provide scientific guidance.
+
+The selected hypothesis determines the research objective.
+Evidence sources provide the scientific reference methodology,
+experimental context, and reported results where explicitly available.
 
 The generated experiment must test the selected hypothesis as
-faithfully as possible using the specified dataset and available
-execution environment.
+faithfully as possible using the specified dataset and execution
+environment.
 
 EXPERIMENT SPECIFICATION
 ========================
@@ -1220,23 +1478,20 @@ The generated experiment MUST:
 4. Use PyTorch.
 5. Automatically use CUDA when available and CPU otherwise.
 6. Handle numerical and categorical features correctly.
-7. Handle missing values without dropping valid network records unnecessarily.
+7. Handle missing values without unnecessarily dropping valid records.
 8. Fit preprocessing components using training data only.
 9. Prevent data leakage.
 10. Create train, validation, and test partitions.
-11. Use the provided dataset schema to determine the available columns
+11. Use the provided dataset schema to determine available columns
     and their data types.
-12. Do not assume a fixed target-column name such as "Label".
+12. Do not assume a fixed target-column name.
 13. Determine the target variable from the experiment specification
-    and the provided dataset schema.
-14. Verify that the selected target variable actually exists in the
-    dataset before preprocessing.
-15. Keep the target variable available in the training DataFrame until
-    target extraction is complete. Do not pass a feature-only DataFrame
-    to preprocessing functions that require the target column.
-16. Exclude the target variable from the input features.
-17. Do not use target-derived, post-event, annotation, or metadata
-    columns as input features when they would cause data leakage.
+    and dataset schema.
+14. Verify that the target variable exists before preprocessing.
+15. Preserve the target column until target extraction is complete.
+16. Exclude the target variable from input features.
+17. Exclude target-derived or post-event features when they create
+    methodological or prediction-time leakage.
 18. Implement the model architecture required by the hypothesis.
 19. Train and validate the model.
 20. Save the best model checkpoint.
@@ -1248,68 +1503,89 @@ The generated experiment MUST:
 26. Print the selected device and GPU name when available.
 27. Remain executable without manual intervention.
 
-IMPORTANT:
+SCIENTIFIC FIDELITY
 
-Do not replace the selected model architecture with a generic MLP unless
-the hypothesis itself specifies an MLP.
-
-Do not change the scientific objective merely to improve execution speed.
-
-Use reasonable computational-efficiency techniques such as:
-
-- selecting a batch size appropriate for the dataset size, model complexity,
-  and available GPU memory;
-- preferring moderately large batch sizes for very large tabular datasets
-  when appropriate;
-- using efficient DataLoader configuration;
-- minimizing unnecessary CPU-to-GPU transfers;
-- using bounded training epochs;
-- using early stopping when validation performance has converged;
-- avoiding unnecessary repeated preprocessing or evaluation; and
-- avoiding unnecessarily large models or excessive training duration.
-
-Do not use a fixed batch size, epoch count, or early-stopping patience
-unless the experiment specification explicitly requires it.
-
-Do not change the scientific objective, dataset, target variable, or
-proposed architecture merely to reduce execution time.
-
-Before finalizing the experiment, consider whether any feature may leak
-information about the target variable, particularly features representing
-attack type, attack tool, outcome, post-event information, or other
-target-derived information. Exclude such features only when there is a
-clear methodological or prediction-time leakage reason, and record the
-decision in the experiment summary.
+- Do not change the research objective merely to improve execution speed.
+- Do not replace a specified architecture with a generic model.
+- Use applicable methodology from the reference experiment.
+- Do not copy unrelated methodology from an evidence source.
+- Clearly distinguish direct reproduction, scientific adaptation,
+  and proxy experimentation.
+- Do not claim a proxy experiment fully validates the original hypothesis.
+- Record assumptions, adaptations, differences, and limitations.
+- Do not invent paper results, metrics, datasets, architectures,
+  or experimental details.
 
 DATASET SCHEMA RULES
 
-The dataset schema provided in the experiment specification is the
-authoritative description of the currently available dataset.
-
-The experiment must be dataset-agnostic and must not hard-code
-dataset-specific column names.
+The dataset schema provided in the specification is authoritative
+for the currently available dataset.
 
 Before preprocessing:
 
 - Inspect the available columns.
-- Identify the target variable using the experiment specification
-  together with the dataset schema.
-- Verify that the target variable exists.
-- Preserve the target column in the training/validation/test DataFrames
-  until target extraction is performed.
-- Only then create feature matrices that exclude the target.
+- Identify the target using the experiment specification and schema.
+- Verify that the target exists.
+- Preserve the target column until target extraction.
+- Only then create feature matrices.
 - If the target cannot be identified unambiguously, fail with a clear
   error listing the available columns rather than guessing.
 
-The experiment may be executed against a different dataset in the
-future, so do not write logic that depends specifically on the current
-offline 5G-NIDD column names.
+The experiment must remain dataset-agnostic and must not hard-code
+current 5G-NIDD column names.
 
-Return ONLY complete executable Python source code.
+COMPUTATIONAL EFFICIENCY
 
-Do not return JSON.
+- Keep training computationally reasonable.
+- If the dataset exceeds 200000 rows, use a stratified random sample
+  of at most 200000 rows when appropriate and record the original
+  and sampled row counts.
+- Use a hardware-appropriate batch size.
+- Avoid unnecessarily large models.
+- Use at most 15 epochs unless the hypothesis explicitly requires more.
+- Use early stopping when scientifically appropriate.
+- Avoid repeated preprocessing and dataset loading.
+- Avoid unnecessary CPU/GPU transfers.
+- Preserve CPU compatibility.
+
+OUTPUT ARTIFACTS
+
+Save required artifacts inside EXPERIMENT_OUTPUT_DIR, including:
+
+- metrics.json
+- training_history.json
+- best_model.pt
+- required visualization files
+- experiment summary JSON
+
+TIMING
+
+The experiment must record:
+
+- training_seconds
+- evaluation_seconds
+- total_execution_seconds
+
+The final total_execution_seconds must represent the complete
+experiment wall-clock time and must be written to metrics.json.
+
+RESPONSE FORMAT
+
+Return exactly one valid JSON object with these fields:
+
+{{
+  "model_recommendation": {{}},
+  "experiment_plan": {{}},
+  "assumptions": [],
+  "dependencies": [],
+  "pytorch_code": "..."
+}}
+
+The "pytorch_code" field must contain the complete executable
+Python experiment.
+
 Do not return Markdown.
-Do not use Markdown code fences.
+Do not return Markdown code fences.
 Do not return explanations or commentary.
 """.strip()
 
@@ -2034,6 +2310,21 @@ Dataset:
                 )
             )
 
+            logger.info(
+                "CodeGeneration user prompt size: %d characters",
+                len(user_prompt),
+            )
+
+            logger.info(
+                "CodeGeneration system prompt size: %d characters",
+                len(system_prompt),
+            )
+
+            logger.info(
+                "CodeGeneration total prompt size: %d characters",
+                len(system_prompt) + len(user_prompt),
+            )
+
             response = _call_llm(
                 user_prompt,
                 temperature=self.temperature,
@@ -2306,14 +2597,19 @@ Dataset:
                 {},
             ),
             "selected_hypothesis": {
-                key: selected_hypothesis.get(key)
-                for key in (
-                    "hypothesis_id",
-                    "title",
-                    "text",
+                "hypothesis_id": selected_hypothesis.get(
+                    "hypothesis_id"
+                ),
+                "title": selected_hypothesis.get(
+                    "title"
+                ),
+                "text": selected_hypothesis.get(
+                    "text"
+                ),
+                "evidence_source_ids": selected_hypothesis.get(
                     "evidence_source_ids",
-                    "evidence_sources",
-                )
+                    [],
+                ),
             },
             "code_generation_requirements": specification.get(
                 "code_generation_requirements",
@@ -2322,6 +2618,14 @@ Dataset:
             "evaluation_metrics": specification.get(
                 "evaluation_metrics",
                 [],
+            ),
+            "reference_experiment": (
+                self._compact_reference_experiment(
+                    specification.get(
+                        "reference_experiment",
+                        {},
+                    )
+                )
             ),
         }
 
@@ -2372,26 +2676,30 @@ IMPORTANT:
 8. Preserve the intended model architecture whenever possible.
 9. Preserve the intended experiment objective.
 10. Preserve the required evaluation metrics.
-11. Preserve the train/validation/test evaluation design.
-12. Preserve checkpoint generation.
-13. Preserve training-history generation.
-14. Preserve required visualization generation.
-15. Save generated artifacts inside EXPERIMENT_OUTPUT_DIR.
-16. Use DATASET_PATH when it is available.
-17. Do not invent a different dataset.
-18. Do not remove required experiment functionality merely to
+11. Preserve the reference experiment model, task, methodology,
+    and evaluation requirements whenever they are applicable.
+12. Do not replace reference-specific metrics with generic
+    classification metrics merely to make the experiment run.
+13. Preserve the train/validation/test evaluation design.
+14. Preserve checkpoint generation.
+15. Preserve training-history generation.
+16. Preserve required visualization generation.
+17. Save generated artifacts inside EXPERIMENT_OUTPUT_DIR.
+18. Use DATASET_PATH when it is available.
+19. Do not invent a different dataset.
+20. Do not remove required experiment functionality merely to
     make the program run.
-19. Fix the actual root cause instead of hiding the error.
-20. Make the smallest scientifically reasonable correction.
-21. If the dataset structure is different from what the original
+21. Fix the actual root cause instead of hiding the error.
+22. Make the smallest scientifically reasonable correction.
+23. If the dataset structure is different from what the original
     code assumed, adapt the preprocessing to the actual dataset
     information available in the specification and error.
-22. Handle class-distribution and data-splitting problems
+24. Handle class-distribution and data-splitting problems
     robustly when necessary.
-23. Handle missing, categorical, and numerical data appropriately.
-24. Do not introduce data leakage.
-25. The repaired source must be valid executable Python.
-26. Do not use TODO, pass, placeholder code, or incomplete
+25. Handle missing, categorical, and numerical data appropriately.
+26. Do not introduce data leakage.
+27. The repaired source must be valid executable Python.
+28. Do not use TODO, pass, placeholder code, or incomplete
     implementations.
 
 The ExperimentRunner will execute the returned source again.
@@ -2449,7 +2757,7 @@ Return ONLY the complete corrected Python source code.
             repair_prompt,
             temperature=0.0,
             model=self.model,
-            system_prompt=self.build_system_prompt(),
+            system_prompt=self.REPAIR_SYSTEM_PROMPT,
             max_tokens=_output_token_limit(
                 "code_generation",
                 self.REPAIR_MAX_TOKENS,

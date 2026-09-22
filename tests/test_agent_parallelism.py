@@ -1,9 +1,17 @@
 """Offline concurrency tests for independent agent work."""
 
+from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from unittest.mock import patch
 
-from app.agents import EvolutionAgent, GenerationAgent, ReflectionAgent
+from app.agents import (
+    EvolutionAgent,
+    GenerationAgent,
+    RankingAgent,
+    ReflectionAgent,
+    call_llm_for_hypothesis_audit,
+)
+from app.config import config
 from app.models import ContextMemory, Hypothesis, ResearchGoal
 from app.rag_retriever import SearchQueryPlan
 
@@ -153,3 +161,48 @@ def test_evolution_strategies_run_concurrently_and_preserve_strategy_order():
 
     assert [hypothesis.evolution_strategy for hypothesis in evolved] == ["combination", "feasibility"]
     assert [attempt["strategy"] for attempt in context.last_evolution_attempts] == ["combination", "feasibility"]
+
+
+def _recording_executor(recorded: list[int]):
+    """Record each pool's worker count while keeping real concurrency."""
+
+    def factory(*args, **kwargs):
+        recorded.append(kwargs.get("max_workers", args[0] if args else None))
+        return ThreadPoolExecutor(*args, **kwargs)
+
+    return factory
+
+
+def test_hypothesis_audit_fan_out_follows_the_configured_worker_count():
+    """LM Studio serves concurrent requests from one shared context, so the
+    audit fan-out must stay configurable instead of hardcoding four."""
+
+    candidates = [{"hypothesis": f"Mechanism {index}.", "source_ids": []} for index in range(4)]
+    recorded: list[int] = []
+
+    with (
+        patch.dict(config["agent_parallelism"], {"generation_candidate_workers": 3}),
+        patch("app.agents_modules.generation_helpers.ThreadPoolExecutor", _recording_executor(recorded)),
+        patch("app.agents_modules.generation_helpers._call_llm", return_value="Error: offline"),
+    ):
+        call_llm_for_hypothesis_audit("Find a mechanism.", candidates, "retrieved context", {"arXiv:2205.15480v2"})
+
+    assert recorded == [3]
+
+
+def test_ranking_tournament_fan_out_follows_the_configured_worker_count():
+    hypotheses = [
+        Hypothesis("H1", "First", "First mechanism."),
+        Hypothesis("H2", "Second", "Second mechanism."),
+        Hypothesis("H3", "Third", "Third mechanism."),
+    ]
+    recorded: list[int] = []
+
+    with (
+        patch.dict(config["agent_parallelism"], {"ranking_workers": 3}),
+        patch("app.agents_modules.ranking.ThreadPoolExecutor", _recording_executor(recorded)),
+        patch("app.agents_modules.ranking.run_pairwise_debate", side_effect=RuntimeError("offline")),
+    ):
+        RankingAgent().run_tournament(hypotheses, ContextMemory(), _goal(top_k=3))
+
+    assert recorded == [3]

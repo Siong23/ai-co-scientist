@@ -60,12 +60,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..agents_modules.code_generation_agent import CodeGenerationAgent
+from app.paper_library import ChromaPaperLibrary
+
+from ..agents_modules.code_generation_agent import (
+    CodeGenerationAgent, 
+    _call_llm,
+)
 from .experiment_runner import ExperimentRunner
 from .experiment_comparator import ExperimentComparator
+from .paper_reader import PaperReader
 from ..data.dataset_manager import DatasetManager
 from ..utils import logger
-
+import app.experiments.paper_reader as pr
+print(pr.__file__)
 
 # ============================================================
 # Configuration
@@ -181,12 +188,16 @@ class ExperimentOrchestrator:
             python_executable=self.python_executable,
         )
 
-        self.experiment_runner = ExperimentRunner(
-            output_directory=RUNS_DIR,
-            python_executable=self.python_executable,
+        self.paper_library = ChromaPaperLibrary()
+
+        self.paper_reader = PaperReader(
+            paper_library=self.paper_library,
+            llm_callable=_call_llm,
         )
 
-        self.experiment_comparator = ExperimentComparator()
+        self.experiment_comparator = ExperimentComparator(
+            paper_library=self.paper_library
+        )
 
     # ========================================================
     # Directory Management
@@ -377,6 +388,104 @@ class ExperimentOrchestrator:
 
         return list(hypotheses)
 
+    @staticmethod
+    def _get_hypothesis_value(
+        hypothesis: Any,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        """
+        Read a value from either a hypothesis dictionary or object.
+        """
+
+        if hypothesis is None:
+            return default
+
+        if isinstance(hypothesis, dict):
+            return hypothesis.get(key, default)
+
+        return getattr(hypothesis, key, default)
+
+
+    def extract_reference_experiment(
+        self,
+        hypothesis: Any,
+    ) -> Dict[str, Any]:
+        """
+        Read the evidence papers associated with a hypothesis and
+        extract experiment information for code generation.
+
+        The extracted information is reference material only. It does
+        not replace the selected hypothesis.
+        """
+
+        if hypothesis is None:
+            return {}
+
+        evidence_sources = self._get_hypothesis_value(
+            hypothesis,
+            "evidence_sources",
+            default=[],
+        )
+
+        if not evidence_sources:
+            logger.info(
+                "No evidence sources found for the selected hypothesis."
+            )
+            return {}
+
+        if isinstance(evidence_sources, dict):
+            evidence_sources = [evidence_sources]
+
+        reference_sources: List[Dict[str, Any]] = []
+
+        for source in evidence_sources:
+            paper_url = self._extract_evidence_url(source)
+
+            if not paper_url:
+                logger.warning(
+                    "Evidence source does not contain a usable URL."
+                )
+                continue
+
+            try:
+                logger.info(
+                    "Extracting experiment reference from: %s",
+                    paper_url,
+                )
+
+                reference = (
+                    self.paper_reader.read_experiment_reference(
+                        paper_url,
+                        source=source,
+                    )
+                )
+
+                if not reference:
+                    logger.warning(
+                        "No experiment information extracted from: %s",
+                        paper_url,
+                    )
+                    continue
+
+                reference_sources.append(reference)
+
+            except Exception as error:
+                logger.warning(
+                    "Failed to read evidence paper %s: %s",
+                    paper_url,
+                    error,
+                )
+
+        if not reference_sources:
+            return {}
+
+        return {
+            "available": True,
+            "source_count": len(reference_sources),
+            "sources": reference_sources,
+        }
+
     # ========================================================
     # Reflection Routing
     # ========================================================
@@ -407,7 +516,7 @@ class ExperimentOrchestrator:
             ):
                 continue
 
-            report = getattr(
+            report = self._get_hypothesis_value(
                 hypothesis,
                 "reflection_report",
                 None,
@@ -418,7 +527,7 @@ class ExperimentOrchestrator:
 
             recommendation = (
                 self._safe_string(
-                    getattr(
+                    self._get_hypothesis_value(
                         report,
                         "recommendation",
                         "",
@@ -483,20 +592,24 @@ class ExperimentOrchestrator:
         """
         Check whether a hypothesis contains the minimum
         information required by the experiment layer.
-        """
 
+        Supports both Hypothesis objects and serialized
+        hypothesis dictionaries.
+        """
         if hypothesis is None:
             return False
 
-        if not getattr(
+        is_active = self._get_hypothesis_value(
             hypothesis,
             "is_active",
             False,
-        ):
+        )
+
+        if not is_active:
             return False
 
         text = self._safe_string(
-            getattr(
+            self._get_hypothesis_value(
                 hypothesis,
                 "text",
                 "",
@@ -532,7 +645,7 @@ class ExperimentOrchestrator:
 
         def elo_key(hypothesis: Any) -> float:
             score = self._safe_float(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "elo_score",
                     1200.0,
@@ -685,112 +798,112 @@ class ExperimentOrchestrator:
             return {}
 
         return {
-            "hypothesis_id": getattr(
+            "hypothesis_id": self._get_hypothesis_value(
                 hypothesis,
                 "hypothesis_id",
                 None,
             ),
-            "title": getattr(
+            "title": self._get_hypothesis_value(
                 hypothesis,
                 "title",
                 None,
             ),
-            "text": getattr(
+            "text": self._get_hypothesis_value(
                 hypothesis,
                 "text",
                 None,
             ),
-            "elo_score": getattr(
+            "elo_score": self._get_hypothesis_value(
                 hypothesis,
                 "elo_score",
                 None,
             ),
-            "novelty_review": getattr(
+            "novelty_review": self._get_hypothesis_value(
                 hypothesis,
                 "novelty_review",
                 None,
             ),
-            "feasibility_review": getattr(
+            "feasibility_review": self._get_hypothesis_value(
                 hypothesis,
                 "feasibility_review",
                 None,
             ),
             "review_comments": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "review_comments",
                     [],
                 )
             ),
             "references": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "references",
                     [],
                 )
             ),
             "review_reference_ids": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "review_reference_ids",
                     [],
                 )
             ),
-            "is_active": getattr(
+            "is_active": self._get_hypothesis_value(
                 hypothesis,
                 "is_active",
                 None,
             ),
-            "deactivation_reason": getattr(
+            "deactivation_reason": self._get_hypothesis_value(
                 hypothesis,
                 "deactivation_reason",
                 None,
             ),
             "parent_ids": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "parent_ids",
                     [],
                 )
             ),
-            "evolution_strategy": getattr(
+            "evolution_strategy": self._get_hypothesis_value(
                 hypothesis,
                 "evolution_strategy",
                 None,
             ),
             "evidence_source_ids": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "evidence_source_ids",
                     [],
                 )
             ),
             "evidence_sources": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "evidence_sources",
                     [],
                 )
             ),
-            "audit_score": getattr(
+            "audit_score": self._get_hypothesis_value(
                 hypothesis,
                 "audit_score",
                 None,
             ),
-            "audit_verdict": getattr(
+            "audit_verdict": self._get_hypothesis_value(
                 hypothesis,
                 "audit_verdict",
                 None,
             ),
             "audit_report": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "audit_report",
                     {},
                 )
             ),
             "reflection_report": self.serialize_reflection_report(
-                getattr(
+                self._get_hypothesis_value(
                     hypothesis,
                     "reflection_report",
                     None,
@@ -806,73 +919,128 @@ class ExperimentOrchestrator:
         self,
         research_goal: Any,
     ) -> Dict[str, Any]:
-        """
-        Serialize the actual ResearchGoal runtime fields.
-        """
 
         if research_goal is None:
             return {}
 
         return {
-            "description": getattr(
+            "description": self._get_hypothesis_value(
                 research_goal,
                 "description",
                 "",
             ),
-            "preferences": getattr(
+            "preferences": self._get_hypothesis_value(
                 research_goal,
                 "preferences",
                 None,
             ),
-            "idea_attributes": getattr(
+            "idea_attributes": self._get_hypothesis_value(
                 research_goal,
                 "idea_attributes",
                 None,
             ),
             "constraints": self._json_safe(
-                getattr(
+                self._get_hypothesis_value(
                     research_goal,
                     "constraints",
                     {},
                 )
             ),
-            "llm_model": getattr(
+            "llm_model": self._get_hypothesis_value(
                 research_goal,
                 "llm_model",
                 None,
             ),
-            "query_rewrite_model": getattr(
+            "query_rewrite_model": self._get_hypothesis_value(
                 research_goal,
                 "query_rewrite_model",
                 None,
             ),
-            "num_hypotheses": getattr(
+            "num_hypotheses": self._get_hypothesis_value(
                 research_goal,
                 "num_hypotheses",
                 None,
             ),
-            "generation_temperature": getattr(
+            "generation_temperature": self._get_hypothesis_value(
                 research_goal,
                 "generation_temperature",
                 None,
             ),
-            "reflection_temperature": getattr(
+            "reflection_temperature": self._get_hypothesis_value(
                 research_goal,
                 "reflection_temperature",
                 None,
             ),
-            "elo_k_factor": getattr(
+            "elo_k_factor": self._get_hypothesis_value(
                 research_goal,
                 "elo_k_factor",
                 None,
             ),
-            "top_k_hypotheses": getattr(
+            "top_k_hypotheses": self._get_hypothesis_value(
                 research_goal,
                 "top_k_hypotheses",
                 None,
             ),
         }
 
+
+    @classmethod
+    def _extract_evidence_url(
+        cls,
+        evidence_source: Any,
+    ) -> Optional[str]:
+        """
+        Extract a paper URL from an evidence-source object
+        or dictionary.
+        """
+
+        if evidence_source is None:
+            return None
+
+        if isinstance(evidence_source, str):
+            return (
+                evidence_source.strip()
+                or None
+            )
+
+        if isinstance(evidence_source, dict):
+            possible_keys = (
+                "url",
+                "paper_url",
+                "source_url",
+                "link",
+                "uri",
+            )
+
+            for key in possible_keys:
+                value = evidence_source.get(key)
+
+                if value:
+                    return str(value).strip()
+
+            return None
+
+        possible_attributes = (
+            "url",
+            "paper_url",
+            "source_url",
+            "link",
+            "uri",
+        )
+
+        for attribute in possible_attributes:
+            value = getattr(
+                evidence_source,
+                attribute,
+                None,
+            )
+
+            if value:
+                return str(value).strip()
+
+        return None
+
+   
     # ========================================================
     # Tournament Serialization
     # ========================================================
@@ -969,6 +1137,7 @@ class ExperimentOrchestrator:
         hypothesis: Any,
         research_goal: Optional[Any] = None,
         context: Optional[Any] = None,
+        reference_experiment: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Build the structured contract between the
@@ -983,6 +1152,14 @@ class ExperimentOrchestrator:
             raise ValueError(
                 "Cannot build an experiment specification "
                 "without a selected hypothesis."
+            )
+        
+        if reference_experiment is None:
+            reference_experiment = {}
+
+        if not isinstance(reference_experiment, dict):
+            raise TypeError(
+                "reference_experiment must be a dictionary."
             )
 
         hypothesis_data = self.serialize_hypothesis(
@@ -1025,6 +1202,10 @@ class ExperimentOrchestrator:
             "research_goal": research_goal_data,
 
             "selected_hypothesis": hypothesis_data,
+
+            "reference_experiment": self._json_safe(
+                reference_experiment
+            ),
 
             "scientific_evaluation": {
                 "alignment_score": reflection_report.get(
@@ -1364,6 +1545,7 @@ class ExperimentOrchestrator:
         context: Any,
         research_goal: Optional[Any] = None,
         hypothesis: Optional[Any] = None,
+        reference_experiment: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Prepare an automated experiment after the
@@ -1432,13 +1614,11 @@ class ExperimentOrchestrator:
             # Experiment ID
             # ------------------------------------------------
 
-            experiment_id = (
-                self.create_experiment_id(
-                    getattr(
-                        hypothesis,
-                        "hypothesis_id",
-                        None,
-                    )
+            experiment_id = self.create_experiment_id(
+                self._get_hypothesis_value(
+                    hypothesis,
+                    "hypothesis_id",
+                    None,
                 )
             )
 
@@ -1476,6 +1656,17 @@ class ExperimentOrchestrator:
             )
 
             # ------------------------------------------------
+            # Extract reference experiment from evidence
+            # ------------------------------------------------
+
+            if reference_experiment is None:
+                reference_experiment = (
+                    self.extract_reference_experiment(
+                        hypothesis
+                    )
+                )
+
+            # ------------------------------------------------
             # Build specification
             # ------------------------------------------------
 
@@ -1484,6 +1675,7 @@ class ExperimentOrchestrator:
                     hypothesis=hypothesis,
                     research_goal=research_goal,
                     context=context,
+                    reference_experiment=reference_experiment,
                 )
             )
 
@@ -1574,6 +1766,18 @@ class ExperimentOrchestrator:
         hypothesis and returns generated experiment code.
         """
 
+        logger.info(
+            "CodeGeneration specification size: %d characters",
+            len(json.dumps(specification, ensure_ascii=False)),
+        )
+
+        logger.info(
+            "Reference experiment size: %d characters",
+            len(json.dumps(
+                specification.get("reference_experiment", {}),
+                ensure_ascii=False,
+            )),
+        )
         # raise NotImplementedError(
         #     "CodeGenerationAgent has not yet "
         #     "been connected to ExperimentOrchestrator."
@@ -1746,6 +1950,7 @@ class ExperimentOrchestrator:
         context: Any,
         research_goal: Optional[Any] = None,
         hypothesis: Optional[Any] = None,
+        reference_experiment: Optional[Dict[str, Any]] = None,
         execute_generated_code: bool = False,
         timeout_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -1792,6 +1997,7 @@ class ExperimentOrchestrator:
                 context=context,
                 research_goal=research_goal,
                 hypothesis=hypothesis,
+                reference_experiment=reference_experiment,
             )
         )
 

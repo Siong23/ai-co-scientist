@@ -306,6 +306,7 @@ def test_evolution_runs_independent_strategies_concurrently():
     agent = EvolutionAgent(
         strategies=("combination", "feasibility", "out_of_box"),
         max_candidates_per_cycle=3,
+        max_workers=3,
     )
     all_started = threading.Barrier(3, timeout=2)
 
