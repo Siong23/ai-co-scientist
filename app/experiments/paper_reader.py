@@ -7,12 +7,14 @@ and experiment details for use by the automated experiment pipeline.
 
 import io
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional
 
 import requests
 from pypdf import PdfReader
-from responses import logger
+
+logger = logging.getLogger(__name__)
 
 
 class PaperReader:
@@ -381,7 +383,7 @@ PAPER EXPERIMENTAL TEXT:
             logger.info(
                 "PaperReader experiment-details LLM call: reasoning=off"
             )
-            
+
             response = self.llm_callable(
                 prompt,
                 temperature=0.0,
