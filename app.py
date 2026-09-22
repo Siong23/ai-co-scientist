@@ -35,9 +35,12 @@ from app.run_store import (
     write_report,
 )
 from app.runtime_logging import configure_runtime_logging
+from app.tools.tavily_search import cycle_usage as web_search_usage
+from app.tools.tavily_search import reset_cycle_usage as reset_web_search_usage
 from app.utils import (
     classify_llm_error,
     execution_budget,
+    execution_remaining_seconds,
     fetch_lmstudio_models,
     get_lmstudio_base_url,
     get_lmstudio_model,
@@ -65,6 +68,15 @@ EXPERIMENT_TIMEOUT_SECONDS = int(
     os.getenv(
         "EXPERIMENT_TIMEOUT_SECONDS",
         "600",
+    )
+)
+# Smallest slice of the remaining cycle budget worth handing to the experiment.
+# Below this the app skips it and reports the finished hypotheses instead of
+# spending the rest of the cycle on work the deadline would discard anyway.
+EXPERIMENT_MIN_BUDGET_SECONDS = int(
+    os.getenv(
+        "EXPERIMENT_MIN_BUDGET_SECONDS",
+        "300",
     )
 )
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
@@ -348,7 +360,7 @@ def format_experiment_results_html(
 
     import html as html_lib
 
-    if experiment_result.get("status") == "skipped_for_research_type":
+    if str(experiment_result.get("status", "")).startswith("skipped"):
         research_type = html_lib.escape(str(experiment_result.get("research_type") or "this research mode"))
         reason = html_lib.escape(
             str(experiment_result.get("reason") or "No hypothesis candidate was available to test.")
@@ -743,6 +755,9 @@ def execute_cycle(
         # Start timing the cycle execution
         start_time = time.perf_counter()
 
+        # Tavily bills per request, so each cycle accounts for its own spend.
+        reset_web_search_usage()
+
         print("\n" + "=" * 60)
         print("AI CO-SCIENTIST AUTOMATED PIPELINE")
         print("=" * 60)
@@ -764,18 +779,36 @@ def execute_cycle(
         # ================================================
 
         hypothesis_pipeline_enabled = context.uses_hypothesis_pipeline()
+
+        # The experiment shares one deadline with the agent workflow, so give it
+        # only the time that workflow left over. Without this the run keeps
+        # training past the cycle limit and the app discards the whole cycle
+        # moments before the results land.
+        remaining_budget_seconds = execution_remaining_seconds()
+        experiment_timeout_seconds = EXPERIMENT_TIMEOUT_SECONDS
+        if remaining_budget_seconds is not None:
+            experiment_timeout_seconds = int(min(EXPERIMENT_TIMEOUT_SECONDS, remaining_budget_seconds))
+        experiment_has_budget = experiment_timeout_seconds >= EXPERIMENT_MIN_BUDGET_SECONDS
+        experiment_enabled = hypothesis_pipeline_enabled and experiment_has_budget
         print("\n" + "=" * 60)
         print("AI CO-SCIENTIST WORKFLOW COMPLETED")
         print(
             "STARTING AUTOMATED EXPERIMENT PIPELINE"
-            if hypothesis_pipeline_enabled
+            if experiment_enabled
             else "AUTOMATED EXPERIMENT NOT APPLICABLE TO THIS RESEARCH MODE"
         )
         print("=" * 60)
 
-        if hypothesis_pipeline_enabled:
+        if experiment_enabled:
             print("\n[2/2] Running automated deep-learning experiment...")
             logger.debug("Starting automated experiment pipeline.")
+        elif hypothesis_pipeline_enabled:
+            print("\n[2/2] Skipping the automated experiment: not enough cycle budget left.")
+            logger.warning(
+                "Skipping the automated experiment: %s of the cycle budget left, minimum is %s.",
+                format_timeout_duration(max(remaining_budget_seconds or 0.0, 0.0)),
+                format_timeout_duration(EXPERIMENT_MIN_BUDGET_SECONDS),
+            )
         else:
             print("\n[2/2] Skipping hypothesis-dependent automated experiment.")
             logger.info(
@@ -786,13 +819,17 @@ def execute_cycle(
         capture_progress(
             {
                 "step": "experiment",
-                "status": "running" if hypothesis_pipeline_enabled else "completed",
+                "status": "running" if experiment_enabled else "completed",
                 "title": "Automated Experiment",
                 "summary": (
                     "Selecting the best hypothesis and starting the PyTorch experiment."
-                    if hypothesis_pipeline_enabled
+                    if experiment_enabled
                     else (
-                        f"Skipped for {context.research_type}: this research plan has no hypothesis candidate to test."
+                        f"Skipped: only {format_timeout_duration(max(remaining_budget_seconds or 0.0, 0.0))} "
+                        f"of the cycle budget was left, and the experiment needs at least "
+                        f"{format_timeout_duration(EXPERIMENT_MIN_BUDGET_SECONDS)}."
+                        if hypothesis_pipeline_enabled
+                        else f"Skipped for {context.research_type}: this research plan has no hypothesis candidate to test."
                     )
                 ),
                 "details": [],
@@ -806,7 +843,7 @@ def execute_cycle(
             "errors": [],
         }
 
-        if hypothesis_pipeline_enabled:
+        if experiment_enabled:
             dataset_manager = DatasetManager(
                 dataset_name="5G-NIDD",
                 dataset_path="data/5g_nidd/5g_nidd.csv",
@@ -825,7 +862,7 @@ def execute_cycle(
                 context=context,
                 research_goal=research_goal,
                 execute_generated_code=True,
-                timeout_seconds=(EXPERIMENT_TIMEOUT_SECONDS),
+                timeout_seconds=experiment_timeout_seconds,
             )
             selected_hypothesis = (
                 experiment_result
@@ -842,6 +879,20 @@ def execute_cycle(
                     selected_hypothesis,
                     experiment_result.get("execution", {}),
                 )
+        elif hypothesis_pipeline_enabled:
+            experiment_result = {
+                "success": False,
+                "status": "skipped_no_cycle_budget",
+                "skipped": True,
+                "research_type": context.research_type,
+                "reason": (
+                    f"Only {format_timeout_duration(max(remaining_budget_seconds or 0.0, 0.0))} of the cycle "
+                    f"budget was left and the experiment needs at least "
+                    f"{format_timeout_duration(EXPERIMENT_MIN_BUDGET_SECONDS)}. The hypotheses above are complete; "
+                    "raise CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS to run the experiment in the same cycle."
+                ),
+                "errors": [],
+            }
         else:
             experiment_result = {
                 "success": False,
@@ -852,13 +903,13 @@ def execute_cycle(
                 "errors": [],
             }
 
-        if not hypothesis_pipeline_enabled:
+        if not experiment_enabled:
             comparison_result = {
                 "success": False,
-                "status": "skipped_for_research_type",
+                "status": experiment_result.get("status", "skipped_for_research_type"),
                 "conclusion": (
-                    "Paper comparison was skipped because this research mode "
-                    "does not produce a hypothesis candidate."
+                    "Paper comparison was skipped because the experiment did not run: "
+                    f"{experiment_result.get('reason', '')}".strip()
                 ),
                 "errors": [],
             }
@@ -866,7 +917,7 @@ def execute_cycle(
         cycle_details["experiment_result"] = experiment_result
         cycle_details["comparison_result"] = comparison_result
 
-        if experiment_result.get("status") == "skipped_for_research_type":
+        if str(experiment_result.get("status", "")).startswith("skipped"):
             pass
         elif experiment_result.get(
             "success",
@@ -943,6 +994,16 @@ def execute_cycle(
         cycle_details["execution_time_formatted"] = formatted_time
 
         logger.info(f"Cycle execution time: {formatted_time}")
+
+        web_usage = web_search_usage()
+        cycle_details["web_search_usage"] = web_usage
+        logger.info(
+            "Tavily usage this cycle: %d search call(s), %d extract call(s), %d served from cache, %d skipped on budget.",
+            web_usage.get("search_calls", 0),
+            web_usage.get("extract_calls", 0),
+            web_usage.get("search_cache_hits", 0) + web_usage.get("extract_cache_hits", 0),
+            web_usage.get("budget_skips", 0),
+        )
 
         # Log all steps and hypotheses
         steps = cycle_details.get("steps", {})

@@ -1885,13 +1885,15 @@ Your refined contribution:
 
         expanded_retrieval_attempted = False
 
-        # If original goal returned no documents, execute the planned search queries
+        # If original goal returned no documents, execute the planned search queries.
+        # The planner already routes each query to academic or web sources, so web
+        # search is left to the queries that asked for it; corrective retrieval
+        # below still forces it when the routed evidence falls short.
         if not candidate_documents:
             try:
                 candidate_documents = self._retrieve_scientific_sources(
                     research_goal,
                     query_plan,
-                    force_web=True,
                 )
                 expanded_retrieval_attempted = True
             except Exception as exc:
@@ -2035,13 +2037,13 @@ Your refined contribution:
                 break
 
             # If original-goal search was insufficient, run planned expanded queries
+            # on the planner's own routing; corrective rounds add forced web search.
             if not expanded_retrieval_attempted:
                 logger.info("Original-goal retrieval was insufficient; starting expanded-query retrieval.")
                 try:
                     expanded_documents = self._retrieve_scientific_sources(
                         research_goal,
                         query_plan,
-                        force_web=True,
                     )
                 except Exception as exc:
                     logger.error(

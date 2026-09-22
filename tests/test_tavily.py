@@ -1,8 +1,20 @@
 """Offline tests for the Tavily web-search integration."""
 
+import time
 from unittest.mock import Mock, patch
 
-from app.tools.tavily_search import TavilySearchTool
+import pytest
+
+from app.tools.tavily_search import TavilySearchTool, cycle_usage, reset_cycle_usage
+
+
+@pytest.fixture(autouse=True)
+def _reset_web_search_usage():
+    """Keep each test's per-cycle call accounting independent."""
+
+    reset_cycle_usage()
+    yield
+    reset_cycle_usage()
 
 
 def _response(results: list[dict], status_code: int = 200) -> Mock:
@@ -160,3 +172,110 @@ def test_historical_search_papers_alias_returns_web_schema(monkeypatch):
 
     assert evidence[0]["canonical_url"] == "https://example.com/guidance"
     assert "abstract" not in evidence[0]
+
+
+def test_repeated_search_is_served_from_the_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    tool = TavilySearchTool(
+        max_results=4,
+        cache_directory=tmp_path / "tavily_cache",
+        cache_ttl_seconds=3600,
+    )
+    result = {
+        "title": "Edge security study",
+        "url": "https://example.com/paper",
+        "content": "A relevant abstract from the web.",
+    }
+
+    with patch("app.tools.tavily_search.requests.post", return_value=_response([result])) as mock_post:
+        first = tool.search("edge security")
+        second = tool.search("edge security")
+
+    assert mock_post.call_count == 1
+    assert first == second
+    usage = cycle_usage()
+    assert usage["search_calls"] == 1
+    assert usage["search_cache_hits"] == 1
+
+
+def test_a_different_query_is_not_served_from_the_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    tool = TavilySearchTool(
+        cache_directory=tmp_path / "tavily_cache",
+        cache_ttl_seconds=3600,
+    )
+    result = {
+        "title": "Edge security study",
+        "url": "https://example.com/paper",
+        "content": "A relevant abstract from the web.",
+    }
+
+    with patch("app.tools.tavily_search.requests.post", return_value=_response([result])) as mock_post:
+        tool.search("edge security")
+        tool.search("handover optimization")
+
+    assert mock_post.call_count == 2
+
+
+def test_an_expired_cache_entry_is_refetched(monkeypatch, tmp_path):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    tool = TavilySearchTool(
+        cache_directory=tmp_path / "tavily_cache",
+        cache_ttl_seconds=0.0001,
+    )
+    result = {
+        "title": "Edge security study",
+        "url": "https://example.com/paper",
+        "content": "A relevant abstract from the web.",
+    }
+
+    with patch("app.tools.tavily_search.requests.post", return_value=_response([result])) as mock_post:
+        tool.search("edge security")
+        time.sleep(0.01)
+        tool.search("edge security")
+
+    assert mock_post.call_count == 2
+
+
+def test_search_stops_calling_tavily_once_the_cycle_budget_is_spent(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    tool = TavilySearchTool(max_searches_per_cycle=2)
+    result = {
+        "title": "Edge security study",
+        "url": "https://example.com/paper",
+        "content": "A relevant abstract from the web.",
+    }
+
+    with patch("app.tools.tavily_search.requests.post", return_value=_response([result])) as mock_post:
+        tool.search("first query")
+        tool.search("second query")
+        blocked = tool.search("third query")
+
+    assert mock_post.call_count == 2
+    assert blocked == []
+    assert tool.last_error_kind == "cycle_budget_exhausted"
+    assert cycle_usage()["budget_skips"] == 1
+
+
+def test_extract_budget_is_counted_separately_and_reset_per_cycle(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    tool = TavilySearchTool(max_extracts_per_cycle=1)
+    extracted_result = {
+        "url": "https://example.com/guidance",
+        "raw_content": "relevant evidence",
+    }
+
+    with patch(
+        "app.tools.tavily_search.requests.post",
+        return_value=_response([extracted_result]),
+    ) as mock_post:
+        tool.extract(["https://example.com/guidance"], query="MEC security")
+        blocked = tool.extract(["https://example.com/other"], query="MEC security")
+        assert mock_post.call_count == 1
+        assert blocked == {}
+
+        reset_cycle_usage()
+        tool.extract(["https://example.com/other"], query="MEC security")
+
+    assert mock_post.call_count == 2
+    assert cycle_usage()["extract_urls"] == 1

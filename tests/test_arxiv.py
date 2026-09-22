@@ -36,6 +36,27 @@ def test_natural_language_query_uses_fielded_and_connected_concepts():
     assert "framework" not in query
 
 
+def test_compound_phrases_are_combined_with_or_not_and():
+    """Requiring several exact phrases at once returns nothing from arXiv."""
+
+    query = build_arxiv_query(
+        "Develop an AI-driven self-optimizing 5G network architecture with energy-saving mechanisms"
+    )
+
+    assert '(all:"ai driven" OR all:"self optimizing" OR all:"energy saving")' in query
+    assert 'all:"ai driven" AND all:"self optimizing"' not in query
+
+
+def test_the_phrase_group_counts_as_one_concept_against_the_limit():
+    query = build_arxiv_query(
+        "Develop an AI-driven self-optimizing 5G network architecture with energy-saving mechanisms",
+        max_concepts=2,
+    )
+
+    assert query.count(" AND ") == 1
+    assert query.startswith('(all:"ai driven" OR ')
+
+
 def test_existing_arxiv_field_syntax_is_preserved():
     query = '(ti:"network slicing" OR abs:"network slicing") AND cat:cs.NI'
 
