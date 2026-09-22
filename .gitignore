@@ -20,3 +20,5 @@ pytest-of-*/
 app/paper/*.pdf
 app/paper/*.part
 .vscode/
+.env.local
+reports/
