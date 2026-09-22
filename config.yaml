@@ -66,7 +66,7 @@ evolution:
     - out_of_box
   max_candidates_per_cycle: 3
   # Independent evolution strategies are submitted together to reduce wall time.
-  max_workers: 3
+  max_workers: 2
   # Retry once only when a syntactically valid child fails the Evolution
   # quality gate (near-copy, multiple hypotheses, or stitched combination).
   quality_repair_attempts: 1
@@ -75,11 +75,16 @@ evolution:
   transport_retry_attempts: 2
 
 # Independent per-hypothesis work is safe to batch in LM Studio. Keep this
-# bounded: large local models still need KV-cache memory for every live request.
+# bounded: LM Studio serves every concurrent request from one shared context,
+# so the budget is the sum of all live prompts plus what they generate. Four
+# long prompts overrun a 50k context mid-generation, and the server then fails
+# every request in flight, not just the one that crossed the line.
 agent_parallelism:
   generation_grading_workers: 2
-  reflection_workers: 3
-  evolution_workers: 3
+  generation_candidate_workers: 2
+  ranking_workers: 2
+  reflection_workers: 2
+  evolution_workers: 2
 
 # Elo K-factor
 elo_k_factor: 32
@@ -111,7 +116,7 @@ ranking:
 # Hypothesis reviews are independent and can be scheduled together instead of
 # blocking one another serially. Tune this to the local server's capacity.
 reflection:
-  max_workers: 3
+  max_workers: 2
   # Deep verification decomposes a hypothesis into the assumptions it depends
   # on and judges each one independently, which catches an unsound step that a
   # single combined review scores past. It costs one extra call per hypothesis.

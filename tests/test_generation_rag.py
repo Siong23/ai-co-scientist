@@ -816,7 +816,10 @@ def test_hypothesis_auditor_runs_candidates_concurrently_and_preserves_order():
         }
         return _audit_payload(final_hypothesis)
 
-    with patch("app.agents.call_llm", side_effect=audit_candidate) as mock_call:
+    with (
+        patch.dict(config["agent_parallelism"], {"generation_candidate_workers": len(candidates)}),
+        patch("app.agents.call_llm", side_effect=audit_candidate) as mock_call,
+    ):
         audits, error = call_llm_for_hypothesis_audit(
             "Improve network performance.",
             candidates,

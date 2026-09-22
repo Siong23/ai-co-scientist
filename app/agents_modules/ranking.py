@@ -136,7 +136,11 @@ class RankingAgent:
                 )
                 return None
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        ranking_workers = max(
+            1,
+            int(config.get("agent_parallelism", {}).get("ranking_workers", 2)),
+        )
+        with ThreadPoolExecutor(max_workers=ranking_workers) as executor:
             results = list(executor.map(run_match, pairs))
 
         # ---- Sequential Elo Update + Save Results ----

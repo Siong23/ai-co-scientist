@@ -1793,7 +1793,11 @@ Requirements:
             candidate_index,
         )
     elif valid_candidates:
-        with ThreadPoolExecutor(max_workers=min(4, len(valid_candidates))) as executor:
+        candidate_workers = max(
+            1,
+            int(config.get("agent_parallelism", {}).get("generation_candidate_workers", 2)),
+        )
+        with ThreadPoolExecutor(max_workers=min(candidate_workers, len(valid_candidates))) as executor:
             results = executor.map(
                 lambda indexed_candidate: (
                     indexed_candidate[0],
