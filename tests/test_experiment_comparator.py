@@ -559,7 +559,7 @@ def test_compare_success(monkeypatch):
     monkeypatch.setattr(
         comparator,
         "extract_paper_results",
-        lambda hypothesis: create_paper_result(),
+        lambda hypothesis, reference_experiment=None: create_paper_result(),
     )
 
     # Mock scientific explanation.
@@ -658,7 +658,7 @@ def test_compare_without_experiment_metrics(monkeypatch):
     monkeypatch.setattr(
         comparator,
         "extract_paper_results",
-        lambda hypothesis: create_paper_result(),
+        lambda hypothesis, reference_experiment=None: create_paper_result(),
     )
 
     result = comparator.compare(

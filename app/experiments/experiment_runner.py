@@ -77,15 +77,18 @@ class ExperimentRunner:
         ".pdf",
     }
 
-    REQUIRED_METRICS = {
+    REQUIRED_SCALAR_METRICS = {
         "accuracy",
         "precision_weighted",
         "recall_weighted",
         "f1_weighted",
-        "confusion_matrix",
         "training_seconds",
         "evaluation_seconds",
         "total_execution_seconds",
+    }
+
+    REQUIRED_STRUCTURED_METRICS = {
+        "confusion_matrix",
     }
 
     # A generated script often records the run's timings in
@@ -97,6 +100,25 @@ class ExperimentRunner:
         "training_seconds",
         "evaluation_seconds",
         "total_execution_seconds",
+    }
+
+    METRIC_ALIASES = {
+        "accuracy": (
+            "accuracy",
+            "test_accuracy",
+        ),
+        "precision_weighted": (
+            "precision_weighted",
+            "test_precision_weighted",
+        ),
+        "recall_weighted": (
+            "recall_weighted",
+            "test_recall_weighted",
+        ),
+        "f1_weighted": (
+            "f1_weighted",
+            "test_f1_weighted",
+        ),
     }
 
     REQUIRED_VISUALIZATION_STEMS = {
@@ -1207,22 +1229,71 @@ class ExperimentRunner:
             if metrics is None:
                 warnings.append("metrics.json was not found.")
             else:
-                available_metrics = set(metrics)
                 summary = outputs.get("experiment_summary")
-                if isinstance(summary, dict):
-                    available_metrics |= {
-                        key
-                        for key in ExperimentRunner.TIMING_METRICS & set(summary)
-                        if isinstance(summary[key], (int, float))
-                        and not isinstance(summary[key], bool)
-                        and math.isfinite(summary[key])
-                    }
 
-                missing_metrics = sorted(ExperimentRunner.REQUIRED_METRICS - available_metrics)
+                # ------------------------------------------------
+                # Scalar metrics
+                # ------------------------------------------------
+
+                missing_metrics = []
+
+                for required_metric in ExperimentRunner.REQUIRED_SCALAR_METRICS:
+                    aliases = ExperimentRunner.METRIC_ALIASES.get(
+                        required_metric,
+                        (required_metric,),
+                    )
+
+                    found_valid_metric = False
+
+                    # Check metrics.json.
+                    for alias in aliases:
+                        value = metrics.get(alias)
+
+                        if (
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(value)
+                        ):
+                            found_valid_metric = True
+                            break
+
+                    # Timing values may also be stored in
+                    # experiment_summary.json.
+                    if (
+                        not found_valid_metric
+                        and required_metric in ExperimentRunner.TIMING_METRICS
+                        and isinstance(summary, dict)
+                    ):
+                        value = summary.get(required_metric)
+
+                        if (
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(value)
+                        ):
+                            found_valid_metric = True
+
+                    if not found_valid_metric:
+                        missing_metrics.append(required_metric)
+
+                # ------------------------------------------------
+                # Structured metrics
+                # ------------------------------------------------
+
+                for required_metric in ExperimentRunner.REQUIRED_STRUCTURED_METRICS:
+                    if required_metric not in metrics:
+                        missing_metrics.append(required_metric)
+
                 if missing_metrics:
-                    warnings.append("metrics.json is missing required fields: " + ", ".join(missing_metrics))
+                    warnings.append(
+                        "Experiment outputs are missing required metrics: "
+                        + ", ".join(sorted(missing_metrics))
+                    )
+
                 if ExperimentRunner._has_nonfinite_number(metrics):
-                    warnings.append("metrics.json contains NaN or infinite values.")
+                    warnings.append(
+                        "metrics.json contains NaN or infinite values."
+                    )
 
             if history is None:
                 warnings.append("training_history.json was not found.")

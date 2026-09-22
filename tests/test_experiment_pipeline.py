@@ -452,7 +452,7 @@ def test_timings_are_still_required_somewhere():
     )
 
     assert validation["valid"] is False
-    assert "missing required fields" in " ".join(validation["warnings"])
+    assert "missing required metrics" in " ".join(validation["warnings"])
 
 
 def test_a_nonfinite_summary_timing_does_not_satisfy_the_contract():
