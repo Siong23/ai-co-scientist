@@ -38,16 +38,38 @@ def _parse_string_list(value: object) -> List[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
+# The DeepEval "Goal alignment" metric passes at 0.7 of a 0-10 judge scale, so a
+# hypothesis the reviewer scores below 7/10 for alignment would fail it.
+_DEFAULT_MIN_ALIGNMENT_SCORE = 7
+
+
+def _min_alignment_score() -> int:
+    """Return the alignment score a hypothesis needs before it can be accepted."""
+
+    reflection_config = config.get("reflection", {})
+    if not isinstance(reflection_config, dict):
+        return _DEFAULT_MIN_ALIGNMENT_SCORE
+    try:
+        configured = int(reflection_config.get("min_alignment_score", _DEFAULT_MIN_ALIGNMENT_SCORE))
+    except (TypeError, ValueError):
+        return _DEFAULT_MIN_ALIGNMENT_SCORE
+    return min(10, max(1, configured))
+
+
 def _recommendation_from_scores(scores: Dict[str, int]) -> str:
     """Return REJECT / REVISE / ACCEPT based on minimum criterion scores.
 
     - REJECT: any criterion scores below 3 (hypothesis should be deactivated).
-    - REVISE: any criterion scores in [3, 4] (hypothesis needs revision).
-    - ACCEPT: all criteria score 5 or above (hypothesis proceeds to ranking).
+    - REVISE: any criterion scores in [3, 4], or alignment scores below the
+      configured minimum (hypothesis needs revision).
+    - ACCEPT: all criteria score 5 or above and alignment meets the minimum
+      (hypothesis proceeds to ranking).
     """
     if any(scores.get(field, 0) < 3 for field in _SCORE_FIELDS):
         return "REJECT"
     if any(scores.get(field, 0) < 5 for field in _SCORE_FIELDS):
+        return "REVISE"
+    if scores.get("alignment_score", 0) < _min_alignment_score():
         return "REVISE"
     return "ACCEPT"
 
@@ -441,7 +463,12 @@ def call_llm_for_reflection(
         f"{_format_prior_art_check(hypothesis)}"
         f"{_format_recurring_review_guidance(context)}"
         "Review the hypothesis thoroughly and rate it on the following criteria using integer scores from 1 to 10 (no decimals):\n\n"
-        "1. alignment_score (1-10): How well does this hypothesis align with the research goal and constraints?\n"
+        "1. alignment_score (1-10): Goal alignment. Identify the central objective and every explicit "
+        "requirement or constraint stated in the research goal, and the intervention, mechanism, and "
+        "intended outcome the hypothesis proposes. Check each explicit requirement against the hypothesis "
+        "text and note any it ignores or contradicts. Score how directly and completely it addresses the "
+        "whole goal: at most 6 if any explicit requirement is missing, and penalize tangential, generic, "
+        "or only partially responsive proposals. Name each missing requirement in weaknesses.\n"
         "2. novelty_score (1-10): How original is this idea relative to existing literature? (1=No novelty, 10=Highly novel)\n"
         "3. feasibility_score (1-10): Can this be experimentally tested with current techniques? (1=Infeasible, 10=Highly feasible)\n"
         "4. plausibility_score (1-10): How theoretically sound and plausible is this hypothesis?\n"
@@ -626,7 +653,7 @@ def call_llm_for_hypothesis_revision(
     temperature: float = 0.5,
     model: str | None = None,
 ) -> Dict | None:
-    """Revise a REVISE-flagged hypothesis so every reflection criterion could score 4+."""
+    """Revise a REVISE-flagged hypothesis so it could clear every reflection gate."""
 
     research_goal_context = {
         "description": research_goal.description,
@@ -640,10 +667,12 @@ def call_llm_for_hypothesis_revision(
 
     prompt = (
         "You are a scientific hypothesis revision expert. A peer reviewer scored the "
-        "hypothesis below below 4 out of 10 on at least one criterion (alignment, "
+        "hypothesis below the acceptance bar on at least one criterion (alignment, "
         "novelty, feasibility, plausibility, testability, evidence quality, or "
         "expected research value) and recommended REVISE.\n\n"
-        "Rewrite the hypothesis so every criterion could score at least 4/10. Directly "
+        "Rewrite the hypothesis so every criterion could score at least 5/10 and "
+        f"alignment at least {_min_alignment_score()}/10: the revised hypothesis must "
+        "address every explicit requirement of the research goal, not a subset. Directly "
         "fix the weaknesses and review comments below while preserving the noted "
         "strengths. Stay within the research goal's description, preferences, "
         "idea_attributes, and constraints below. Only cite Source IDs already present "

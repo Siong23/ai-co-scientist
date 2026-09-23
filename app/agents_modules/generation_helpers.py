@@ -49,6 +49,59 @@ def _output_token_limit(task: str, default: int) -> int:
         return default
 
 
+_QUOTE_TOKEN = re.compile(r"\w+(?:[-']\w+)*")
+# A quote may skip at most this many stretches of the goal, which covers a
+# shared lead-in applied to one list item ("adjusting ... handover policies")
+# plus a trailing qualifier, without letting scattered goal words pass.
+_MAX_GOAL_QUOTE_ELISIONS = 2
+
+
+def goal_quote_is_faithful(goal_quote: str, research_goal: str) -> bool:
+    """Return whether a quote uses only the goal's own words, in the goal's order.
+
+    A verbatim span always passes. So does a span that elides part of the goal,
+    as a planner does when it distributes a shared verb over a coordinated list:
+    "dynamically adjusting network slices" from "dynamically adjusting radio
+    resources, network slices, ...". Each kept stretch must still appear
+    contiguously and in order, so a quote cannot introduce a word the goal lacks.
+    """
+
+    normalized_goal = " ".join(research_goal.casefold().split())
+    normalized_quote = " ".join(goal_quote.casefold().split())
+    if not normalized_quote:
+        return False
+    if normalized_quote in normalized_goal:
+        return True
+
+    goal_tokens = _QUOTE_TOKEN.findall(normalized_goal)
+    quote_tokens = _QUOTE_TOKEN.findall(normalized_quote)
+    if not quote_tokens:
+        return False
+
+    def find_run(run: list[str], start: int) -> int:
+        """Return the end of the first contiguous occurrence at or after start, or -1."""
+        width = len(run)
+        for index in range(start, len(goal_tokens) - width + 1):
+            if goal_tokens[index : index + width] == run:
+                return index + width
+        return -1
+
+    def matches(remaining: list[str], start: int, segments_left: int) -> bool:
+        if not remaining:
+            return True
+        if segments_left == 0:
+            return False
+        # Try the longest leading run first; any split that keeps every run
+        # contiguous and ordered is acceptable.
+        for width in range(len(remaining), 0, -1):
+            end = find_run(remaining[:width], start)
+            if end != -1 and matches(remaining[width:], end, segments_left - 1):
+                return True
+        return False
+
+    return matches(quote_tokens, 0, _MAX_GOAL_QUOTE_ELISIONS + 1)
+
+
 # Required fields for any valid candidate hypothesis emitted by the LLM
 _GENERATION_REQUIRED_FIELDS = {
     "title",
@@ -460,7 +513,6 @@ def call_llm_for_search_queries(
         if not isinstance(raw_hypotheses, list):
             raise ValueError("Research Planner must return provisional_hypotheses.")
 
-        normalized_goal = " ".join(research_goal.casefold().split())
         hypotheses: list[ProvisionalHypothesis] = []
         seen_ids: set[str] = set()
         seen_roles: set[str] = set()
@@ -471,14 +523,12 @@ def call_llm_for_search_queries(
             role = str(raw_hypothesis.get("role", "")).strip().casefold()
             statement = str(raw_hypothesis.get("statement", "")).strip()
             goal_quote = str(raw_hypothesis.get("goal_quote", "")).strip()
-            normalized_quote = " ".join(goal_quote.casefold().split())
             if (
                 not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", hypothesis_id)
                 or role not in {"primary", "alternative", "null"}
                 or not statement
                 or len(statement.split()) > 60
-                or not normalized_quote
-                or normalized_quote not in normalized_goal
+                or not goal_quote_is_faithful(goal_quote, research_goal)
                 or len(goal_quote.split()) > 16
                 or hypothesis_id in seen_ids
                 or role in seen_roles
@@ -648,15 +698,12 @@ def call_llm_for_search_queries(
             aspect_id = str(raw_aspect.get("id", "")).strip()
             goal_quote = str(raw_aspect.get("goal_quote", "")).strip()
             evidence_need = str(raw_aspect.get("evidence_need", "")).strip()
-            normalized_goal = " ".join(research_goal.casefold().split())
-            normalized_quote = " ".join(goal_quote.casefold().split())
             normalized_evidence_need = " ".join(evidence_need.casefold().split())
             if (
                 # IDs are opaque references, not Python identifiers. Technology
                 # names such as 5G and 3D naturally produce digit-leading IDs.
                 not re.fullmatch(r"[a-z0-9][a-z0-9_]{1,39}", aspect_id)
-                or not normalized_quote
-                or normalized_quote not in normalized_goal
+                or not goal_quote_is_faithful(goal_quote, research_goal)
                 or len(goal_quote.split()) > 16
                 or (evidence_need and len(evidence_need.split()) > 24)
                 or aspect_id in seen_aspect_ids

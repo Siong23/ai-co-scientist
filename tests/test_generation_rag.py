@@ -22,6 +22,7 @@ from app.agents_modules.generation_helpers import (
     ResearchActionDecision,
     call_llm_for_full_text_evidence_coverage,
     call_llm_for_research_action,
+    goal_quote_is_faithful,
 )
 from app.config import config
 from app.models import ContextMemory, Hypothesis, ResearchGoal
@@ -625,6 +626,58 @@ def test_query_rewriter_uses_literature_oriented_evidence_needs():
         "AI-driven resource allocation methods for dense 5G networks",
         "latency and throughput outcomes in dense 5G networks",
     ]
+
+
+_LIST_GOAL = (
+    "Develop an AI-driven self-optimizing 5G network architecture capable of dynamically "
+    "adjusting radio resources, network slices, handover policies, and energy-saving "
+    "mechanisms according to changing network conditions."
+)
+
+
+def test_query_rewriter_keeps_list_items_that_share_the_goal_verb():
+    """Distributing the goal's verb over its list must not drop every item but the first."""
+
+    research_plan = json.loads(_research_plan_payload(_LIST_GOAL))
+    for hypothesis in research_plan["provisional_hypotheses"]:
+        hypothesis["goal_quote"] = "self-optimizing 5G network architecture"
+    requirements = [
+        {"id": "radio_resources", "goal_quote": "dynamically adjusting radio resources"},
+        {"id": "network_slices", "goal_quote": "dynamically adjusting network slices"},
+        {"id": "handover_policies", "goal_quote": "dynamically adjusting handover policies"},
+        {"id": "energy_saving", "goal_quote": "dynamically adjusting energy-saving mechanisms"},
+    ]
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            json.dumps(research_plan),
+            _query_plan_payload(_LIST_GOAL, requirements=requirements, query_count=5, hypothesis_guided=True),
+        ],
+    ):
+        plan, error = call_llm_for_search_queries(_LIST_GOAL, query_count=5)
+
+    assert error is None
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == [
+        "radio_resources",
+        "network_slices",
+        "handover_policies",
+        "energy_saving",
+    ]
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "dynamically adjusting quantum slices",
+        "network slices dynamically adjusting",
+        "AI-driven 5G architecture handover energy-saving conditions",
+    ],
+)
+def test_goal_quote_still_rejects_words_or_order_the_goal_lacks(quote):
+    """Elision is allowed; invented words, reordering, and scattered fragments are not."""
+
+    assert goal_quote_is_faithful(quote, _LIST_GOAL) is False
 
 
 def _audit_payload(
@@ -2885,7 +2938,10 @@ def test_generation_prompt_contains_retrieved_abstract_and_source_id():
     assert "Optional exploration directions" in generation_prompt
     assert "evidence coverage stage has already verified" in generation_prompt
     assert "do not return an error object" in generation_prompt
-    assert "- hypothesis: one clear, testable claim." in generation_prompt
+    assert "- hypothesis: one clear, testable claim" in generation_prompt
+    assert "names every explicit requirement listed above" in generation_prompt
+    assert "never narrows the hypothesis below the full set of explicit requirements" in generation_prompt
+    assert "such as energy efficiency" not in generation_prompt
     assert "- rationale: why the claim follows" in generation_prompt
     assert "- feasibility: a concise practical method" in generation_prompt
     assert hypotheses[0].text == (

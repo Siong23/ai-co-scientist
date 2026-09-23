@@ -128,6 +128,10 @@ reflection:
   # rejects the hypothesis outright.
   deep_verification_enabled: true
   max_assumptions: 6
+  # A hypothesis needs this alignment score (1-10) to be accepted rather than
+  # revised. 7 mirrors the 0.7 threshold of the DeepEval "Goal alignment"
+  # metric in eval/rubrics/deepeval_metrics.py, which uses the same checklist.
+  min_alignment_score: 7
 
 # Synthesize actual review/debate feedback using the selected research model.
 # Invalid or unavailable model output falls back to deterministic summaries.

@@ -520,11 +520,30 @@ _NIDD_QUERY_RESPONSE = """
 def _nidd_query_response(*, hypothesis_id: str = "alternative_hypothesis") -> str:
     """Return the query plan the local model produced for run-20260911-070024.
 
-    The 'macro_f1_comparison' requirement quotes "emphasis on macro F1", which the
-    goal never states verbatim ("emphasis on weighted F1, macro F1"), so requirement
-    validation drops it while its query keeps the reference.
+    The 'macro_f1_comparison' requirement quotes "emphasis on macro F1", eliding
+    "weighted F1," from "emphasis on weighted F1, macro F1". That run dropped it as
+    non-verbatim; it is a real goal requirement and is now kept.
     """
     return _NIDD_QUERY_RESPONSE.replace("<HYPOTHESIS_ID>", hypothesis_id)
+
+
+def test_recorded_plan_keeps_a_list_item_quoted_after_the_shared_lead_in():
+    """The run that dropped macro F1 lost a requirement its goal explicitly states."""
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_NIDD_PLANNER_RESPONSE, _nidd_query_response()],
+    ):
+        plan, error = call_llm_for_search_queries(_NIDD_GOAL, query_count=5)
+
+    assert error is None
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == [
+        "weighted_f1_comparison",
+        "macro_f1_comparison",
+        "minority_class_reliability",
+        "statistical_significance_validation",
+    ]
+    links = {query.search_intent: query.evidence_requirement_id for query in plan.queries}
+    assert links["support"] == "macro_f1_comparison"
 
 
 def test_query_citing_dropped_requirement_is_unlinked_instead_of_failing_the_plan():
@@ -535,13 +554,17 @@ def test_query_citing_dropped_requirement_is_unlinked_instead_of_failing_the_pla
     """
     with patch(
         "app.agents.call_llm",
-        side_effect=[_NIDD_PLANNER_RESPONSE, _nidd_query_response()],
+        side_effect=[
+            _NIDD_PLANNER_RESPONSE,
+            # A requirement the goal never states, so validation rejects it.
+            _nidd_query_response().replace('"emphasis on macro F1"', '"emphasis on inference latency"'),
+        ],
     ) as mock_call:
         plan, error = call_llm_for_search_queries(_NIDD_GOAL, query_count=5)
 
     assert error is None
     assert plan is not None
-    # The rejected requirement is gone, the three verbatim ones survive.
+    # The rejected requirement is gone, the three faithful ones survive.
     assert [aspect.aspect_id for aspect in plan.explicit_requirements] == [
         "weighted_f1_comparison",
         "minority_class_reliability",

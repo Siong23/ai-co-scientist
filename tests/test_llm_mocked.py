@@ -399,11 +399,11 @@ def test_reflection_retries_invalid_review_values():
 def test_reflection_three_tier_recommendations():
     from app.agents_modules.reflection_helpers import _recommendation_from_scores
 
-    # All >= 5 -> ACCEPT
+    # All >= 5 and alignment >= 7 -> ACCEPT
     assert (
         _recommendation_from_scores(
             {
-                "alignment_score": 5,
+                "alignment_score": 7,
                 "novelty_score": 6,
                 "feasibility_score": 7,
                 "plausibility_score": 8,
@@ -476,6 +476,59 @@ def test_reflection_three_tier_recommendations():
         )
         == "REJECT"
     )
+
+
+_STRONG_BUT_PARTIAL = {
+    "alignment_score": 6,
+    "novelty_score": 9,
+    "feasibility_score": 9,
+    "plausibility_score": 9,
+    "testability_score": 9,
+    "evidence_quality_score": 9,
+    "expected_research_value_score": 9,
+}
+
+
+def test_reflection_revises_a_strong_hypothesis_that_misses_part_of_the_goal():
+    """Alignment below 7/10 fails DeepEval Goal alignment, so it cannot be accepted."""
+
+    from app.agents_modules.reflection_helpers import _recommendation_from_scores
+
+    assert _recommendation_from_scores(_STRONG_BUT_PARTIAL) == "REVISE"
+
+
+def test_reflection_alignment_bar_follows_configuration(monkeypatch):
+    from app.agents_modules import reflection_helpers
+
+    monkeypatch.setitem(reflection_helpers.config, "reflection", {"min_alignment_score": 6})
+
+    assert reflection_helpers._recommendation_from_scores(_STRONG_BUT_PARTIAL) == "ACCEPT"
+
+
+def test_reflection_prompt_checks_every_explicit_requirement():
+    payload = json.dumps(
+        {
+            "alignment_score": 8,
+            "novelty_score": 8,
+            "feasibility_score": 8,
+            "plausibility_score": 8,
+            "testability_score": 8,
+            "evidence_quality_score": 8,
+            "expected_research_value_score": 8,
+            "comment": "Covers the goal.",
+            "references": [],
+        }
+    )
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        call_llm_for_reflection(
+            Hypothesis(text="some hypothesis", hypothesis_id="alignment-rubric"),
+            ResearchGoal(description="test goal", constraints=""),
+            ContextMemory(),
+        )
+
+    prompt = mock_call.call_args_list[0].args[0]
+    assert "every explicit requirement or constraint stated in the research goal" in prompt
+    assert "at most 6 if any explicit requirement is missing" in prompt
 
 
 def test_reflection_rejects_model_references_when_no_verified_sources_exist():

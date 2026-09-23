@@ -571,6 +571,16 @@ def test_evolution_prompt_requires_rationale_and_feasibility_sections():
     assert "A candidate without a rationale and a feasibility plan is rejected." in prompt
 
 
+def test_evolution_prompt_requires_every_explicit_goal_requirement():
+    """An evolved child that keeps only a subset of the goal fails goal alignment."""
+
+    _, first, _ = _context()
+    prompt = build_evolution_prompt("simplification", [first], _goal())
+
+    assert "must address every explicit requirement the goal states, not a subset" in prompt
+    assert "names every explicit requirement of the\n  research goal" in prompt
+
+
 def test_evolution_child_without_sections_is_repaired_once():
     context, parent, _ = _context()
     agent = EvolutionAgent(strategies=("feasibility",), max_candidates_per_cycle=1)

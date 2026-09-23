@@ -552,7 +552,7 @@ Constraints:
 Evolution strategy: {strategy}
 Strategy instruction: {_STRATEGY_INSTRUCTIONS[strategy]}
 
-Maintain strict alignment with the research goal: do not drift into secondary metrics or assume unrequested paradigms (e.g. generic AI does not imply an LLM).
+Maintain strict alignment with the research goal: the new hypothesis must address every explicit requirement the goal states, not a subset, and must not drift into objectives the goal does not name or assume unrequested paradigms (e.g. generic AI does not imply an LLM).
 If multi-agent coordination is requested, specify concrete interaction or communication mechanisms rather than comparing algorithms side-by-side.
 If latency guarantees or real-time control are claimed, specify the supporting operational mechanism (e.g. asynchrony, timeouts, or hierarchical decoupling).
 
@@ -573,7 +573,8 @@ Evidence selection rules:
 
 Output structure:
 - title: a short descriptive name.
-- hypothesis: one clear, self-contained and empirically testable claim.
+- hypothesis: one clear, self-contained and empirically testable claim that names every explicit requirement of the
+  research goal and states how the proposed mechanism addresses each.
 - rationale: why the claim follows from the selected evidence and why it matters.
 - feasibility: a concrete method for testing the claim, naming the dataset and splits, the baseline it is
   compared against, the measurable outcome, and the result that would reject the hypothesis.
