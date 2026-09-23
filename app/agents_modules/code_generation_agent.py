@@ -2762,7 +2762,7 @@ Return ONLY the complete corrected Python source code.
                 "code_generation",
                 self.REPAIR_MAX_TOKENS,
             ),
-            reasoning="off",
+            reasoning="medium",
         )
 
         if not isinstance(
