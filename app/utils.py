@@ -100,6 +100,12 @@ if not any(getattr(handler, "_co_scientist_console", False) for handler in logge
 # --- LM Studio Integration ---
 DEFAULT_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_LMSTUDIO_API_KEY = "lm-studio"
+# Reasoning is the model's scratch work, not its answer. A response carrying only
+# reasoning means the output budget ran out before the answer began; returning
+# that text would hand callers prose where they expect JSON or code.
+REASONING_ONLY_ERROR = (
+    "Error: LM Studio returned reasoning but no answer; the output-token limit was likely reached during reasoning."
+)
 _execution_budget_lock = threading.RLock()
 _execution_deadline: float | None = None
 _execution_cancel_event: threading.Event | None = None
@@ -402,9 +408,13 @@ def call_llm(
                         content = "\n".join(
                             str(item.get("content") or item.get("text") or "")
                             for item in output
-                            if isinstance(item, dict) and (item.get("content") or item.get("text"))
+                            if isinstance(item, dict)
+                            and item.get("type") != "reasoning"
+                            and (item.get("content") or item.get("text"))
                         ).strip()
                     if not content:
+                        if any(isinstance(item, dict) and item.get("type") == "reasoning" for item in output):
+                            return REASONING_ONLY_ERROR
                         return "Error: LM Studio returned an empty response."
                     return content
                 except Exception as exc:
@@ -469,14 +479,11 @@ def call_llm(
             return "Error: LM Studio returned no completion choices."
         message = completion.choices[0].message
         content = getattr(message, "content", "")
-        if not isinstance(content, str) or not content.strip():
+        content = content.strip() if isinstance(content, str) else ""
+        if not content:
             reasoning_content = getattr(message, "reasoning_content", None)
             if isinstance(reasoning_content, str) and reasoning_content.strip():
-                content = reasoning_content
-            else:
-                content = ""
-        content = content.strip()
-        if not content:
+                return REASONING_ONLY_ERROR
             return "Error: LM Studio returned an empty response."
         return content
     except Exception as exc:

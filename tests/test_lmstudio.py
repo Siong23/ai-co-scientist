@@ -252,6 +252,51 @@ def test_call_llm_handles_empty_completion():
         assert call_llm("prompt", model="local-model") == "Error: LM Studio returned an empty response."
 
 
+def _native_response(output):
+    response = MagicMock()
+    response.json.return_value = {"output": output}
+    return response
+
+
+def test_native_reasoning_only_output_is_an_error_not_the_answer():
+    """A budget spent on reasoning must not hand callers the reasoning as code."""
+
+    output = [{"type": "reasoning", "content": "First I will load the CSV, then..."}]
+    with patch.object(utils.requests, "post", return_value=_native_response(output)):
+        result = call_llm("write the script", model="local-model", reasoning="on")
+
+    assert result == utils.REASONING_ONLY_ERROR
+    assert "load the CSV" not in result
+
+
+def test_native_answer_excludes_reasoning_text():
+    output = [
+        {"type": "reasoning", "content": "Let me think about the imports."},
+        {"type": "message", "content": "import torch"},
+    ]
+    with patch.object(utils.requests, "post", return_value=_native_response(output)):
+        assert call_llm("write the script", model="local-model", reasoning="on") == "import torch"
+
+
+def test_native_fallback_still_reads_non_reasoning_items():
+    """Output items of other types still carry the answer when no message exists."""
+
+    output = [
+        {"type": "reasoning", "content": "scratch work"},
+        {"type": "output_text", "text": '{"ok": true}'},
+    ]
+    with patch.object(utils.requests, "post", return_value=_native_response(output)):
+        assert call_llm("return JSON", model="local-model", reasoning="on") == '{"ok": true}'
+
+
+def test_compatible_api_does_not_return_reasoning_content_as_the_answer():
+    completion = _completion("")
+    completion.choices[0].message.reasoning_content = "The user wants JSON, so I should..."
+    with patch.object(utils, "OpenAI") as mock_openai:
+        mock_openai.return_value.chat.completions.create.return_value = completion
+        assert call_llm("return JSON", model="local-model") == utils.REASONING_ONLY_ERROR
+
+
 def test_lmstudio_key_is_redacted_from_error_and_logs(monkeypatch, caplog):
     secret = "lmstudio-secret-canary"
     monkeypatch.setenv("LMSTUDIO_API_KEY", secret)

@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agents_modules.code_generation_agent import CodeGenerationAgent
+from app.agents_modules.code_generation_agent import CodeGenerationAgent, _output_token_limit
 from app.config import load_config
 from app.experiments.experiment_orchestrator import ExperimentOrchestrator
 from app.experiments.experiment_runner import ExperimentRunner
@@ -269,7 +269,8 @@ def test_code_repair_prompt_is_bounded(monkeypatch):
     # The bound holds a full-length experiment plus both bounded logs, so the
     # repair model sees the whole file instead of its tail.
     assert len(captured["prompt"]) < 90000
-    assert captured["kwargs"]["max_tokens"] == agent.REPAIR_MAX_TOKENS
+    # The configured code_generation budget takes precedence over the class fallback.
+    assert captured["kwargs"]["max_tokens"] == _output_token_limit("code_generation", agent.REPAIR_MAX_TOKENS)
 
 
 def test_code_generation_agent_rejects_invalid_python():

@@ -50,9 +50,10 @@ llm_max_tokens:
   evolution: 2048
   supervisor_planning: 1600
   # A complete experiment script runs past 8000 tokens, and a response that
-  # stops at the limit is unparsable Python. Leave context headroom for the
-  # generation prompt and system instructions.
-  code_generation: 16000
+  # stops at the limit is unparsable Python. Reasoning-enabled calls spend this
+  # same budget on reasoning before the script begins. Leave context headroom
+  # for the generation prompt and system instructions.
+  code_generation: 24000
 
 # The Evolution agent follows a rotating library of refinement strategies.
 # It creates new tournament candidates and never overwrites top-ranked parents.
