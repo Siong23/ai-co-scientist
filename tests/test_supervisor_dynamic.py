@@ -463,6 +463,22 @@ def test_finalization_gate_requires_review_ranking_and_evidence():
     assert ready["reasons"] == []
 
 
+def test_finalization_gate_does_not_count_claims_with_no_evidence_either_way():
+    context = ContextMemory()
+    h1 = _sample_hypothesis("H1", "ACCEPT", elo=1210.0)
+    h2 = _sample_hypothesis("H2", "ACCEPT", elo=1190.0)
+    h1.reflection_report.claims.append(ClaimAssessment(claim="Background premise", status="NOT_FOUND"))
+    h2.reflection_report.claims = [ClaimAssessment(claim="Background premise", status="NOT_FOUND")]
+    context.add_hypothesis(h1)
+    context.add_hypothesis(h2)
+    goal = ResearchGoal(description="Test finalization", num_hypotheses=2)
+
+    gate = evaluate_finalization_readiness(context, goal)
+
+    assert gate["low_confidence_finalist_ids"] == ["H2"]
+    assert gate["unsupported_claim_finalist_ids"] == ["H2"]
+
+
 def test_finalization_gate_blocks_failed_evolution_and_single_mechanism_cluster():
     context = ContextMemory()
     h1 = _sample_hypothesis("H1", "ACCEPT", elo=1210.0)

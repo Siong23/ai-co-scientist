@@ -259,14 +259,19 @@ def evaluate_finalization_readiness(
         report = getattr(hypothesis, "reflection_report", None)
         claims = list(getattr(report, "claims", []) or [])
         overall_confidence = float(getattr(report, "overall_confidence", 1.0) or 1.0)
-        claim_confidences = [float(getattr(claim, "confidence", 1.0)) for claim in claims]
+        # Same rule as Reflection: a claim with no evidence found either way
+        # lowers overall confidence but is not itself a failed claim.
+        assessed_claims = [claim for claim in claims if str(getattr(claim, "status", "")).upper() != "NOT_FOUND"]
+        claim_confidences = [float(getattr(claim, "confidence", 1.0)) for claim in assessed_claims]
         if (
             overall_confidence < min_overall_confidence
             or not claim_confidences
             or min(claim_confidences) < min_claim_confidence
         ):
             low_confidence_finalists.append(hypothesis.hypothesis_id)
-        if require_evidence and any(not getattr(claim, "supporting_evidence", []) for claim in claims):
+        if require_evidence and (
+            not assessed_claims or any(not getattr(claim, "supporting_evidence", []) for claim in assessed_claims)
+        ):
             unsupported_claim_finalists.append(hypothesis.hypothesis_id)
 
         audit_verdict = str(getattr(hypothesis, "audit_verdict", "") or "").upper()

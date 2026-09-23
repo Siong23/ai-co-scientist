@@ -296,3 +296,21 @@ def test_claim_confidence_can_downgrade_but_not_upgrade_review():
         )
         == "ACCEPT"
     )
+
+
+def test_a_claim_with_no_evidence_either_way_does_not_block_acceptance():
+    """A novel hypothesis often states something no retrieved paper covers."""
+
+    supported = {"status": "SUPPORTED", "confidence": 8.2}
+    not_found = {"status": "NOT_FOUND", "confidence": 1.0}
+
+    def verdict(claims, overall_confidence=6.3):
+        return recommendation_after_claim_assessment(
+            {"recommendation": "ACCEPT", "claims": claims, "overall_confidence": overall_confidence}
+        )
+
+    assert verdict([supported, not_found]) == "ACCEPT"
+    assert verdict([not_found]) == "REVISE"
+    assert verdict([supported, not_found], overall_confidence=4.9) == "REVISE"
+    assert verdict([{"status": "MIXED", "confidence": 2.35}, not_found]) == "REVISE"
+    assert verdict([{"status": "CONTRADICTED", "confidence": 1.0}, supported]) == "REJECT"

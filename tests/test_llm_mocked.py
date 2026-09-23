@@ -399,11 +399,11 @@ def test_reflection_retries_invalid_review_values():
 def test_reflection_three_tier_recommendations():
     from app.agents_modules.reflection_helpers import _recommendation_from_scores
 
-    # All >= 5 and alignment >= 7 -> ACCEPT
+    # All >= 5 and alignment >= 8 -> ACCEPT
     assert (
         _recommendation_from_scores(
             {
-                "alignment_score": 7,
+                "alignment_score": 8,
                 "novelty_score": 6,
                 "feasibility_score": 7,
                 "plausibility_score": 8,
@@ -479,7 +479,7 @@ def test_reflection_three_tier_recommendations():
 
 
 _STRONG_BUT_PARTIAL = {
-    "alignment_score": 6,
+    "alignment_score": 7,
     "novelty_score": 9,
     "feasibility_score": 9,
     "plausibility_score": 9,
@@ -490,7 +490,7 @@ _STRONG_BUT_PARTIAL = {
 
 
 def test_reflection_revises_a_strong_hypothesis_that_misses_part_of_the_goal():
-    """Alignment below 7/10 fails DeepEval Goal alignment, so it cannot be accepted."""
+    """Reviews below 8/10 for alignment failed DeepEval Goal alignment, so they cannot be accepted."""
 
     from app.agents_modules.reflection_helpers import _recommendation_from_scores
 

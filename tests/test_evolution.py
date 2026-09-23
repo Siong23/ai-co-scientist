@@ -701,3 +701,40 @@ def test_unreviewed_parents_keep_the_rotation_order():
     agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
 
     assert agent._strategies_for_cycle(context, [first, second]) == ["simplification", "grounding"]
+
+
+def _verdict(hypothesis_id: str, recommendation: str, alignment: float, confidence: float, parents=()) -> Hypothesis:
+    hypothesis = Hypothesis(hypothesis_id, "Seed", "A seed hypothesis.")
+    hypothesis.reflection_report = ReflectionReport(
+        recommendation=recommendation,
+        alignment_score=alignment,
+        overall_confidence=confidence,
+    )
+    hypothesis.parent_ids = list(parents)
+    return hypothesis
+
+
+def test_parent_selection_moves_past_evolved_parents_before_any_tournament_match():
+    """Every Elo is still 1200, and sorting on the ID re-sent the Generation parents each pass."""
+
+    candidates = [
+        _verdict("G2059", "REVISE", 6.0, 5.4),
+        _verdict("G1111", "REVISE", 7.0, 5.5),
+        _verdict("E3634", "REVISE", 8.0, 5.0, parents=["G2059"]),
+        _verdict("E4728", "REVISE", 9.0, 5.6, parents=["G2059", "G1111"]),
+        _verdict("E8807", "ACCEPT", 10.0, 7.4, parents=["G2059", "G1111"]),
+    ]
+
+    selected = EvolutionAgent._select_parents(candidates, 2, None)
+
+    assert [parent.hypothesis_id for parent in selected] == ["E8807", "E4728"]
+
+
+def test_parent_selection_follows_elo_once_matches_are_played():
+    ranked_higher = _verdict("G2059", "REVISE", 6.0, 5.4)
+    ranked_higher.elo_score = 1216.0
+    child = _verdict("E8807", "ACCEPT", 10.0, 7.4, parents=["G2059"])
+
+    selected = EvolutionAgent._select_parents([child, ranked_higher], 1, None)
+
+    assert [parent.hypothesis_id for parent in selected] == ["G2059"]

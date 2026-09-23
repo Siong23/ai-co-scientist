@@ -38,9 +38,10 @@ def _parse_string_list(value: object) -> List[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
-# The DeepEval "Goal alignment" metric passes at 0.7 of a 0-10 judge scale, so a
-# hypothesis the reviewer scores below 7/10 for alignment would fail it.
-_DEFAULT_MIN_ALIGNMENT_SCORE = 7
+# The DeepEval "Goal alignment" metric passes at 0.7 of a 0-10 judge scale. Scored
+# side by side, reviews of 8/10 or more passed it and reviews of 7/10 did not, so
+# the reviewer's scale runs about one point more generous than the judge's.
+_DEFAULT_MIN_ALIGNMENT_SCORE = 8
 
 
 def _min_alignment_score() -> int:
@@ -75,7 +76,14 @@ def _recommendation_from_scores(scores: Dict[str, int]) -> str:
 
 
 def recommendation_after_claim_assessment(review: Dict[str, Any]) -> str:
-    """Apply evidence-confidence gates without upgrading the rubric verdict."""
+    """Apply evidence-confidence gates without upgrading the rubric verdict.
+
+    A NOT_FOUND claim means the search found evidence neither for nor against
+    it, which is common for a novel hypothesis. The co-scientist review filters
+    inaccurate hypotheses, not unprecedented ones, so such a claim lowers the
+    overall confidence but does not block acceptance on its own. Contradicted
+    claims still reject, and at least one claim must have evidence found.
+    """
 
     recommendation = str(review.get("recommendation", "UNREVIEWED")).strip().upper()
     if recommendation in {"REJECT", "UNREVIEWED"}:
@@ -89,7 +97,7 @@ def recommendation_after_claim_assessment(review: Dict[str, Any]) -> str:
     confidences = [
         float(claim.get("confidence", 1.0))
         for claim in valid_claims
-        if isinstance(claim.get("confidence"), (int, float))
+        if isinstance(claim.get("confidence"), (int, float)) and str(claim.get("status", "")).upper() != "NOT_FOUND"
     ]
     overall_confidence = float(review.get("overall_confidence", 1.0) or 1.0)
     if not confidences or min(confidences) < 4.0 or overall_confidence < 5.0:

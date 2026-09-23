@@ -210,7 +210,14 @@ class EvolutionAgent:
         parent_count: int,
         proximity_data: dict | None,
     ) -> List[Hypothesis]:
-        """Prefer one strong exemplar per cluster, then fill by Elo."""
+        """Prefer one strong exemplar per cluster, then fill by Elo.
+
+        Until a tournament match is played every Elo is the initial 1200, and
+        sorting on the ID alone picked the same Generation parents on every
+        pass, sending an identical Evolution prompt again.  Ties therefore go
+        first to hypotheses no earlier pass has evolved, then to the stronger
+        Reflection verdict.
+        """
         by_id = {hypothesis.hypothesis_id: hypothesis for hypothesis in active}
         selected = []
         exemplar_ids = (proximity_data or {}).get("exemplar_ids", [])
@@ -221,7 +228,22 @@ class EvolutionAgent:
             if len(selected) >= parent_count:
                 return selected
 
-        for hypothesis in sorted(active, key=lambda item: (item.elo_score, item.hypothesis_id), reverse=True):
+        evolved_ids = {
+            parent_id for hypothesis in active for parent_id in (getattr(hypothesis, "parent_ids", None) or [])
+        }
+
+        def rank(hypothesis: Hypothesis) -> tuple:
+            report = getattr(hypothesis, "reflection_report", None)
+            return (
+                hypothesis.elo_score,
+                hypothesis.hypothesis_id not in evolved_ids,
+                str(getattr(report, "recommendation", "")).upper() == "ACCEPT",
+                float(getattr(report, "alignment_score", 0) or 0),
+                float(getattr(report, "overall_confidence", 0) or 0),
+                hypothesis.hypothesis_id,
+            )
+
+        for hypothesis in sorted(active, key=rank, reverse=True):
             if hypothesis not in selected:
                 selected.append(hypothesis)
             if len(selected) >= parent_count:
