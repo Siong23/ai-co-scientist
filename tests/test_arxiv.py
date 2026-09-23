@@ -4,9 +4,57 @@ Category-mapping logic is pure and runs offline; everything hitting the live
 arXiv API is marked `network` (run with `make test-all`).
 """
 
+import socket
+import urllib.error
+
+import feedparser
 import pytest
 
-from app.tools.arxiv_search import ArxivSearchTool, build_arxiv_query, get_categories_for_field
+from app.tools.arxiv_search import (
+    _ARXIV_API_ENDPOINT,
+    ArxivSearchTool,
+    build_arxiv_query,
+    get_categories_for_field,
+)
+
+_ATOM_ENTRY = """
+  <entry>
+    <id>http://arxiv.org/abs/2203.01590v1</id>
+    <title>5G Network Slice Isolation</title>
+    <summary>Isolation  keeps
+  slices independent.</summary>
+    <published>2022-03-03T09:30:00Z</published>
+    <updated>2022-03-04T09:30:00Z</updated>
+    <author><name>Ada Lovelace</name></author>
+    <author><name>Alan Turing</name></author>
+    <arxiv:doi xmlns:arxiv="http://arxiv.org/schemas/atom">10.1000/example</arxiv:doi>
+    <arxiv:comment xmlns:arxiv="http://arxiv.org/schemas/atom">8 pages</arxiv:comment>
+    <arxiv:journal_ref xmlns:arxiv="http://arxiv.org/schemas/atom">J. Netw. 2022</arxiv:journal_ref>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.CR"/>
+    <link href="http://arxiv.org/abs/2203.01590v1" rel="alternate" type="text/html"/>
+    <link href="http://arxiv.org/pdf/2203.01590v1" rel="related" type="application/pdf"/>
+    <category term="cs.CR"/>
+    <category term="cs.NI"/>
+  </entry>
+"""
+
+_ATOM_ERROR = """
+  <entry>
+    <id>http://arxiv.org/api/errors#incorrect_id_format</id>
+    <title>Error</title>
+    <summary>incorrect id format for abc</summary>
+  </entry>
+"""
+
+
+def _feed(entries):
+    """Build a parsed arXiv Atom feed from raw entry fragments."""
+
+    body = "".join(entries)
+    return feedparser.parse(
+        f'<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom">{body}</feed>'
+    )
+
 
 # --- Offline: pure category-mapping logic ---
 
@@ -16,10 +64,10 @@ def test_known_fields_map_to_categories():
     assert len(get_categories_for_field("physics")) > 0
 
 
-def test_client_page_size_matches_requested_result_limit():
+def test_requested_result_limit_is_retained():
     tool = ArxivSearchTool(max_results=6)
 
-    assert tool.client.page_size == 6
+    assert tool.max_results == 6
 
 
 def test_natural_language_query_uses_fielded_and_connected_concepts():
@@ -67,16 +115,98 @@ def test_category_filter_wraps_field_aware_query(monkeypatch):
     tool = ArxivSearchTool(max_results=2)
     captured = {}
 
-    class FakeSearch:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    def fake_fetch(params, timeout=None):
+        captured.update(params)
+        return _feed([])
 
-    monkeypatch.setattr("app.tools.arxiv_search.arxiv.Search", FakeSearch)
-    monkeypatch.setattr(tool.client, "results", lambda _search: [])
+    monkeypatch.setattr("app.tools.arxiv_search._fetch_feed", fake_fetch)
 
     tool.search_papers("network slicing latency", categories=["cs.NI", "cs.AI"])
 
-    assert captured["query"] == "(all:network AND all:slicing AND all:latency) AND (cat:cs.NI OR cat:cs.AI)"
+    assert captured["search_query"] == "(all:network AND all:slicing AND all:latency) AND (cat:cs.NI OR cat:cs.AI)"
+
+
+def test_atom_entry_is_mapped_onto_the_paper_contract(monkeypatch):
+    """The Atom feed must fill every field the retrieval pipeline reads."""
+
+    tool = ArxivSearchTool(max_results=1)
+    monkeypatch.setattr(
+        "app.tools.arxiv_search._fetch_feed",
+        lambda params, timeout=None: _feed([_ATOM_ENTRY]),
+    )
+
+    (paper,) = tool.search_papers("slice isolation")
+
+    assert paper["arxiv_id"] == "2203.01590v1"
+    assert paper["title"] == "5G Network Slice Isolation"
+    assert paper["abstract"] == "Isolation keeps slices independent."
+    assert paper["authors"] == ["Ada Lovelace", "Alan Turing"]
+    assert paper["primary_category"] == "cs.CR"
+    assert paper["categories"] == ["cs.CR", "cs.NI"]
+    assert paper["pdf_url"] == "http://arxiv.org/pdf/2203.01590v1"
+    assert paper["arxiv_url"] == "https://arxiv.org/abs/2203.01590v1"
+    assert paper["doi"] == "10.1000/example"
+    assert paper["comment"] == "8 pages"
+    assert paper["journal_ref"] == "J. Netw. 2022"
+    assert paper["published"] == "2022-03-03T09:30:00Z"
+    assert paper["source"] == "arxiv"
+
+
+def test_rejected_request_records_its_status_for_backoff(monkeypatch):
+    """A 406 must reach the caller as a status, not an unclassified error."""
+
+    tool = ArxivSearchTool(max_results=1)
+
+    def reject(params, timeout=None):
+        raise urllib.error.HTTPError(_ARXIV_API_ENDPOINT, 406, "Not Acceptable", {}, None)
+
+    monkeypatch.setattr("app.tools.arxiv_search._fetch_feed", reject)
+
+    assert tool.search_papers("network slicing") == []
+    assert tool.last_error_status == 406
+    assert tool.last_error_kind == "provider_error"
+
+
+def test_read_timeout_is_classified_as_a_timeout(monkeypatch):
+    tool = ArxivSearchTool(max_results=1)
+
+    def time_out(params, timeout=None):
+        raise urllib.error.URLError(socket.timeout("timed out"))
+
+    monkeypatch.setattr("app.tools.arxiv_search._fetch_feed", time_out)
+
+    assert tool.search_papers("network slicing") == []
+    assert tool.last_error_kind == "timeout"
+
+
+def test_error_feed_is_not_reported_as_a_result(monkeypatch):
+    """arXiv returns errors as a one-entry feed, which must not become a paper."""
+
+    tool = ArxivSearchTool(max_results=1)
+    monkeypatch.setattr(
+        "app.tools.arxiv_search._fetch_feed",
+        lambda params, timeout=None: _feed([_ATOM_ERROR]),
+    )
+
+    assert tool.search_papers("network slicing") == []
+    assert tool.last_error_kind == "provider_error"
+
+
+def test_paper_details_requests_the_identifier_without_sorting(monkeypatch):
+    tool = ArxivSearchTool()
+    captured = {}
+
+    def fake_fetch(params, timeout=None):
+        captured.update(params)
+        return _feed([_ATOM_ENTRY])
+
+    monkeypatch.setattr("app.tools.arxiv_search._fetch_feed", fake_fetch)
+
+    paper = tool.get_paper_details("2203.01590")
+
+    assert captured["id_list"] == "2203.01590"
+    assert "sortBy" not in captured
+    assert paper["arxiv_id"] == "2203.01590v1"
 
 
 # --- Live arXiv API ---
