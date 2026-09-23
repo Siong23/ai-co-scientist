@@ -13,8 +13,6 @@ jobs:
 
   ci:
 
-    if: github.repository != 'ionicbond12203/AI-Scientist-Project'
-
     runs-on: ubuntu-latest
 
     steps:
@@ -49,7 +47,7 @@ jobs:
     needs: ci
 
     if: >-
-      github.repository != 'ionicbond12203/AI-Scientist-Project' &&
+      github.repository == 'Siong23/ai-co-scientist' &&
       github.ref == 'refs/heads/main'
 
     runs-on:
