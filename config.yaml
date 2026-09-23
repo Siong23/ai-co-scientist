@@ -281,6 +281,9 @@ paper_library:
   # Each explicit evidence requirement gets bounded candidate failover within
   # the global per-enrichment acquisition budget.
   per_requirement_acquisition_limit: 4
+  # A paper longer than these limits is indexed PARTIAL. Its verified leading
+  # chunks remain usable evidence, labelled full_text_partial. Changing either
+  # limit changes the index signature, so every cached paper is re-indexed.
   max_pages_per_paper: 60
   max_chunks_per_paper: 96
   chunk_size_chars: 2400
@@ -357,8 +360,12 @@ springer:
   enabled: true
   results_per_query: 10
 
+# Scopus search requests view=COMPLETE (the only view with abstracts), which
+# needs an institutional entitlement: a subscriber IP or ELSEVIER_INST_TOKEN.
+# A plain API key receives HTTP 401 on every query, so keep this off until one
+# of those is available.
 elsevier:
-  enabled: true
+  enabled: false
   results_per_query: 10
 
 tavily:

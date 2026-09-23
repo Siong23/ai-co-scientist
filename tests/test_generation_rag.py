@@ -1444,6 +1444,25 @@ def test_grading_context_exposes_provenance_and_retrieval_intent():
     assert "Content: The supported context window is documented here." in context
 
 
+def test_grading_context_shows_passages_from_a_partial_full_text_index():
+    document = Document(
+        page_content="unused",
+        metadata={
+            "source_id": "arXiv:2601.06796v2",
+            "title": "Long survey",
+            "summary": "ABSTRACT_ONLY_TEXT",
+            "full_text_indexed": False,
+            "evidence_status": "full_text_partial",
+            "evidence_refs": [{"evidence_type": "full_text", "text": "PARTIAL_PASSAGE_TEXT"}],
+        },
+    )
+
+    context = format_documents_for_grading([document])
+
+    assert "PARTIAL_PASSAGE_TEXT" in context
+    assert "ABSTRACT_ONLY_TEXT" not in context
+
+
 def test_web_evidence_serialization_preserves_canonical_fields():
     document = Document(
         page_content="Web evidence",
@@ -2623,6 +2642,18 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
             "evidence_refs": [{"evidence_type": "full_text", "text": "Truncated body"}],
         },
     )
+    partial_without_passage = Document(
+        page_content="Truncated paper with no matching passage",
+        metadata={
+            "source_id": "arXiv:5555.5555",
+            "source_type": "academic",
+            "full_text_indexed": False,
+            "full_text_chunks_used": 0,
+            "index_status": "PARTIAL",
+            "index_truncated": True,
+            "evidence_refs": [{"evidence_type": "abstract_only", "text": "Abstract only"}],
+        },
+    )
 
     class StrictPaperLibrary:
         enabled = True
@@ -2642,10 +2673,12 @@ def test_strict_generation_evidence_gate_keeps_web_content_and_indexed_academic_
             search_only_web,
             academic_abstract_only,
             partial,
+            partial_without_passage,
         ],
         ResearchGoal("Use downloadable evidence"),
-    ) == [indexed, web_content]
-    assert partial.metadata["strict_gate_rejection_reason"] == "partial_index"
+    ) == [indexed, web_content, partial]
+    assert partial.metadata["strict_gate_rejection_reason"] == "retained_partial_full_text_passage"
+    assert partial_without_passage.metadata["strict_gate_rejection_reason"] == "partial_index"
     assert indexed_without_passage.metadata["strict_gate_rejection_reason"] == "no_retrieved_full_text_passage"
 
 
@@ -2672,6 +2705,46 @@ def test_retrieval_stops_arxiv_batch_after_rate_limit():
     assert arxiv_stats["status"] == "rate_limited"
     semantic_stats = next(stat for stat in retriever.last_search_stats if stat["source"] == "Semantic Scholar")
     assert semantic_stats["status"] == "zero_yield"
+
+
+def _arxiv_with_timeouts(timeout_flags):
+    """Mock arXiv whose successive calls time out according to ``timeout_flags``."""
+
+    arxiv = Mock(last_error_status=None, last_error_kind="")
+    flags = iter(timeout_flags)
+
+    def search_papers(**_kwargs):
+        timed_out = next(flags)
+        arxiv.last_error_kind = "timeout" if timed_out else ""
+        return [] if timed_out else [_paper("2401.00001", "Adaptive handover", "Handover evidence.")]
+
+    arxiv.search_papers.side_effect = search_papers
+    return arxiv
+
+
+def test_arxiv_retries_a_timed_out_query_once():
+    retriever = ArxivRAGRetriever(query_count=2, top_k=1)
+    retriever.arxiv = _arxiv_with_timeouts([True, False, False])
+    queries = (SearchQuery(query="adaptive handover"), SearchQuery(query="slice scaling"))
+
+    with patch("app.rag_retriever.time.sleep") as sleep:
+        results = retriever._arxiv_results(queries)
+
+    assert retriever.arxiv.search_papers.call_count == 3
+    sleep.assert_called_once()
+    assert [len(items) for items in results] == [1, 1]
+
+
+def test_arxiv_stops_batch_when_the_retry_also_times_out():
+    retriever = ArxivRAGRetriever(query_count=3, top_k=1)
+    retriever.arxiv = _arxiv_with_timeouts([True, True])
+    queries = tuple(SearchQuery(query=text) for text in ("one", "two", "three"))
+
+    with patch("app.rag_retriever.time.sleep"):
+        results = retriever._arxiv_results(queries)
+
+    assert retriever.arxiv.search_papers.call_count == 2
+    assert results == [[]]
 
 
 def test_retrieval_stops_semantic_scholar_batch_after_rate_limit():

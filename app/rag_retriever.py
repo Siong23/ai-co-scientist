@@ -40,6 +40,8 @@ from .tools.tavily_search import TavilySearchTool
 from .utils import get_sentence_transformer_model, logger, redact_secrets
 
 _TAVILY_CHUNK_MARKER = re.compile(r"<chunk\s+\d+>\s*", re.IGNORECASE)
+# arXiv asks API clients to wait three seconds between requests.
+_ARXIV_RETRY_DELAY_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -1018,7 +1020,11 @@ class ResearchRetriever:
         )
 
     def _arxiv_results(self, queries: Sequence[SearchQuery]) -> list[list[EvidenceSource]]:
-        """Search arXiv, stopping the batch when the service rate-limits us."""
+        """Search arXiv, retrying a timed-out query once.
+
+        The batch stops when the service rate-limits us or when a query still
+        times out after its retry, because arXiv is then unavailable.
+        """
 
         ranked_results: list[list[EvidenceSource]] = []
         for search_query in queries:
@@ -1027,6 +1033,17 @@ class ResearchRetriever:
                 max_results=self.results_per_query,
                 sort_by="relevance",
             )
+            timed_out = getattr(self.arxiv, "last_error_kind", "") == "timeout"
+            if timed_out:
+                # export.arxiv.org often answers a repeated query after a single
+                # slow response, so one retry keeps the query's evidence.
+                time.sleep(_ARXIV_RETRY_DELAY_SECONDS)
+                raw_results = self.arxiv.search_papers(
+                    query=search_query.query,
+                    max_results=self.results_per_query,
+                    sort_by="relevance",
+                )
+                timed_out = getattr(self.arxiv, "last_error_kind", "") == "timeout"
             query_context = {
                 "query": search_query.query,
                 "sub_question": search_query.sub_question,
@@ -1071,6 +1088,11 @@ class ResearchRetriever:
                 logger.warning(
                     "arXiv returned HTTP %s; skipping its remaining queries in this retrieval round.",
                     self.arxiv.last_error_status,
+                )
+                break
+            if timed_out:
+                logger.warning(
+                    "arXiv timed out again on retry; skipping its remaining queries in this retrieval round.",
                 )
                 break
         return ranked_results
@@ -1916,7 +1938,10 @@ def format_documents_for_grading(
             for ref in document.metadata.get("evidence_refs", [])
             if isinstance(ref, dict) and ref.get("evidence_type") == "full_text" and ref.get("text")
         ]
-        if document.metadata.get("full_text_indexed") and full_text_passages:
+        if full_text_passages and (
+            document.metadata.get("full_text_indexed")
+            or document.metadata.get("evidence_status") == "full_text_partial"
+        ):
             summary = "\n".join(full_text_passages)
         elif document.metadata.get("content_extracted") is True:
             summary = document.page_content

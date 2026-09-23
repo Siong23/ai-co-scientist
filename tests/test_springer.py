@@ -105,6 +105,44 @@ def test_search_uses_api_key_and_returns_formatted_papers(monkeypatch):
     }
 
 
+def test_meta_fallback_sends_the_meta_api_key(monkeypatch):
+    monkeypatch.delenv("SPRINGER_API_KEY", raising=False)
+    monkeypatch.setenv("SPRINGER_OPEN_ACCESS_API_KEY", "open-access-test-key")
+    monkeypatch.setenv("SPRINGER_META_API_KEY", "meta-test-key")
+    tool = SpringerSearchTool()
+
+    with patch(
+        "app.tools.springer_search.requests.get",
+        side_effect=[
+            _response([_springer_record(abstract=None)]),
+            _response([_springer_record()]),
+        ],
+    ) as mock_get:
+        results = tool.search_papers("network slicing")
+
+    assert len(results) == 1
+    assert [call.kwargs["params"]["api_key"] for call in mock_get.call_args_list] == [
+        "open-access-test-key",
+        "meta-test-key",
+    ]
+
+
+def test_open_access_no_data_404_is_an_empty_result(monkeypatch):
+    monkeypatch.setenv("SPRINGER_API_KEY", "springer-test-key")
+    tool = SpringerSearchTool()
+    no_data = Mock(
+        status_code=404,
+        text='{"status":"Fail","message":"No data was found for the given query."}',
+    )
+
+    with patch("app.tools.springer_search.requests.get", return_value=no_data) as mock_get:
+        assert tool.search_papers("AI inference costs negate efficiency limitations") == []
+
+    mock_get.assert_called_once()
+    assert tool.last_error_status is None
+    assert tool.last_error_kind == ""
+
+
 def test_search_returns_empty_list_on_error(monkeypatch):
     monkeypatch.setenv("SPRINGER_API_KEY", "springer-test-key")
     tool = SpringerSearchTool()

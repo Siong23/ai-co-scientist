@@ -207,11 +207,9 @@ def test_silent_partial_write_fails_read_after_write_verification(tmp_path, monk
     assert library.has_indexed_source(source_id) is False
 
 
-def test_ingestion_truncation_is_partial_and_not_generation_eligible(tmp_path, monkeypatch):
+def _truncated_library(tmp_path, monkeypatch, source_id):
     library = _library(tmp_path)
     library.max_chunks_per_paper = 1
-    source_id = "arXiv:truncated"
-    document = _document(source_id)
     monkeypatch.setattr(
         library,
         "_download_pdf",
@@ -221,16 +219,38 @@ def test_ingestion_truncation_is_partial_and_not_generation_eligible(tmp_path, m
         ),
     )
     monkeypatch.setattr(library, "_extract_pages", lambda _path: [(1, "Latency evidence. " * 80)])
+    assert library.ensure_indexed(_document(source_id)) is False
+    return library
 
-    assert library.ensure_indexed(document) is False
+
+def test_ingestion_truncation_is_partial_but_its_verified_chunks_are_searchable(tmp_path, monkeypatch):
+    source_id = "arXiv:truncated"
+    library = _truncated_library(tmp_path, monkeypatch, source_id)
+
     assert library.get_index_status(source_id) == "PARTIAL"
-    assert library.verify_indexed_source(source_id).records_valid is True
+    assert library.verify_indexed_source(source_id).usable_partial is True
     assert library.has_indexed_source(source_id) is False
 
-    enriched = library.enrich_documents([document], "latency")
-    assert enriched[0].metadata["full_text_indexed"] is False
-    assert enriched[0].metadata["index_status"] == "PARTIAL"
-    assert enriched[0].metadata["index_truncated"] is True
+    enriched = library.enrich_documents([_document(source_id)], "latency")
+    metadata = enriched[0].metadata
+    assert metadata["full_text_indexed"] is False
+    assert metadata["full_text_available"] is True
+    assert metadata["index_status"] == "PARTIAL"
+    assert metadata["index_truncated"] is True
+    assert metadata["evidence_status"] == "full_text_partial"
+    assert metadata["full_text_chunks_used"] >= 1
+    assert any(ref["evidence_type"] == "full_text" for ref in metadata["evidence_refs"])
+
+
+def test_corrupted_partial_index_is_not_searched(tmp_path, monkeypatch):
+    source_id = "arXiv:truncated-corrupt"
+    library = _truncated_library(tmp_path, monkeypatch, source_id)
+    library._get_vector_store().delete(ids=sorted(library._manifest_source(source_id)["chunks"]))
+
+    assert library.verify_indexed_source(source_id).usable_partial is False
+    enriched = library.enrich_documents([_document(source_id)], "latency")
+    assert enriched[0].metadata["full_text_chunks_used"] == 0
+    assert enriched[0].metadata["full_text_available"] is False
     assert enriched[0].metadata["evidence_status"] == "full_text_partial"
 
 

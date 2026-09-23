@@ -861,7 +861,13 @@ class GenerationAgent:
             elif metadata.get("full_text_needed") is False and metadata.get("abstract_screen_decision"):
                 rejection_reason = "full_text_not_requested"
             elif metadata.get("index_status") == "PARTIAL" or metadata.get("index_truncated") is True:
-                rejection_reason = "partial_index"
+                # Ingestion limits truncate long papers, but their verified
+                # leading chunks remain real full-text evidence.
+                if has_full_text_passage:
+                    retained = True
+                    rejection_reason = "retained_partial_full_text_passage"
+                else:
+                    rejection_reason = "partial_index"
             elif metadata.get("full_text_indexed") is not True:
                 rejection_reason = "source_not_committed"
             elif not has_full_text_passage:

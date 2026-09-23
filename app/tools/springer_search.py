@@ -62,11 +62,11 @@ class SpringerSearchTool:
 
         limit = max_results if max_results is not None else self.max_results
 
-        # Try Open Access endpoint first, fall back to Meta endpoint
-        active_key = self.openaccess_key or self.meta_key or self.api_key
+        # Try Open Access endpoint first, fall back to Meta endpoint. Each API
+        # is entitled separately, so each endpoint gets its own key.
         endpoints = [
-            (self.openaccess_url, active_key),
-            (self.meta_url, active_key),
+            (self.openaccess_url, self.openaccess_key or self.api_key),
+            (self.meta_url, self.meta_key or self.api_key),
         ]
         for url, key in endpoints:
             if not url or not key:
@@ -77,6 +77,13 @@ class SpringerSearchTool:
                     params={"q": query, "api_key": key, "p": limit},
                     timeout=_DEFAULT_TIMEOUT,
                 )
+                if self._reports_no_matches(response):
+                    # Springer answers a valid query that matches nothing with
+                    # HTTP 404; that is an empty result, not a provider failure.
+                    self.last_error_status = None
+                    self.last_error_kind = ""
+                    logger.debug("Springer Nature found no records for query %r.", query)
+                    return []
                 response.raise_for_status()
                 data = response.json()
                 records = data.get("records", [])
@@ -114,6 +121,15 @@ class SpringerSearchTool:
                 )
 
         return []
+
+    @staticmethod
+    def _reports_no_matches(response: Any) -> bool:
+        """Whether a 404 is Springer's "No data was found" answer to the query."""
+
+        if getattr(response, "status_code", None) != 404:
+            return False
+        body = str(getattr(response, "text", "") or "").casefold()
+        return "no data" in body or "no matching data" in body
 
     @classmethod
     def _format_paper(cls, record: dict[str, Any]) -> dict[str, Any]:

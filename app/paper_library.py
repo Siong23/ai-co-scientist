@@ -121,6 +121,12 @@ class IndexIntegrityReport:
     def ok(self) -> bool:
         return self.status == "COMMITTED" and not self.truncated and self.records_valid
 
+    @property
+    def usable_partial(self) -> bool:
+        """A truncated index whose stored chunks exactly match its manifest."""
+
+        return self.status == "PARTIAL" and self.records_valid
+
 
 @dataclass(frozen=True)
 class IncrementalIndexReport:
@@ -825,8 +831,19 @@ class ChromaPaperLibrary:
 
         indexed_source_ids: set[str] = set()
         partial_source_ids: set[str] = set()
+        # A truncated source still holds verified chunks from its leading pages;
+        # those passages are searchable and labelled full_text_partial.
+        usable_partial_source_ids: set[str] = set()
         failed_source_ids: set[str] = set()
         acquisition_results: dict[str, str] = {}
+
+        def mark_partial(source_id: str) -> None:
+            partial_source_ids.add(source_id)
+            if source_id not in usable_partial_source_ids and self.verify_indexed_source(source_id).usable_partial:
+                usable_partial_source_ids.add(source_id)
+
+        def searchable_source_ids() -> set[str]:
+            return indexed_source_ids | usable_partial_source_ids
 
         # Every already COMMITTED source is eligible without consuming an
         # acquisition attempt, regardless of its position in the accumulated list.
@@ -837,7 +854,7 @@ class ChromaPaperLibrary:
             manifest = self._manifest_source(source_id) if source_id else None
             version_is_current = bool(manifest and manifest.get("remote_revision") == identity.remote_revision)
             if status == "PARTIAL" and version_is_current:
-                partial_source_ids.add(source_id)
+                mark_partial(source_id)
                 acquisition_results[source_id] = "partial"
             elif status == "FAILED" and version_is_current:
                 failed_source_ids.add(source_id)
@@ -898,7 +915,7 @@ class ChromaPaperLibrary:
                 identity = self._source_identity(document)
                 version_is_current = bool(manifest and manifest.get("remote_revision") == identity.remote_revision)
                 if status == "PARTIAL" and version_is_current:
-                    partial_source_ids.add(source_id)
+                    mark_partial(source_id)
                     acquisition_results[source_id] = "partial"
                     continue
                 if source_id in self._attempted_source_ids:
@@ -922,7 +939,7 @@ class ChromaPaperLibrary:
                         )
                         return True
                     if self.get_index_status(source_id) == "PARTIAL":
-                        partial_source_ids.add(source_id)
+                        mark_partial(source_id)
                         result = "partial"
                     else:
                         failed_source_ids.add(source_id)
@@ -968,23 +985,26 @@ class ChromaPaperLibrary:
             if lane_positions["__unscoped__"] == previous_position:
                 break
 
-        source_ids_by_requirement = {
-            requirement_id: [
-                str(document.metadata.get("source_id", ""))
-                for document in lanes.get(requirement_id, ())
-                if str(document.metadata.get("source_id", "")) in indexed_source_ids
-            ]
-            for requirement_id in requirement_order
-        }
+        def lane_source_ids() -> dict[str, list[str]]:
+            searchable = searchable_source_ids()
+            return {
+                requirement_id: [
+                    str(document.metadata.get("source_id", ""))
+                    for document in lanes.get(requirement_id, ())
+                    if str(document.metadata.get("source_id", "")) in searchable
+                ]
+                for requirement_id in requirement_order
+            }
 
+        searched_source_ids = searchable_source_ids()
         chunks: list[PaperChunk] = []
-        if indexed_source_ids:
+        if searched_source_ids:
             try:
                 chunks = self.search_many(
                     queries,
-                    sorted(indexed_source_ids),
+                    sorted(searched_source_ids),
                     self.top_k_chunks,
-                    source_ids_by_requirement=source_ids_by_requirement,
+                    source_ids_by_requirement=lane_source_ids(),
                 )
             except Exception as exc:
                 logger.warning("Chroma full-text retrieval failed; using abstracts only: %s", exc)
@@ -997,20 +1017,12 @@ class ChromaPaperLibrary:
         for requirement_id in requirement_order:
             if requirement_id not in covered_requirement_ids and attempt_one(requirement_id):
                 failover_attempted = True
-        if failover_attempted:
-            source_ids_by_requirement = {
-                requirement_id: [
-                    str(document.metadata.get("source_id", ""))
-                    for document in lanes.get(requirement_id, ())
-                    if str(document.metadata.get("source_id", "")) in indexed_source_ids
-                ]
-                for requirement_id in requirement_order
-            }
+        if failover_attempted or searchable_source_ids() != searched_source_ids:
             chunks = self.search_many(
                 queries,
-                sorted(indexed_source_ids),
+                sorted(searchable_source_ids()),
                 self.top_k_chunks,
-                source_ids_by_requirement=source_ids_by_requirement,
+                source_ids_by_requirement=lane_source_ids(),
             )
 
         context_chunks = self.expand_context(chunks)
@@ -1047,7 +1059,11 @@ class ChromaPaperLibrary:
             source_chunks = chunks_by_source.get(source_id, [])
             metadata = dict(document.metadata)
             metadata["full_text_indexed"] = source_id in indexed_source_ids
-            metadata["full_text_available"] = bool(metadata.get("content_extracted") or metadata["full_text_indexed"])
+            metadata["full_text_available"] = bool(
+                metadata.get("content_extracted")
+                or metadata["full_text_indexed"]
+                or source_id in usable_partial_source_ids
+            )
             metadata["full_text_chunks_used"] = len(source_chunks)
             metadata["index_status"] = self.get_index_status(source_id)
             metadata["index_truncated"] = source_id in partial_source_ids

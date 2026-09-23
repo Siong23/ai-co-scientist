@@ -46,11 +46,31 @@ def test_trace_events_replace_running_stage_and_escape_content(monkeypatch):
     assert "***REDACTED***" in rendered
     assert "1.2s" in rendered
     assert "Worked for 1s" in rendered
-    assert "Searched 1 source" in rendered
+    assert "Sources 1, used 1" in rendered
     assert "Official &lt;source&gt;" in rendered
     assert "https://example.com/research?q=1&amp;safe=yes" in rendered
     assert 'class="activity-drawer"' in rendered
     assert 'data-testid="research-trace" open' not in rendered
+
+
+def test_source_label_separates_search_candidates_from_used_sources():
+    rendered = format_research_trace_html(
+        [
+            {
+                "step": "generation",
+                "status": "completed",
+                "title": "Discovering evidence",
+                "source_count": 169,
+                "sources": [
+                    {"source_id": f"web:{index}", "title": f"Source {index}", "url": f"https://example.com/{index}"}
+                    for index in range(5)
+                ],
+            }
+        ]
+    )
+
+    assert rendered.count("Sources 169, used 5") == 3
+    assert "Searched" not in rendered
 
 
 def test_running_trace_stays_collapsed_until_the_user_opens_it():
