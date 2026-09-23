@@ -6,7 +6,9 @@ openrouter_base_url: "https://openrouter.ai/api/v1"
 
 # Override this per machine with LMSTUDIO_BASE_URL in .env. Keeping a private
 # network address here makes local and deployed checkouts fail unpredictably.
-lmstudio_base_url: "http://100.117.90.5:1234/v1"
+# lmstudio_base_url: "http://100.117.90.5:1234/v1"
+lmstudio_base_url: "http://100.75.120.13:1234/v1"
+# lmstudio_base_url: "http://100.96.215.41:1234/v1/"
 
 # LLM Model. Use a compact free default so the public Hugging Face demo can
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
@@ -25,7 +27,7 @@ num_hypotheses: 4
 
 # Per-provider request timeout. Keeps slow free endpoints from consuming the
 # whole Gradio cycle budget before fallback can try another model.
-llm_request_timeout_seconds: 300
+llm_request_timeout_seconds: 900
 # Fail quickly when the configured LM Studio host cannot be reached while still
 # allowing long model inference reads up to llm_request_timeout_seconds.
 lmstudio_connect_timeout_seconds: 10
@@ -196,8 +198,8 @@ fastapi_port: 8000
 
 # Temperature settings for each step
 step_temperatures:
-  generation: 0.7
-  reflection: 0.5
+  generation: 0.4
+  reflection: 0.4
 
 # Shared embedding model used by proximity analysis and RAG retrieval.
 # sentence_transformer_model: "all-MiniLM-L6-v2"
@@ -205,7 +207,8 @@ use_lmstudio_embeddings: true
 # Loading chat and embedding models concurrently can make memory-constrained
 # LM Studio servers unload one model while the other request is still active.
 serialize_lmstudio_model_calls: true
-sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
+# sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
+sentence_transformer_model: "text-embedding-nomic-embed-text-v1.5"
 
 rag:
   # Maximum rewritten/corrective queries per retrieval round. The planner uses
@@ -266,10 +269,10 @@ paper_library:
   chunk_artifact_directory: "paper_chunk_artifacts"
   incremental_indexing_enabled: true
   embedding_reuse_enabled: true
-  candidate_download_limit: 8
+  candidate_download_limit: 16
   # Each explicit evidence requirement gets bounded candidate failover within
   # the global per-enrichment acquisition budget.
-  per_requirement_acquisition_limit: 2
+  per_requirement_acquisition_limit: 4
   max_pages_per_paper: 60
   max_chunks_per_paper: 96
   chunk_size_chars: 2400
@@ -336,7 +339,7 @@ validation:
 # then participates in expanded-query retrieval when direct retrieval is insufficient.
 # Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).
 semantic_scholar:
-  enabled: True
+  enabled: False
   results_per_query: 10
 
 # Springer Nature academic search (Open Access & Meta API). It follows the same
