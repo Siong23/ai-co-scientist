@@ -192,6 +192,31 @@ def test_error_feed_is_not_reported_as_a_result(monkeypatch):
     assert tool.last_error_kind == "provider_error"
 
 
+def test_requests_share_one_three_second_slot(monkeypatch):
+    """arXiv's terms allow one request every three seconds for the whole client."""
+
+    from app.tools import arxiv_search
+
+    clock = [100.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(arxiv_search, "_next_request_at", 0.0)
+    monkeypatch.setattr(arxiv_search.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(arxiv_search.time, "sleep", sleep)
+
+    arxiv_search._wait_for_request_slot()
+    clock[0] += 1.0
+    arxiv_search._wait_for_request_slot()
+    clock[0] += 5.0
+    arxiv_search._wait_for_request_slot()
+
+    assert sleeps == [pytest.approx(2.0)]
+
+
 def test_paper_details_requests_the_identifier_without_sorting(monkeypatch):
     tool = ArxivSearchTool()
     captured = {}

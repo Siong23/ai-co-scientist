@@ -11,6 +11,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Callable, Dict, List, Literal, Sequence
 
 from ..config import config
@@ -452,6 +453,25 @@ def call_llm_for_generation(
         ]
 
 
+_QUERY_STEM_TRAILING_WORDS = {"a", "an", "and", "as", "for", "in", "of", "on", "or", "the", "to", "with"}
+
+
+def _query_stem(text: str, limit: int) -> str:
+    """Shorten ``text`` for a search query at a word boundary.
+
+    A plain character slice sent "handovers, an" and "performanc" to the
+    search providers; a dangling conjunction or article is dropped as well.
+    """
+
+    words = " ".join(str(text).split()).rstrip(" .,;:")
+    if len(words) > limit:
+        words = words[: limit + 1].rsplit(" ", 1)[0]
+    kept = words.split(" ")
+    while len(kept) > 1 and kept[-1].strip(".,;:").casefold() in _QUERY_STEM_TRAILING_WORDS:
+        kept.pop()
+    return " ".join(kept).rstrip(" .,;:")
+
+
 def call_llm_for_search_queries(
     research_goal: str,
     model: str | None = None,
@@ -885,21 +905,21 @@ def call_llm_for_search_queries(
                 for intent in sorted(missing_intents):
                     anchor = primary
                     if intent == "prior_art" and primary:
-                        query_text = primary.statement[:80].rstrip() + " existing methods prior work"
-                        sub_q = f"What prior work exists on: {primary.statement[:60]}?"
+                        query_text = _query_stem(primary.statement, 80) + " existing methods prior work"
+                        sub_q = f"What prior work exists on: {_query_stem(primary.statement, 60)}?"
                     elif intent == "counterevidence":
                         anchor = null_hyp or primary
                         anchor_text = anchor.statement if anchor else research_goal
-                        query_text = anchor_text[:80].rstrip() + " limitations challenges contradictory evidence"
-                        sub_q = f"What evidence challenges: {anchor_text[:60]}?"
+                        query_text = _query_stem(anchor_text, 80) + " limitations challenges contradictory evidence"
+                        sub_q = f"What evidence challenges: {_query_stem(anchor_text, 60)}?"
                     elif intent == "support" and primary:
-                        query_text = primary.statement[:80].rstrip() + " experimental evidence validation"
-                        sub_q = f"What evidence supports: {primary.statement[:60]}?"
+                        query_text = _query_stem(primary.statement, 80) + " experimental evidence validation"
+                        sub_q = f"What evidence supports: {_query_stem(primary.statement, 60)}?"
                     elif intent == "prior_art":
-                        query_text = research_goal[:80].rstrip() + " existing literature prior art"
+                        query_text = _query_stem(research_goal, 80) + " existing literature prior art"
                         sub_q = "What prior work addresses the research goal?"
                     elif intent == "support":
-                        query_text = research_goal[:80].rstrip() + " empirical evidence primary sources"
+                        query_text = _query_stem(research_goal, 80) + " empirical evidence primary sources"
                         sub_q = "What evidence supports claims relevant to the research goal?"
                     else:
                         continue
@@ -933,17 +953,33 @@ def call_llm_for_search_queries(
                             replaceable.append(index)
                     else:
                         seen_intents.add(planned_query.search_intent)
+                # A requirement's only query is never given up: one run replaced
+                # the slicing query this way, and slicing then went unsearched.
+                # When every slot is some requirement's only query, the missing
+                # intents are added on top of the budget instead.
+                requirement_query_counts: dict[str, int] = {}
+                for planned_query in normalized_queries:
+                    if planned_query.evidence_requirement_id:
+                        requirement_query_counts[planned_query.evidence_requirement_id] = (
+                            requirement_query_counts.get(planned_query.evidence_requirement_id, 0) + 1
+                        )
+
+                def can_give_up(candidate: int) -> bool:
+                    requirement_id = normalized_queries[candidate].evidence_requirement_id
+                    return not requirement_id or requirement_query_counts[requirement_id] > 1
+
                 for synthesized in synthesized_queries:
                     if len(normalized_queries) < query_count:
                         normalized_queries.append(synthesized)
                         continue
-                    if not replaceable:
-                        raise ValueError(
-                            "Query plan omitted required support, counterevidence, or prior-art intents "
-                            "and left no generic query within the query budget to replace."
-                        )
-                    index = replaceable.pop(0)
+                    index = next((candidate for candidate in replaceable if can_give_up(candidate)), None)
+                    if index is None:
+                        normalized_queries.append(synthesized)
+                        continue
+                    replaceable.remove(index)
                     replaced = normalized_queries[index]
+                    if replaced.evidence_requirement_id:
+                        requirement_query_counts[replaced.evidence_requirement_id] -= 1
                     normalized_queries[index] = SearchQuery(
                         query=synthesized.query,
                         sub_question=synthesized.sub_question,
@@ -973,12 +1009,17 @@ def call_llm_for_search_queries(
             research_plan=structured_research_plan,
         )
 
+    # Without the date the planner fell back to its training years and asked
+    # for "Recent (2020-2024)" research in September 2026.
     planner_prompt = f"""
 USER RESEARCH GOAL
 {research_goal}
 
 REQUESTED RESEARCH TYPE
 {fixed_research_type or "auto (infer one supported research type)"}
+
+TODAY'S DATE
+{date.today().isoformat()}
 """.strip()
     planner_response = _call_llm(
         planner_prompt,

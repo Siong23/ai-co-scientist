@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Dict, List, Tuple
 
 from langchain_core.documents import Document
@@ -1276,6 +1276,45 @@ class GenerationAgent:
 
         return merged
 
+    @staticmethod
+    def _thinly_covered_aspect_ids(coverage, documents) -> tuple[str, ...]:
+        """Return requirements credited only to one document found for another requirement.
+
+        The coverage grader credits any source that gives "relevant domain
+        context", so one broad review can stand in for several requirements.
+        In one 5G run a single 6G carbon-management review, found for the
+        energy requirement, also covered radio resources and the overall
+        architecture, and no search ever targeted those two.
+        """
+
+        documents_by_source = {str(document.metadata.get("source_id", "")): document for document in documents}
+        thin: list[str] = []
+        for aspect_id, source_ids in coverage.aspect_source_ids.items():
+            if not source_ids:
+                continue
+            parents: set[str] = set()
+            found_for_other_requirements_only = True
+            for source_id in source_ids:
+                document = documents_by_source.get(str(source_id))
+                metadata = document.metadata if document is not None else {}
+                parents.add(str(metadata.get("parent_source_id") or source_id))
+                retrieved_for = {
+                    metadata.get("evidence_requirement_id"),
+                    *(metadata.get("reserved_requirement_ids") or ()),
+                    *(
+                        query_context.get("evidence_requirement_id")
+                        for query_context in (metadata.get("query_contexts") or ())
+                        if isinstance(query_context, dict)
+                    ),
+                } - {None, ""}
+                # A source found by the whole-goal search belongs to no single
+                # requirement, so crediting it to this one is fair.
+                if not retrieved_for or aspect_id in retrieved_for:
+                    found_for_other_requirements_only = False
+            if len(parents) == 1 and found_for_other_requirements_only:
+                thin.append(aspect_id)
+        return tuple(thin)
+
     def _bounded_missing_evidence_queries(
         self,
         coverage,
@@ -1970,6 +2009,17 @@ Your refined contribution:
                 candidate_source_ids,
             )
 
+            # While corrective rounds remain, a requirement held up only by one
+            # document found for another requirement gets its own search. Once
+            # the rounds are spent it no longer blocks generation.
+            if coverage is not None and corrective_round < self.rag_retriever.corrective_retrieval_rounds:
+                thin_aspect_ids = self._thinly_covered_aspect_ids(coverage, documents_for_grading)
+                if thin_aspect_ids:
+                    coverage = replace(
+                        coverage,
+                        missing_aspect_ids=tuple(dict.fromkeys((*coverage.missing_aspect_ids, *thin_aspect_ids))),
+                    )
+
             if coverage is not None and pending_corrective is not None:
                 raw_library_diagnostics = getattr(self.paper_library, "last_evidence_diagnostics", [])
                 library_diagnostics = (
@@ -2276,10 +2326,18 @@ Your refined contribution:
         # structured-output stage fails, diagnostics and the UI must not claim
         # that no evidence was retrieved.
         context.last_retrieved_sources = serialize_documents(retrieved_documents)
+        retrieval_detail = "Validated evidence passed relevance, coverage, and source-eligibility gates."
+        thin_aspect_ids = self._thinly_covered_aspect_ids(coverage, graded_documents)
+        if thin_aspect_ids:
+            retrieval_detail += (
+                " Corrective search could not add dedicated evidence for: "
+                + ", ".join(thin_aspect_ids)
+                + "; each rests on one source retrieved for another requirement."
+            )
         context.last_generation_diagnostics["evidence_retrieval"] = {
             "status": "completed",
             "source_count": len(context.last_retrieved_sources),
-            "detail": "Validated evidence passed relevance, coverage, and source-eligibility gates.",
+            "detail": retrieval_detail,
         }
         logger.info("Evidence retrieval completed")
         context.last_generation_diagnostics["literature_synthesis"] = {

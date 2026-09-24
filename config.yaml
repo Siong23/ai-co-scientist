@@ -346,6 +346,15 @@ validation:
   entailment_validation_enabled: true
   audit_max_evidence_chars: 9000
 
+# OpenAlex scholarly search (journals, proceedings and arXiv) through its
+# semantic search. It keeps scholarly recall when arXiv's own API throttles this
+# host (HTTP 406), and its arXiv results merge with arXiv's by identifier.
+# OPENALEX_API_KEY in .env is optional: without it OpenAlex allows about 100
+# searches a day, and a free key (openalex.org) raises that tenfold.
+openalex:
+  enabled: true
+  results_per_query: 10
+
 # Semantic Scholar academic search. It first receives the original research goal,
 # then participates in expanded-query retrieval when direct retrieval is insufficient.
 # Set SEMANTIC_SCHOLAR_API_KEY in .env for higher rate limits (optional).
@@ -385,6 +394,18 @@ tavily:
   # Extracted passages are reranked locally against their assigned sub-question.
   max_evidence_chunks: 8
   max_chunk_chars: 1600
+  # Chunks from one page rank alike, so each page first gets at most this many
+  # of the max_evidence_chunks slots; leftover slots then go back to them.
+  max_chunks_per_document: 2
+  # Upload and aggregator sites host unverifiable copies or machine-written
+  # summaries of papers; the scholarly providers reach the originals.
+  exclude_domains:
+    - "scribd.com"
+    - "coursehero.com"
+    - "studocu.com"
+    - "slideshare.net"
+    - "docplayer.net"
+    - "eureka.patsnap.com"
   # Tavily is the only billed retrieval provider, and one cycle issues web
   # queries from expanded retrieval, every corrective round, and each reflection
   # claim check. Identical requests are therefore served from a local cache, and

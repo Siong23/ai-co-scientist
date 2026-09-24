@@ -1,6 +1,8 @@
 import logging
 import re
 import socket
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 15
 _ARXIV_API_ENDPOINT = "https://export.arxiv.org/api/query"
+# arXiv's API terms allow one request every three seconds on a single
+# connection, counted for the whole client rather than per query or thread.
+_MIN_REQUEST_INTERVAL_SECONDS = 3.0
+_request_slot_lock = threading.Lock()
+_next_request_at = 0.0
 _ARXIV_USER_AGENT = "open-ai-co-scientist/1.0 (+https://github.com/Siong23/ai-co-scientist)"
 _SORT_PARAMETERS = ("relevance", "lastUpdatedDate", "submittedDate")
 _ARXIV_FIELD_CLAUSE = re.compile(
@@ -103,13 +110,30 @@ def build_arxiv_query(query: str, *, max_concepts: int = 4) -> str:
     return " AND ".join(concepts) if concepts else f'all:"{normalized.replace(chr(34), "")}"'
 
 
+def _wait_for_request_slot() -> None:
+    """Block until arXiv's per-client request interval has elapsed.
+
+    Every arXiv search and lookup in the process shares one slot, so parallel
+    agents or retrieval rounds cannot burst past the documented rate.
+    """
+
+    global _next_request_at
+    with _request_slot_lock:
+        delay = _next_request_at - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        _next_request_at = time.monotonic() + _MIN_REQUEST_INTERVAL_SECONDS
+
+
 # arXiv's API frontend answers urllib3 (and therefore requests) with HTTP 406
-# regardless of headers, while the standard library and curl are served
-# normally. Fetching the feed here keeps every arXiv query on a transport the
-# API accepts; PDF downloads elsewhere are unaffected and still use requests.
+# regardless of headers. Once it throttles a host it also answers the standard
+# library with 406 for every query its cache misses, for tens of minutes; the
+# backoff treats that as a long cooldown. PDF downloads are unaffected and
+# still use requests.
 def _fetch_feed(params: Dict[str, Any], timeout: int = _REQUEST_TIMEOUT_SECONDS) -> Any:
     """Fetch one arXiv Atom page and return the parsed feed."""
 
+    _wait_for_request_slot()
     url = f"{_ARXIV_API_ENDPOINT}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(url, headers={"User-Agent": _ARXIV_USER_AGENT})
     with urllib.request.urlopen(request, timeout=timeout) as response:

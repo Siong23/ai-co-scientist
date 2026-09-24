@@ -11,6 +11,7 @@ _PROVIDER_CREDENTIALS = (
     "LMSTUDIO_BASE_URL",
     "LMSTUDIO_MODEL",
     "SEMANTIC_SCHOLAR_API_KEY",
+    "OPENALEX_API_KEY",
     "SPRINGER_API_KEY",
     "SPRINGER_OPEN_ACCESS_API_KEY",
     "SPRINGER_META_API_KEY",
@@ -36,6 +37,15 @@ def disable_automatic_paper_downloads(monkeypatch):
 
     paper_library_config = config.setdefault("paper_library", {})
     monkeypatch.setitem(paper_library_config, "enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def disable_keyless_openalex(monkeypatch, request):
+    """OpenAlex needs no credential, so retrievers built in offline tests must not include it."""
+
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setitem(config.setdefault("openalex", {}), "enabled", False)
 
 
 @pytest.fixture(autouse=True)

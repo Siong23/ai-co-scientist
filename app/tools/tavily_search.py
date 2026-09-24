@@ -77,8 +77,12 @@ class TavilySearchTool:
         cache_ttl_seconds: float = 0.0,
         max_searches_per_cycle: int = 0,
         max_extracts_per_cycle: int = 0,
+        exclude_domains: Sequence[str] = (),
     ) -> None:
         self.max_results = max_results
+        self.exclude_domains = list(
+            dict.fromkeys(str(domain).strip().casefold() for domain in exclude_domains if str(domain).strip())
+        )
         self.search_depth = search_depth
         self.search_chunks_per_source = max(1, min(3, search_chunks_per_source))
         self.extract_depth = extract_depth
@@ -190,6 +194,8 @@ class TavilySearchTool:
         }
         if domains:
             payload["include_domains"] = domains
+        if self.exclude_domains:
+            payload["exclude_domains"] = self.exclude_domains
         if freshness:
             payload["time_range"] = freshness
         if search_topic:

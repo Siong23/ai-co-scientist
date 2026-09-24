@@ -247,18 +247,34 @@ class SupervisorAgent:
             raw_generation_warnings = []
         generation_warnings = [str(warning) for warning in raw_generation_warnings if str(warning).strip()]
         search_stats = list(getattr(self.generation_agent.rag_retriever, "last_search_stats", []))
-        affected_providers = sorted(
-            {
-                str(stat.get("source", "Unknown provider"))
-                for stat in search_stats
-                if stat.get("status")
-                in {"rate_limited", "timeout", "provider_error", "quota_or_plan_rejection", "cooldown"}
-            }
-        )
+        degraded_statuses = {"rate_limited", "timeout", "provider_error", "quota_or_plan_rejection", "cooldown"}
+        affected_providers: set[str] = set()
+        # Per provider: queries sent, queries failed or skipped, HTTP statuses.
+        # "Some searches failed" hid that one run lost every arXiv query to 406.
+        query_counts: dict[str, list[int]] = {}
+        error_statuses: dict[str, set[int]] = {}
+        for stat in search_stats:
+            source = str(stat.get("source", "Unknown provider"))
+            requested = stat.get("queries_requested")
+            requested = requested if isinstance(requested, int) else 0
+            counts = query_counts.setdefault(source, [0, 0])
+            counts[0] += requested
+            if stat.get("status") in degraded_statuses:
+                affected_providers.add(source)
+                counts[1] += requested
+                if isinstance(stat.get("error_status"), int):
+                    error_statuses.setdefault(source, set()).add(stat["error_status"])
         if affected_providers:
+            descriptions = []
+            for source in sorted(affected_providers):
+                details = [f"HTTP {status}" for status in sorted(error_statuses.get(source, ()))]
+                total, degraded = query_counts[source]
+                if total:
+                    details.append(f"{degraded} of {total} queries failed or skipped")
+                descriptions.append(f"{source} ({'; '.join(details)})" if details else source)
             generation_warnings.append(
                 "Evidence search was degraded for "
-                + ", ".join(affected_providers)
+                + ", ".join(descriptions)
                 + ". Some searches failed or were skipped during provider cooldown; literature coverage may be incomplete."
             )
         evidence_pipeline = generation_diagnostics.get("evidence_pipeline", [])

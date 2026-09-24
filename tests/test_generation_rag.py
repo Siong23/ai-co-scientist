@@ -420,6 +420,115 @@ def test_a_missing_prior_art_intent_takes_a_repeated_intent_slot():
     assert "counterevidence" in intents
 
 
+def test_missing_intents_never_take_a_requirements_only_query():
+    """One run replaced the slicing query with a truncated prior-art query, and slicing went unsearched."""
+
+    goal = "Tune radio resources, network slices, handover policies and energy saving in a 5G architecture"
+    quotes = {
+        "radio": "radio resources",
+        "slices": "network slices",
+        "handover": "handover policies",
+        "energy": "energy saving",
+        "architecture": "5G architecture",
+    }
+    plan_payload = json.dumps(
+        {
+            "queries": [
+                {
+                    "query": f"{quote} reinforcement learning 5G",
+                    "purpose": "Run retrieval",
+                    "sub_question": f"What evidence addresses {quote}?",
+                    "source_type": "academic",
+                    "preferred_domains": [],
+                    "freshness": None,
+                    "evidence_requirement_id": requirement_id,
+                    "hypothesis_id": "primary_hypothesis",
+                    "search_intent": "support",
+                }
+                for requirement_id, quote in quotes.items()
+            ],
+            "required_terms": ["5G"],
+            "explicit_requirements": [{"id": key, "goal_quote": quote} for key, quote in quotes.items()],
+            "exploration_directions": [],
+        }
+    )
+
+    with patch("app.agents.call_llm", side_effect=[_research_plan_payload(goal), plan_payload]):
+        plan, error = call_llm_for_search_queries(goal, model="chosen-model")
+
+    assert error is None
+    assert plan is not None
+    assert {query.evidence_requirement_id for query in plan.queries} >= set(quotes)
+    added = {query.search_intent: query.query for query in plan.queries[len(quotes) :]}
+    assert set(added) == {"prior_art", "counterevidence"}
+    # The 86-character primary statement is cut at a word, not inside one.
+    assert added["prior_art"] == (
+        "Malaysia's history reflects interacting colonial and post-independence existing methods prior work"
+    )
+
+
+def test_query_stem_cuts_at_a_word_and_drops_a_dangling_conjunction():
+    from app.agents_modules.generation_helpers import _query_stem
+
+    statement = "AI techniques can dynamically optimize 5G radio resources, slices, handovers, and energy."
+
+    assert _query_stem(statement, 80) == "AI techniques can dynamically optimize 5G radio resources, slices, handovers"
+    assert _query_stem("Short statement.", 80) == "Short statement"
+
+
+def test_research_planner_is_told_todays_date():
+    """Without it the planner asked for "Recent (2020-2024)" research in 2026."""
+
+    from datetime import date
+
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_research_plan_payload(), _query_plan_payload(query_count=5, hypothesis_guided=True)],
+    ) as mock_call:
+        call_llm_for_search_queries("brief describe the malaysia history", model="chosen-model")
+
+    assert f"TODAY'S DATE\n{date.today().isoformat()}" in mock_call.call_args_list[0].args[0]
+
+
+def test_one_document_found_for_another_requirement_is_thin_coverage():
+    """One 6G review found for energy also 'covered' radio resources and the architecture."""
+
+    coverage = EvidenceCoverage(
+        aspect_source_ids={
+            "energy": ("springer:review",),
+            "radio": ("springer:review",),
+            "handover": ("web:survey#chunk-2", "web:survey#chunk-3"),
+            "slices": ("web:a", "web:b"),
+            "architecture": ("web:survey#chunk-2",),
+            "goal_level": ("arXiv:1111.1111",),
+            "missing": (),
+        },
+        missing_aspect_ids=("missing",),
+        gap_queries=(),
+        reason="",
+    )
+    documents = [
+        Document(page_content="", metadata={"source_id": "springer:review", "evidence_requirement_id": "energy"}),
+        *(
+            Document(
+                page_content="",
+                metadata={
+                    "source_id": f"web:survey#chunk-{index}",
+                    "parent_source_id": "web:survey",
+                    "query_contexts": ({"evidence_requirement_id": "handover"},),
+                },
+            )
+            for index in (2, 3)
+        ),
+        Document(page_content="", metadata={"source_id": "web:a", "evidence_requirement_id": "energy"}),
+        Document(page_content="", metadata={"source_id": "web:b", "evidence_requirement_id": "handover"}),
+        # Found by the whole-goal search, so it belongs to no single requirement.
+        Document(page_content="", metadata={"source_id": "arXiv:1111.1111"}),
+    ]
+
+    assert GenerationAgent._thinly_covered_aspect_ids(coverage, documents) == ("radio", "architecture")
+
+
 def test_query_rewriting_retries_truncated_research_plan_once():
     truncated_plan = '{"research_goal": "brief describe the malaysia history", "research_type": "discovery"'
 
@@ -2324,6 +2433,67 @@ def test_extracted_web_chunks_are_reranked_by_sub_question_and_globally_bounded(
     assert all(chunk.metadata["document_type"] == "official_docs" for chunk in chunks)
 
 
+def test_one_page_cannot_fill_every_web_evidence_slot():
+    """Five chunks of one survey took five of eight slots in a run; the cap lets other pages in first."""
+
+    retriever = ArxivRAGRetriever(query_count=1, top_k=2)
+    retriever.max_web_evidence_chunks = 3
+    retriever.max_web_chunks_per_document = 2
+    retriever.tavily = Mock(is_configured=True)
+    retriever.tavily.extract.return_value = {
+        "https://example.org/survey": (
+            "<chunk 1> alpha survey part one\n<chunk 2> alpha survey part two\n"
+            "<chunk 3> alpha survey part three\n<chunk 4> alpha survey part four"
+        ),
+        "https://example.org/study": "<chunk 1> beta study with decisive evidence",
+    }
+    selected = [
+        Document(
+            page_content="Search snippet",
+            metadata={
+                "source_id": source_id,
+                "source_type": "web",
+                "source_family": "web",
+                "document_type": "webpage",
+                "provider": "tavily",
+                "title": source_id,
+                "url": url,
+                "canonical_url": url,
+                "domain": "example.org",
+                "summary": "Discovery snippet",
+                "content": "",
+                "content_extracted": False,
+                "sub_question": "Which evidence answers the question?",
+                "retrieval_query": "evidence",
+                "document_rerank_score": 0.8,
+            },
+        )
+        for source_id, url in (("web:survey", "https://example.org/survey"), ("web:study", "https://example.org/study"))
+    ]
+
+    class ChunkVectorStore:
+        def __init__(self, *args, **kwargs):
+            self.documents = []
+
+        def add_documents(self, documents, ids):
+            self.documents = list(documents)
+
+        def similarity_search_with_score(self, query, k):
+            return sorted(
+                ((document, 0.95 if "alpha" in document.page_content else 0.9) for document in self.documents),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:k]
+
+    with patch("app.rag_retriever.InMemoryVectorStore", ChunkVectorStore):
+        chunks = retriever._extract_selected_web_documents(selected, "original research goal")
+
+    parents = [chunk.metadata["parent_source_id"] for chunk in chunks]
+    assert len(chunks) == 3
+    assert parents.count("web:survey") == 2
+    assert parents.count("web:study") == 1
+
+
 def test_web_search_snippet_is_not_evidence_when_extract_fails():
     web_result = {
         "source_id": "web:search-only",
@@ -3548,6 +3718,95 @@ def test_missing_evidence_triggers_corrective_retrieval_before_generation():
     generation_prompt = mock_llm.call_args_list[2].args[0]
     assert "Evidence about the subject" in generation_prompt
     assert "Evidence about the requested outcome" in generation_prompt
+
+
+def test_thin_coverage_gets_its_own_corrective_search():
+    """The grader credited radio resources to a review found for energy; that must not end retrieval."""
+
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        corrective_retrieval_rounds=2,
+        debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
+    )
+    review = Mock()
+    review.page_content = "Source ID: arXiv:1111.1111\nAbstract: A review of energy management."
+    review.metadata = {
+        "source_id": "arXiv:1111.1111",
+        "arxiv_id": "1111.1111",
+        "title": "Energy review",
+        "abstract": "A review of energy management.",
+        "evidence_requirement_id": "energy",
+    }
+    radio_paper = Mock()
+    radio_paper.page_content = "Source ID: arXiv:2222.2222\nAbstract: Learning radio resource allocation."
+    radio_paper.metadata = {
+        "source_id": "arXiv:2222.2222",
+        "arxiv_id": "2222.2222",
+        "title": "Radio resource allocation",
+        "abstract": "Learning radio resource allocation.",
+        "evidence_requirement_id": "radio",
+    }
+    review_only = EvidenceCoverage(
+        aspect_source_ids={"energy": ("arXiv:1111.1111",), "radio": ("arXiv:1111.1111",)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="The review gives context for both requirements.",
+    )
+    dedicated = EvidenceCoverage(
+        aspect_source_ids={"energy": ("arXiv:1111.1111",), "radio": ("arXiv:2222.2222",)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Each requirement has its own evidence.",
+    )
+    generation_payload = json.dumps(
+        [
+            {
+                "title": "Grounded hypothesis",
+                "hypothesis": "A grounded relationship can be tested.",
+                "rationale": "Both requirements have evidence.",
+                "feasibility": "Compare measurable outcomes.",
+                "source_ids": ["arXiv:1111.1111", "arXiv:2222.2222"],
+            }
+        ]
+    )
+
+    with (
+        patch(
+            "app.agents.call_llm",
+            side_effect=[
+                _query_plan_payload(
+                    "Tune radio resources and energy saving",
+                    requirements=[
+                        {"id": "energy", "goal_quote": "energy saving"},
+                        {"id": "radio", "goal_quote": "radio resources"},
+                    ],
+                ),
+                _synthesis_payload("arXiv:1111.1111", "arXiv:2222.2222"),
+                generation_payload,
+            ],
+        ),
+        patch.object(agent, "_retrieve_scientific_sources", side_effect=[[review], [radio_paper]]) as mock_retrieve,
+        patch(
+            "app.agents_modules.generation.call_llm_for_relevance_filter",
+            side_effect=[(["arXiv:1111.1111"], None), (["arXiv:1111.1111", "arXiv:2222.2222"], None)],
+        ),
+        patch(
+            "app.agents_modules.generation.call_llm_for_evidence_coverage",
+            side_effect=[(review_only, None), (dedicated, None)],
+        ),
+    ):
+        hypotheses, errors = agent.generate_new_hypotheses(
+            ResearchGoal("Tune radio resources and energy saving", num_hypotheses=1),
+            ContextMemory(),
+        )
+
+    assert errors == []
+    assert len(hypotheses) == 1
+    assert mock_retrieve.call_count == 2
+    gap_plan = mock_retrieve.call_args_list[1].args[1]
+    assert {query.evidence_requirement_id for query in gap_plan.queries} == {"radio"}
 
 
 def test_generation_stops_when_corrective_retrieval_cannot_fill_gap():
