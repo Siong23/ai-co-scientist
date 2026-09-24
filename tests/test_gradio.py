@@ -932,7 +932,7 @@ def test_execute_cycle_checkbox_choice_overrides_the_config_default(gradio_app_m
     assert result["cycle_details"]["experiment_result"]["status"] == "skipped_auto_run_disabled"
 
 
-def test_advanced_settings_offer_the_experiment_checkbox(gradio_app_module):
+def test_interface_offers_the_experiment_checkbox(gradio_app_module):
     with patch.object(gradio_app_module, "fetch_lmstudio_models", return_value=[]):
         demo = gradio_app_module.create_gradio_interface()
 

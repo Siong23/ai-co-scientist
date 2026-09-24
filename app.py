@@ -729,8 +729,8 @@ def execute_cycle(
 ) -> Dict[str, Any]:
     """Run a cycle against the supplied state and return display-ready results.
 
-    ``run_experiment`` carries the Advanced Settings checkbox; ``None`` falls
-    back to ``experiment_auto_run`` in config.yaml.
+    ``run_experiment`` carries the experiment checkbox above Run Cycle; ``None``
+    falls back to ``experiment_auto_run`` in config.yaml.
     """
     import datetime
 
@@ -903,7 +903,7 @@ def execute_cycle(
                 "research_type": context.research_type,
                 "reason": (
                     "The automated experiment is turned off for this cycle "
-                    "(Advanced Settings: Run automated experiment after the cycle). "
+                    '(the "Run automated experiment after the cycle" checkbox above Run Cycle). '
                     "The hypotheses above are complete."
                 ),
                 "errors": [],
@@ -2348,14 +2348,16 @@ def create_gradio_interface():
                     elo_k_factor = gr.Slider(
                         minimum=1, maximum=100, value=32, step=1, label="Elo K-Factor (Ranking Sensitivity)"
                     )
-                    run_experiment_toggle = gr.Checkbox(
-                        value=bool(config.get("experiment_auto_run", True)),
-                        label="Run automated experiment after the cycle",
-                        info=(
-                            "Off: the cycle ends after ranking and shows its hypotheses right away; "
-                            "no experiment code is generated or run."
-                        ),
-                    )
+
+                # Kept beside Run Cycle, since it changes how long a cycle runs.
+                run_experiment_toggle = gr.Checkbox(
+                    value=bool(config.get("experiment_auto_run", True)),
+                    label="Run automated experiment after the cycle",
+                    info=(
+                        "Off: the cycle ends after ranking and shows its hypotheses right away; "
+                        "no experiment code is generated or run."
+                    ),
+                )
 
                 # Single action button
                 with gr.Row():
