@@ -894,9 +894,55 @@ def test_execute_cycle_skips_experiment_when_auto_run_is_off(gradio_app_module, 
     run_experiment.assert_not_called()
     experiment_result = result["cycle_details"]["experiment_result"]
     assert experiment_result["status"] == "skipped_auto_run_disabled"
-    assert "experiment_auto_run" in experiment_result["reason"]
+    assert "turned off for this cycle" in experiment_result["reason"]
     assert result["cycle_details"]["comparison_result"]["status"] == "skipped_auto_run_disabled"
     assert "Automated Experiment Skipped" in result["results_html"]
+
+
+def test_execute_cycle_checkbox_choice_overrides_the_config_default(gradio_app_module, monkeypatch, tmp_path):
+    from app.config import config
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(config, "experiment_auto_run", True)
+
+    run_experiment = Mock()
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", run_experiment)
+
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment checkbox test"),
+        ContextMemory(),
+        cycle_supervisor,
+        run_experiment=False,
+    )
+
+    run_experiment.assert_not_called()
+    assert result["cycle_details"]["experiment_result"]["status"] == "skipped_auto_run_disabled"
+
+
+def test_advanced_settings_offer_the_experiment_checkbox(gradio_app_module):
+    with patch.object(gradio_app_module, "fetch_lmstudio_models", return_value=[]):
+        demo = gradio_app_module.create_gradio_interface()
+
+    checkboxes = [
+        component
+        for component in demo.config["components"]
+        if component["type"] == "checkbox"
+        and component["props"].get("label") == "Run automated experiment after the cycle"
+    ]
+    assert len(checkboxes) == 1
 
 
 def test_execute_cycle_caps_experiment_timeout_to_remaining_budget(gradio_app_module, monkeypatch, tmp_path):
@@ -1034,8 +1080,10 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
     monkeypatch.setenv(RUNS_DIR_ENV, str(tmp_path))
     gradio_app_module.current_research_goal = ResearchGoal(description="status test")
     gradio_app_module.global_context = ContextMemory()
+    experiment_choices = []
 
-    def slow_cycle(research_goal, context, cycle_supervisor, progress_callback=None):
+    def slow_cycle(research_goal, context, cycle_supervisor, progress_callback=None, run_experiment=None):
+        experiment_choices.append(run_experiment)
         running_event = {
             "step": "generation",
             "status": "running",
@@ -1072,8 +1120,11 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
     monkeypatch.setattr(gradio_app_module, "write_report", lambda run: "report.html")
     monkeypatch.setattr(gradio_app_module, "report_file_url", lambda path: "/report.html")
 
-    updates = list(gradio_app_module.run_cycle_with_progress(timeout_seconds=1, poll_seconds=0.001))
+    updates = list(
+        gradio_app_module.run_cycle_with_progress(timeout_seconds=1, poll_seconds=0.001, run_experiment=False)
+    )
 
+    assert experiment_choices == [False]
     assert any("Active work: Discovering evidence." in update[0] for update in updates)
     assert all("Streamed hypothesis" not in update[1] for update in updates[:-1])
     assert any("Elapsed:" in update[0] for update in updates)
@@ -1093,7 +1144,7 @@ def test_run_cycle_with_progress_times_out(gradio_app_module, monkeypatch, tmp_p
     gradio_app_module.current_research_goal = ResearchGoal(description="timeout test")
     gradio_app_module.global_context = ContextMemory()
 
-    def stuck_cycle(research_goal, context, cycle_supervisor, progress_callback=None):
+    def stuck_cycle(research_goal, context, cycle_supervisor, progress_callback=None, run_experiment=None):
         if progress_callback:
             progress_callback(
                 {

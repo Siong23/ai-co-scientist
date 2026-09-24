@@ -725,8 +725,13 @@ def execute_cycle(
     context: ContextMemory,
     cycle_supervisor: SupervisorAgent,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    run_experiment: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Run a cycle against the supplied state and return display-ready results."""
+    """Run a cycle against the supplied state and return display-ready results.
+
+    ``run_experiment`` carries the Advanced Settings checkbox; ``None`` falls
+    back to ``experiment_auto_run`` in config.yaml.
+    """
     import datetime
 
     research_trace: List[Dict[str, Any]] = []
@@ -794,9 +799,11 @@ def execute_cycle(
         if remaining_budget_seconds is not None:
             experiment_timeout_seconds = int(min(EXPERIMENT_TIMEOUT_SECONDS, remaining_budget_seconds))
         experiment_has_budget = experiment_timeout_seconds >= EXPERIMENT_MIN_BUDGET_SECONDS
-        # With experiment_auto_run off a cycle ends after the agent workflow, so
-        # its hypotheses appear without waiting for code generation and training.
-        experiment_auto_run = bool(config.get("experiment_auto_run", True))
+        # With the experiment off a cycle ends after the agent workflow, so its
+        # hypotheses appear without waiting for code generation and training.
+        experiment_auto_run = (
+            bool(config.get("experiment_auto_run", True)) if run_experiment is None else bool(run_experiment)
+        )
         experiment_enabled = hypothesis_pipeline_enabled and experiment_auto_run and experiment_has_budget
         print("\n" + "=" * 60)
         print("AI CO-SCIENTIST WORKFLOW COMPLETED")
@@ -807,8 +814,8 @@ def execute_cycle(
             print("\n[2/2] Running automated deep-learning experiment...")
             logger.debug("Starting automated experiment pipeline.")
         elif hypothesis_pipeline_enabled and not experiment_auto_run:
-            print("\n[2/2] Skipping the automated experiment: experiment_auto_run is off.")
-            logger.info("Skipping the automated experiment because experiment_auto_run is off.")
+            print("\n[2/2] Skipping the automated experiment: it is turned off for this cycle.")
+            logger.info("Skipping the automated experiment because it is turned off for this cycle.")
         elif hypothesis_pipeline_enabled:
             print("\n[2/2] Skipping the automated experiment: not enough cycle budget left.")
             logger.warning(
@@ -831,7 +838,7 @@ def execute_cycle(
                 "summary": (
                     "Selecting the best hypothesis and starting the PyTorch experiment."
                     if experiment_enabled
-                    else "Skipped: automatic experiments are turned off (experiment_auto_run)."
+                    else "Skipped: the automated experiment is turned off for this cycle."
                     if hypothesis_pipeline_enabled and not experiment_auto_run
                     else (
                         f"Skipped: only {format_timeout_duration(max(remaining_budget_seconds or 0.0, 0.0))} "
@@ -895,7 +902,8 @@ def execute_cycle(
                 "skipped": True,
                 "research_type": context.research_type,
                 "reason": (
-                    "Automatic experiments are turned off (experiment_auto_run: false in config.yaml). "
+                    "The automated experiment is turned off for this cycle "
+                    "(Advanced Settings: Run automated experiment after the cycle). "
                     "The hypotheses above are complete."
                 ),
                 "errors": [],
@@ -1313,6 +1321,7 @@ def _ordered_ranking_step_names(steps: Dict[str, Any]) -> List[str]:
 def run_cycle_with_progress(
     timeout_seconds: int = CYCLE_TIMEOUT_SECONDS,
     poll_seconds: float = CYCLE_PROGRESS_INTERVAL_SECONDS,
+    run_experiment: Optional[bool] = None,
 ):
     """Run a cycle in the background and stream its research-process trace."""
     global global_context
@@ -1365,6 +1374,7 @@ def run_cycle_with_progress(
                     run_context,
                     run_supervisor,
                     progress_callback=progress_events.put,
+                    run_experiment=run_experiment,
                 )
         finally:
             deadline_timer.cancel()
@@ -2338,6 +2348,14 @@ def create_gradio_interface():
                     elo_k_factor = gr.Slider(
                         minimum=1, maximum=100, value=32, step=1, label="Elo K-Factor (Ranking Sensitivity)"
                     )
+                    run_experiment_toggle = gr.Checkbox(
+                        value=bool(config.get("experiment_auto_run", True)),
+                        label="Run automated experiment after the cycle",
+                        info=(
+                            "Off: the cycle ends after ranking and shows its hypotheses right away; "
+                            "no experiment code is generated or run."
+                        ),
+                    )
 
                 # Single action button
                 with gr.Row():
@@ -2435,7 +2453,14 @@ def create_gradio_interface():
 
         # Event handler: single button sets research goal and runs cycle
         def run_full_cycle(
-            research_goal, llm_model, num_hypotheses, generation_temp, reflection_temp, elo_k_factor, top_k_hypotheses
+            research_goal,
+            llm_model,
+            num_hypotheses,
+            generation_temp,
+            reflection_temp,
+            elo_k_factor,
+            top_k_hypotheses,
+            run_experiment,
         ):
             # Set research goal
             status_msg, _ = set_research_goal(
@@ -2447,8 +2472,10 @@ def create_gradio_interface():
                 elo_k_factor,
                 top_k_hypotheses,
             )
+            experiment_note = "" if run_experiment else " The automated experiment is off for this cycle."
             yield (
-                f"{status_msg}\n\nStarting cycle with a {format_timeout_duration(CYCLE_TIMEOUT_SECONDS)} limit.",
+                f"{status_msg}\n\nStarting cycle with a {format_timeout_duration(CYCLE_TIMEOUT_SECONDS)} limit."
+                f"{experiment_note}",
                 format_research_trace_html([], running=True),
                 "<p>Starting cycle...</p>",
                 "",
@@ -2456,7 +2483,9 @@ def create_gradio_interface():
                 gr.update(choices=history_run_choices(), value=None),
                 gr.update(choices=sidebar_run_choices(), value=None),
             )
-            for status, results, references, research_trace in run_cycle_with_progress():
+            for status, results, references, research_trace in run_cycle_with_progress(
+                run_experiment=bool(run_experiment)
+            ):
                 yield (
                     f"{status_msg}\n\n{status}",
                     research_trace,
@@ -2477,6 +2506,7 @@ def create_gradio_interface():
                 reflection_temp,
                 elo_k_factor,
                 top_k_hypotheses,
+                run_experiment_toggle,
             ],
             outputs=[
                 status_output,
