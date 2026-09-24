@@ -903,6 +903,94 @@ def test_execute_cycle_caps_experiment_timeout_to_remaining_budget(gradio_app_mo
     assert captured["timeout_seconds"] < gradio_app_module.EXPERIMENT_TIMEOUT_SECONDS
 
 
+def _supervisor_with_ranked_hypothesis():
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {
+            "ranking_1": {
+                "hypotheses": [{"id": "H1", "title": "Kept hypothesis", "text": "Ranked text.", "elo_score": 1210.0}]
+            }
+        },
+        "finalization": {"ready": True, "reasons": []},
+    }
+    return cycle_supervisor
+
+
+def test_execute_cycle_keeps_hypotheses_when_the_experiment_report_fails(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(DatasetManager, "get_latest_dataset", lambda self: "data/5g_nidd/5g_nidd.csv")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        gradio_app_module.ExperimentOrchestrator,
+        "run_experiment",
+        lambda self, **kwargs: {"success": True, "status": "completed", "execution": {}},
+    )
+    monkeypatch.setattr(
+        gradio_app_module.experiment_comparator,
+        "compare",
+        lambda *args, **kwargs: {"status": "experiment_result_unavailable", "paper_result": None},
+    )
+
+    def broken_report(experiment_result, comparison_result):
+        raise AttributeError("'NoneType' object has no attribute 'get'")
+
+    monkeypatch.setattr(gradio_app_module, "format_experiment_results_html", broken_report)
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment report failure test"),
+        ContextMemory(),
+        _supervisor_with_ranked_hypothesis(),
+    )
+
+    assert result["status"].startswith("⚠️ Cycle 1 kept its hypotheses, but a later step failed")
+    assert "Kept hypothesis" in result["results_html"]
+    assert "A later step failed" in result["results_html"]
+    assert result["cycle_details"]["steps"]["ranking_1"]["hypotheses"][0]["id"] == "H1"
+    assert any("NoneType" in error for error in result["cycle_details"]["errors"])
+
+
+def test_execute_cycle_keeps_hypotheses_when_the_experiment_raises(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(DatasetManager, "get_latest_dataset", lambda self: "data/5g_nidd/5g_nidd.csv")
+    monkeypatch.chdir(tmp_path)
+
+    def crashing_experiment(self, **kwargs):
+        raise RuntimeError("experiment pipeline crashed")
+
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", crashing_experiment)
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment crash test"),
+        ContextMemory(),
+        _supervisor_with_ranked_hypothesis(),
+    )
+
+    assert "experiment pipeline crashed" in result["status"]
+    assert result["status"].startswith("⚠️")
+    assert "Kept hypothesis" in result["results_html"]
+
+
+def test_execute_cycle_reports_a_failure_before_any_hypothesis(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.chdir(tmp_path)
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.side_effect = RuntimeError("workflow crashed")
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Early failure test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    assert result["status"] == "❌ Error during cycle execution: workflow crashed"
+    assert result["results_html"] == ""
+    assert result["cycle_details"]["steps"] == {}
+
+
 def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
     from app.run_store import RUNS_DIR_ENV

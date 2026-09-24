@@ -749,6 +749,11 @@ def execute_cycle(
         f.write(f"LOGGING FOR THIS GOAL: {research_goal.description}\n")
         f.write("--- Endpoint /run_cycle START ---\n")
 
+    # Set inside the try block; the error path below keeps whatever the agent
+    # workflow already finished.
+    cycle_details: Optional[Dict[str, Any]] = None
+    results_html = ""
+
     try:
         iteration = context.iteration_number + 1
 
@@ -1091,6 +1096,37 @@ def execute_cycle(
                 "details": [],
             }
         )
+        # A failure after the agent workflow finished, e.g. while building the
+        # experiment report, must not discard the hypotheses it produced.
+        finished_steps = (cycle_details or {}).get("steps") or {}
+        if any(isinstance(step, dict) and step.get("hypotheses") for step in finished_steps.values()):
+            try:
+                if not results_html:
+                    results_html = format_cycle_results(cycle_details, log_file=log_file)
+                references_html = get_references_html(cycle_details, research_goal=research_goal)
+            except Exception:
+                logger.exception("The finished hypotheses could not be shown after the cycle error.")
+            else:
+                import html as html_lib
+
+                reason = redact_secrets(str(e))
+                cycle_details.setdefault("errors", []).append(error_msg)
+                return {
+                    "status": (
+                        f"⚠️ Cycle {iteration} kept its hypotheses, but a later step failed: {reason}\n\n"
+                        f"{to_bold('Log:')} {log_file}"
+                    ),
+                    "results_html": results_html
+                    + f"""
+                    <div style="margin-top: 20px; padding: 15px; border: 2px solid #e67e22; border-radius: 8px;">
+                        <h3>⚠️ A later step failed</h3>
+                        <p>The hypotheses above are complete. The cycle stopped after them: {html_lib.escape(reason)}</p>
+                    </div>
+                    """,
+                    "references_html": references_html,
+                    "cycle_details": cycle_details,
+                    "log_file": log_file,
+                }
         return {
             "status": error_msg,
             "results_html": "",
