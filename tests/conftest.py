@@ -9,6 +9,7 @@ from app.config import config
 _PROVIDER_CREDENTIALS = (
     "LMSTUDIO_API_KEY",
     "LMSTUDIO_BASE_URL",
+    "LMSTUDIO_EMBEDDING_BASE_URL",
     "LMSTUDIO_MODEL",
     "SEMANTIC_SCHOLAR_API_KEY",
     "OPENALEX_API_KEY",
@@ -29,6 +30,9 @@ def disable_external_provider_credentials(monkeypatch, request):
         return
     for variable in _PROVIDER_CREDENTIALS:
         monkeypatch.delenv(variable, raising=False)
+    # Offline tests assume one LM Studio server, so chat and embedding calls keep
+    # their serialized order; tests of a separate embedding server opt in.
+    monkeypatch.setitem(config, "lmstudio_embedding_base_url", None)
 
 
 @pytest.fixture(autouse=True)

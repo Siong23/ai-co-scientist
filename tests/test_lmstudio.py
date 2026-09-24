@@ -9,6 +9,9 @@ import pytest
 import app.utils as utils
 from app.utils import call_llm, classify_llm_error, fetch_lmstudio_models
 
+# conftest replaces encode with an offline stub for every test; keep the real one.
+_LMSTUDIO_ENCODE = utils.LMStudioSentenceTransformer.encode
+
 
 def _completion(content: str = "LOCAL RESPONSE"):
     completion = MagicMock()
@@ -26,6 +29,36 @@ def test_environment_overrides_lmstudio_configuration(monkeypatch):
     assert utils.get_lmstudio_base_url() == "http://local-server:9999/v1"
     assert utils.get_lmstudio_model() == "local/model"
     assert utils.get_lmstudio_api_key() == "local-secret"
+
+
+def test_embedding_server_defaults_to_the_chat_server(monkeypatch):
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://chat-server:1234/v1/")
+    monkeypatch.setitem(utils.config, "lmstudio_embedding_base_url", None)
+
+    assert utils.get_lmstudio_embedding_base_url() == "http://chat-server:1234/v1"
+
+
+def test_embedding_server_can_differ_from_the_chat_server(monkeypatch):
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://chat-server:1234/v1")
+    monkeypatch.setitem(utils.config, "lmstudio_embedding_base_url", "http://embedding-config:1234/v1/")
+    assert utils.get_lmstudio_embedding_base_url() == "http://embedding-config:1234/v1"
+
+    monkeypatch.setenv("LMSTUDIO_EMBEDDING_BASE_URL", "http://embedding-env:1234/v1/")
+    assert utils.get_lmstudio_embedding_base_url() == "http://embedding-env:1234/v1"
+    assert utils.get_lmstudio_base_url() == "http://chat-server:1234/v1"
+
+
+def test_embeddings_are_requested_from_the_embedding_server(monkeypatch):
+    monkeypatch.setattr(utils.LMStudioSentenceTransformer, "encode", _LMSTUDIO_ENCODE)
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://chat-server:1234/v1")
+    monkeypatch.setenv("LMSTUDIO_EMBEDDING_BASE_URL", "http://embedding-server:1234/v1")
+    with patch.object(utils, "OpenAI") as mock_openai:
+        mock_openai.return_value.embeddings.create.return_value = MagicMock(data=[MagicMock(embedding=[3.0, 4.0])])
+        vector = utils.LMStudioSentenceTransformer("embedding-model").encode("text")
+
+    assert mock_openai.call_args.kwargs["base_url"] == "http://embedding-server:1234/v1"
+    mock_openai.return_value.embeddings.create.assert_called_once_with(model="embedding-model", input=["text"])
+    assert vector.tolist() == pytest.approx([0.6, 0.8])
 
 
 def test_fetch_lmstudio_models_is_sorted_and_deduplicated(monkeypatch):

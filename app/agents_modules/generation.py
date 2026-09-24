@@ -25,7 +25,16 @@ from ..rag_retriever import (
     serialize_documents,
 )
 from ..research_modes import normalize_research_type, research_type_requires_hypotheses
-from ..utils import execution_cancelled, generate_unique_id, logger, redact_secrets
+
+# from ..utils import execution_cancelled, generate_unique_id, logger, redact_secrets
+from ..utils import (
+    execution_cancelled,
+    generate_unique_id,
+    get_lmstudio_base_url,
+    get_lmstudio_embedding_base_url,
+    logger,
+    redact_secrets,
+)
 from .generation_helpers import (
     AbstractScreeningResult,
     AssumptionAssessment,
@@ -1800,8 +1809,15 @@ Your refined contribution:
         # A local LM Studio server may unload the chat model while loading the
         # embedding model (or vice versa). Avoid that cross-model race unless
         # the operator explicitly opts into concurrent model calls.
-        serialize_lmstudio_calls = bool(config.get("use_lmstudio_embeddings", False)) and bool(
-            config.get("serialize_lmstudio_model_calls", True)
+        # serialize_lmstudio_calls = bool(config.get("use_lmstudio_embeddings", False)) and bool(
+        #     config.get("serialize_lmstudio_model_calls", True)
+        # )
+        # Models on separate servers cannot evict each other, so only a shared
+        # server needs the serialized path.
+        serialize_lmstudio_calls = (
+            bool(config.get("use_lmstudio_embeddings", False))
+            and bool(config.get("serialize_lmstudio_model_calls", True))
+            and get_lmstudio_embedding_base_url() == get_lmstudio_base_url()
         )
         if serialize_lmstudio_calls:
             query_plan, rewrite_error = plan_queries()

@@ -297,6 +297,35 @@ def test_initial_search_serializes_lmstudio_chat_and_embedding_models(monkeypatc
     assert events == ["planning", "retrieval"]
 
 
+def test_initial_search_overlaps_planning_when_embeddings_use_a_separate_server(monkeypatch):
+    module = __import__("app.agents_modules.generation", fromlist=["config"])
+    monkeypatch.setitem(module.config, "use_lmstudio_embeddings", True)
+    monkeypatch.setitem(module.config, "serialize_lmstudio_model_calls", True)
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://chat-server:1234/v1")
+    monkeypatch.setenv("LMSTUDIO_EMBEDDING_BASE_URL", "http://embedding-server:1234/v1")
+    agent = GenerationAgent()
+    rendezvous = Barrier(2, timeout=3)
+    plan = goal_plan()
+    goal = ResearchGoal("5G slice bandwidth under traffic spikes")
+    document = Document(page_content="5G evidence", metadata={"source_id": "source1"})
+
+    def search(received_goal):
+        assert received_goal is goal
+        rendezvous.wait()
+        return [document]
+
+    def planning(*args, **kwargs):
+        assert args[0] == goal.description
+        rendezvous.wait()
+        return plan, None
+
+    with (
+        patch.object(agent, "_retrieve_original_scientific_sources", side_effect=search),
+        patch("app.agents_modules.generation.call_llm_for_search_queries", side_effect=planning),
+    ):
+        assert agent._plan_and_retrieve_initial(goal) == (plan, None, [document])
+
+
 def test_coverage_failure_cannot_manufacture_support():
     agent = GenerationAgent(agentic_research_enabled=False)
     context = ContextMemory()

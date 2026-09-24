@@ -85,6 +85,8 @@ In accordance with LLNL policy on Generative Artificial Intelligence, this proje
 
 - Default settings can be adjusted in `config.yaml`.
 - `LMSTUDIO_BASE_URL` overrides the local API address.
+- `LMSTUDIO_EMBEDDING_BASE_URL` (or `lmstudio_embedding_base_url` in `config.yaml`)
+  serves the embedding model from a separate LM Studio server; it defaults to the chat server.
 - `LMSTUDIO_MODEL` overrides the configured default model.
 - `LMSTUDIO_API_KEY` is optional and only needed when LM Studio authentication is enabled.
 - Many settings can be overridden in the Gradio UI under "Advanced Settings".

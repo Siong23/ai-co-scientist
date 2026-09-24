@@ -9,6 +9,10 @@ openrouter_base_url: "https://openrouter.ai/api/v1"
 # lmstudio_base_url: "http://100.117.90.5:1234/v1"
 lmstudio_base_url: "http://100.75.120.13:1234/v1"
 # lmstudio_base_url: "http://100.96.215.41:1234/v1/"
+# The embedding model runs on its own LM Studio server so the chat server never
+# has to hold (or swap in) both models. LMSTUDIO_EMBEDDING_BASE_URL in .env
+# overrides this; with neither set, embeddings use lmstudio_base_url.
+lmstudio_embedding_base_url: "http://100.96.215.41:1234/v1"
 
 # LLM Model. Use a compact free default so the public Hugging Face demo can
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
@@ -214,9 +218,11 @@ step_temperatures:
 use_lmstudio_embeddings: true
 # Loading chat and embedding models concurrently can make memory-constrained
 # LM Studio servers unload one model while the other request is still active.
+# This only applies when both models share a server: with a separate
+# lmstudio_embedding_base_url, chat and embedding calls may overlap.
 serialize_lmstudio_model_calls: true
-# sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
-sentence_transformer_model: "text-embedding-nomic-embed-text-v1.5"
+sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
+# sentence_transformer_model: "text-embedding-nomic-embed-text-v1.5"
 
 rag:
   # Maximum rewritten/corrective queries per retrieval round. The planner uses

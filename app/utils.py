@@ -186,6 +186,16 @@ def get_lmstudio_base_url() -> str:
     return str(value).rstrip("/")
 
 
+def get_lmstudio_embedding_base_url() -> str:
+    """Return the LM Studio API base URL that serves the embedding model.
+
+    The embedding model may run on its own server when one machine cannot hold
+    both models; without an override it shares the chat model's server.
+    """
+    value = os.getenv("LMSTUDIO_EMBEDDING_BASE_URL") or config.get("lmstudio_embedding_base_url")
+    return str(value).rstrip("/") if value else get_lmstudio_base_url()
+
+
 def get_lmstudio_native_chat_url() -> str:
     """Return LM Studio's native chat endpoint beside the configured /v1 API."""
 
@@ -564,7 +574,8 @@ class LMStudioSentenceTransformer:
         input_texts = [sentences] if is_single else list(sentences)
 
         client = OpenAI(
-            base_url=get_lmstudio_base_url(),
+            # base_url=get_lmstudio_base_url(),
+            base_url=get_lmstudio_embedding_base_url(),
             api_key=get_lmstudio_api_key(),
             max_retries=0,
             timeout=_openai_timeout(),
