@@ -331,19 +331,21 @@ def test_strategy_library_rotates_across_iterations():
     context, _, _ = _context()
     context.iteration_number = 1
     agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
-    responses = [
-        '{"title": "Simpler", "hypothesis": "A single intervention tests X.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
-        '{"title": "Grounded", "hypothesis": "Existing evidence supports testing X first.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
-    ]
+    simpler = '{"title": "Simpler", "hypothesis": "A single intervention tests X.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}'
+    grounded = '{"title": "Grounded", "hypothesis": "Existing evidence supports testing Y first.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:3"]}'
 
-    with patch("app.agents.call_llm", side_effect=responses) as call_llm:
+    def respond(prompt, **kwargs):
+        return grounded if "Evolution strategy: grounding" in prompt else simpler
+
+    with patch("app.agents.call_llm", side_effect=respond) as call_llm:
         evolved = agent.evolve_hypotheses(context, _goal())
 
     assert [child.evolution_strategy for child in evolved] == ["simplification", "grounding"]
+    # Each single-parent refinement works on its own parent.
+    assert [child.parent_ids for child in evolved] == [["H1"], ["H2"]]
     prompts = [call.args[0] for call in call_llm.call_args_list]
-    assert "Evolution strategy: simplification" in prompts[0]
-    assert "Evolution strategy: grounding" in prompts[1]
-    assert "Transport study" in prompts[1]
+    grounding_prompt = next(prompt for prompt in prompts if "Evolution strategy: grounding" in prompt)
+    assert "Stress study" in grounding_prompt
 
 
 def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
@@ -738,3 +740,56 @@ def test_parent_selection_follows_elo_once_matches_are_played():
     selected = EvolutionAgent._select_parents([child, ranked_higher], 1, None)
 
     assert [parent.hypothesis_id for parent in selected] == ["G2059"]
+
+
+def test_parent_selection_puts_ranked_hypotheses_ahead_of_the_default_elo():
+    """An unranked REVISE still at 1200 must not beat a ranked hypothesis that lost narrowly."""
+
+    runner_up = _verdict("E4071", "ACCEPT", 10.0, 5.2)
+    runner_up.elo_score = 1199.97
+    unranked = _verdict("G1653", "REVISE", 5.0, 6.8)
+
+    selected = EvolutionAgent._select_parents([unranked, runner_up], 1, None, ranked_ids={"E4071"})
+
+    assert [parent.hypothesis_id for parent in selected] == ["E4071"]
+
+
+def test_out_of_box_takes_the_last_of_three_slots_when_two_parents_exist():
+    """Rotation reached out_of_box only on a second Cycle, so one Cycle's children shared one cluster."""
+
+    context, first, second = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+
+    assert agent._strategies_for_cycle(context, [first, second]) == ["combination", "feasibility", "out_of_box"]
+
+
+def test_single_parent_strategies_take_distinct_parents_by_need():
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+    strong = _reviewed("H1")
+    untestable = _reviewed("H2", testability_score=2.0)
+
+    assignments = agent._assign_parents(["combination", "simplification", "feasibility"], [strong, untestable])
+
+    assert [parent.hypothesis_id for parent in assignments["combination"]] == ["H1", "H2"]
+    assert [parent.hypothesis_id for parent in assignments["simplification"]] == ["H2"]
+    assert [parent.hypothesis_id for parent in assignments["feasibility"]] == ["H1"]
+
+
+def test_revise_parent_leaves_the_pool_once_its_revision_exists():
+    context = ContextMemory()
+    accepted = _verdict("G7173", "ACCEPT", 10.0, 7.1)
+    revise = _verdict("G1653", "REVISE", 5.0, 6.8)
+    context.add_hypothesis(accepted)
+    context.add_hypothesis(revise)
+    child = Hypothesis("E7447", "Combined", "A combined hypothesis.")
+    child.parent_ids = ["G7173", "G1653"]
+    supervisor = SupervisorAgent()
+    supervisor.evolution_agent = Mock()
+    supervisor.evolution_agent.evolve_hypotheses.return_value = [child]
+
+    supervisor.step_evolution(_goal(), context, lambda *args, **kwargs: None, {})
+
+    assert context.hypotheses["E7447"].is_active
+    assert accepted.is_active
+    assert not revise.is_active
+    assert revise.deactivation_reason == "revised_as_E7447"

@@ -201,6 +201,21 @@ class ContextMemory:
     def get_active_hypotheses(self) -> List[Hypothesis]:
         return [h for h in self.hypotheses.values() if h.is_active]
 
+    def ranked_hypothesis_ids(self) -> set:
+        """Return the ids that have played at least one decided tournament match.
+
+        Every hypothesis starts at the default Elo, so until it has played a
+        match its score says nothing about how it compares with the others.
+        """
+        ranked = set()
+        for match in self.tournament_results:
+            if not isinstance(match, dict) or match.get("outcome") not in {"A", "B", "TIE"}:
+                continue
+            for key in ("hypothesis_a", "hypothesis_b"):
+                if match.get(key):
+                    ranked.add(str(match[key]))
+        return ranked
+
     def uses_hypothesis_pipeline(self) -> bool:
         """Return whether hypothesis-only downstream agents should run."""
 

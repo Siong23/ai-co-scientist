@@ -547,6 +547,19 @@ class SupervisorAgent:
         if evolved_hypotheses:
             for eh in evolved_hypotheses:
                 context.add_hypothesis(eh)
+                # A REVISE parent never enters the tournament, so once its
+                # revision exists - to be reviewed and ranked in its place -
+                # keeping it active only left it in the pool at the default Elo.
+                for parent_id in eh.parent_ids:
+                    parent = context.hypotheses.get(parent_id)
+                    report = getattr(parent, "reflection_report", None)
+                    if (
+                        parent is not None
+                        and parent.is_active
+                        and str(getattr(report, "recommendation", "")).strip().upper() == "REVISE"
+                    ):
+                        parent.is_active = False
+                        parent.deactivation_reason = f"revised_as_{eh.hypothesis_id}"
             evolution_step["hypotheses"] = list(evolution_step.get("hypotheses") or []) + [
                 h.to_dict() for h in evolved_hypotheses
             ]

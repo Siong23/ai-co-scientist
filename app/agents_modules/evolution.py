@@ -20,6 +20,9 @@ from .evolution_helpers import (
 # below that is the gap an evolution strategy has to close.
 _ACCEPT_THRESHOLD = 5.0
 
+# Strategies that draw on every selected parent; the rest refine one parent.
+_MULTI_PARENT_STRATEGIES = frozenset({"combination", "inspiration", "out_of_box"})
+
 # Which strategy repairs which measured weakness.  Plausibility and feasibility
 # share a strategy because its instruction covers both: repair invalid
 # assumptions, and describe an implementable validation path.
@@ -123,12 +126,52 @@ class EvolutionAgent:
 
         selected = []
         for strategy in ordered:
-            if parent_count < 2 and strategy in {"combination", "inspiration", "out_of_box"}:
+            if parent_count < 2 and strategy in _MULTI_PARENT_STRATEGIES:
                 continue
             selected.append(strategy)
             if len(selected) >= self.max_candidates_per_cycle:
                 break
+
+        # The paper's Evolution agent ends every pass with an out-of-the-box
+        # idea. Rotation only reaches it on a second Cycle, so a single Cycle's
+        # children all refined one idea and landed in one cluster. With three
+        # slots the divergent strategy takes the last one; with fewer it would
+        # displace the repair the parents' reviews asked for.
+        if (
+            parent_count >= 2
+            and self.max_candidates_per_cycle >= 3
+            and "out_of_box" in self.strategies
+            and "out_of_box" not in selected
+        ):
+            selected[-1] = "out_of_box"
         return selected
+
+    def _assign_parents(
+        self,
+        strategies: Sequence[EvolutionStrategy],
+        parents: Sequence[Hypothesis],
+    ) -> dict[EvolutionStrategy, list[Hypothesis]]:
+        """Map each strategy to the parents it evolves.
+
+        Multi-parent strategies see every parent. Two refinements of the same
+        parent converge on the same fix - one run's feasibility and
+        simplification children of one parent were near-duplicates - so each
+        single-parent strategy takes a parent of its own while one is free:
+        the free parent whose review shows the largest gap that strategy
+        repairs, then the higher-ranked one.
+        """
+        assignments: dict[EvolutionStrategy, list[Hypothesis]] = {}
+        free = list(parents)
+        for strategy in strategies:
+            if strategy in _MULTI_PARENT_STRATEGIES:
+                assignments[strategy] = list(parents)
+                continue
+            pool = free or list(parents)
+            chosen = max(pool, key=lambda parent: self._strategy_deficits([parent]).get(strategy, 0.0))
+            if chosen in free:
+                free.remove(chosen)
+            assignments[strategy] = [chosen]
+        return assignments
 
     def evolve_hypotheses(self, context: ContextMemory, research_goal: ResearchGoal) -> List[Hypothesis]:
         """Create independently reviewable children without replacing their parents."""
@@ -143,14 +186,17 @@ class EvolutionAgent:
             active,
             parent_count,
             getattr(context, "proximity_analysis", None),
+            # Before any decided match every Elo is equal, so there is nothing to rank by.
+            ranked_ids=context.ranked_hypothesis_ids() or None,
         )
         strategies = self._strategies_for_cycle(context, top_candidates)
+        strategy_parents = self._assign_parents(strategies, top_candidates)
 
         def evolve_one(strategy: EvolutionStrategy) -> tuple[Hypothesis | None, list[dict]]:
             diagnostics: list[dict] = []
             if execution_cancelled():
                 return None, diagnostics
-            parents = top_candidates if strategy in {"combination", "inspiration", "out_of_box"} else top_candidates[:1]
+            parents = strategy_parents[strategy]
             evidence_sources = resolve_parent_evidence(
                 parents,
                 context.last_retrieved_sources,
@@ -209,6 +255,7 @@ class EvolutionAgent:
         active: List[Hypothesis],
         parent_count: int,
         proximity_data: dict | None,
+        ranked_ids: set | None = None,
     ) -> List[Hypothesis]:
         """Prefer one strong exemplar per cluster, then fill by Elo.
 
@@ -217,6 +264,10 @@ class EvolutionAgent:
         pass, sending an identical Evolution prompt again.  Ties therefore go
         first to hypotheses no earlier pass has evolved, then to the stronger
         Reflection verdict.
+
+        When ``ranked_ids`` names the hypotheses that have played a match, those
+        come first by Elo: an unranked hypothesis still holds the default 1200,
+        which would otherwise outrank a ranked one that lost a close match.
         """
         by_id = {hypothesis.hypothesis_id: hypothesis for hypothesis in active}
         selected = []
@@ -234,8 +285,10 @@ class EvolutionAgent:
 
         def rank(hypothesis: Hypothesis) -> tuple:
             report = getattr(hypothesis, "reflection_report", None)
+            ranked = ranked_ids is None or hypothesis.hypothesis_id in ranked_ids
             return (
-                hypothesis.elo_score,
+                ranked,
+                hypothesis.elo_score if ranked else 0.0,
                 hypothesis.hypothesis_id not in evolved_ids,
                 str(getattr(report, "recommendation", "")).upper() == "ACCEPT",
                 float(getattr(report, "alignment_score", 0) or 0),
