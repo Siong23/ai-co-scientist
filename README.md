@@ -123,6 +123,11 @@ queue.
   pypdf fallback. The fallback conservatively recovers sections, subsections,
   paragraphs, tables, captions, equations, and code blocks, then chunks at
   section, paragraph, and sentence boundaries before using a hard size limit.
+  It drops running headers and footers repeated at page edges, and accepts
+  only known section names or headings numbered in sequence, so figure labels
+  and formulas do not open sections. Sections shorter than
+  `chunk_combine_under_chars` share a chunk, short equations and captions stay
+  with their text, and the References section is not indexed.
 - Stores source-faithful `raw_text` separately from document-intrinsic
   `retrieval_text`. Embeddings include paper/section/publication context but
   never research-goal conclusions or hypothesis judgments; prompt/citation

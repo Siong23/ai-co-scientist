@@ -274,8 +274,8 @@ paper_library:
   # and embedding-cache identities while retaining the Phase B text model.
   index_schema_version: "4"
   parser_backend: "pypdf"
-  parser_version: "pypdf-structured-2"
-  chunking_version: "section-paragraph-sentence-3"
+  parser_version: "pypdf-structured-3"
+  chunking_version: "section-paragraph-sentence-4"
   retrieval_template_version: "intrinsic-context-1"
   # The registry and parse/chunk artifacts are shared across model-specific
   # Chroma collections. Incremental writes reuse matching stored vectors.
@@ -291,10 +291,22 @@ paper_library:
   # chunks remain usable evidence, labelled full_text_partial. Changing either
   # limit changes the index signature, so every cached paper is re-indexed.
   max_pages_per_paper: 60
-  max_chunks_per_paper: 96
+  # Once short sections are combined, a typical paper needs about 35 chunks
+  # and a 45-page one about 120; 128 leaves the page limit as the real bound.
+  max_chunks_per_paper: 128
   chunk_size_chars: 2400
   chunk_overlap_chars: 300
-  top_k_chunks: 12
+  # A section change starts a new chunk only once the current chunk holds this
+  # many characters, so short or misdetected sections do not become fragments.
+  chunk_combine_under_chars: 1200
+  # Tables, captions, equations and code shorter than this stay with the
+  # surrounding text instead of forming chunks of their own.
+  chunk_standalone_min_chars: 300
+  # Bibliography entries match queries on cited titles but are not evidence.
+  index_excluded_sections: ["References"]
+  # Selected chunks must fit max_prompt_chars: about eight chunks of ~1750
+  # characters fill it, and later ones would be dropped or cut mid-sentence.
+  top_k_chunks: 8
   # Dense and BM25 search each retrieve a broader passage pool. Their rankings
   # are fused with passage-level RRF before cross-query requirement reservation.
   hybrid_retrieval_enabled: true

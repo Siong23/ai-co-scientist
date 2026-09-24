@@ -165,8 +165,8 @@ class ChromaPaperLibrary:
         self.pdf_directory = Path(pdf_directory or library_config.get("pdf_directory", ".cache/papers"))
         self.collection_prefix = str(library_config.get("collection_name", "research_papers"))
         self.index_schema_version = str(library_config.get("index_schema_version", "4"))
-        self.parser_version = str(library_config.get("parser_version", "pypdf-structured-2"))
-        self.chunking_version = str(library_config.get("chunking_version", "section-paragraph-sentence-3"))
+        self.parser_version = str(library_config.get("parser_version", "pypdf-structured-3"))
+        self.chunking_version = str(library_config.get("chunking_version", "section-paragraph-sentence-4"))
         self.retrieval_template_version = str(library_config.get("retrieval_template_version", "intrinsic-context-1"))
         self.parser_backend = str(library_config.get("parser_backend", "pypdf")).strip().casefold()
         self.incremental_indexing_enabled = bool(library_config.get("incremental_indexing_enabled", True))
@@ -191,6 +191,12 @@ class ChromaPaperLibrary:
         self.chunk_size = max(500, int(library_config.get("chunk_size_chars", 2400)))
         self.chunk_overlap = max(0, int(library_config.get("chunk_overlap_chars", 300)))
         self.chunk_overlap = min(self.chunk_overlap, self.chunk_size - 1)
+        self.chunk_combine_under = max(0, int(library_config.get("chunk_combine_under_chars", 1200)))
+        self.chunk_standalone_min = max(0, int(library_config.get("chunk_standalone_min_chars", 300)))
+        excluded_sections = library_config.get("index_excluded_sections", ("References",)) or ()
+        self.index_excluded_sections = tuple(
+            str(section).strip() for section in excluded_sections if str(section).strip()
+        )
         self.top_k_chunks = max(1, int(library_config.get("top_k_chunks", 6)))
         self.max_prompt_chars = max(1000, int(library_config.get("max_prompt_chars", 12000)))
         self.hybrid_retrieval_enabled = bool(library_config.get("hybrid_retrieval_enabled", True))
@@ -369,6 +375,9 @@ class ChromaPaperLibrary:
             "max_chunks_per_paper": self.max_chunks_per_paper,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
+            "chunk_combine_under": self.chunk_combine_under,
+            "chunk_standalone_min": self.chunk_standalone_min,
+            "index_excluded_sections": list(self.index_excluded_sections),
         }
 
     @staticmethod
@@ -473,6 +482,9 @@ class ChromaPaperLibrary:
             "max_chunks_per_paper": self.max_chunks_per_paper,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
+            "chunk_combine_under": self.chunk_combine_under,
+            "chunk_standalone_min": self.chunk_standalone_min,
+            "index_excluded_sections": list(self.index_excluded_sections),
         }
         return self._content_hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
@@ -2412,6 +2424,9 @@ class ChromaPaperLibrary:
             recovered_elements,
             max_chars=self.chunk_size,
             overlap_chars=self.chunk_overlap,
+            combine_under_chars=self.chunk_combine_under,
+            standalone_min_chars=self.chunk_standalone_min,
+            excluded_sections=self.index_excluded_sections,
         )
         all_chunks: list[Document] = []
         for chunk in element_chunks:

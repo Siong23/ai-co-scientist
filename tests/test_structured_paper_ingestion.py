@@ -40,6 +40,8 @@ def _library(tmp_path: Path, *, document_parser=None) -> ChromaPaperLibrary:
     )
     library.chunk_size = 180
     library.chunk_overlap = 0
+    # Most tests here check per-section metadata; combining has its own tests.
+    library.chunk_combine_under = 0
     return library
 
 
@@ -116,6 +118,130 @@ def test_chunker_prefers_paragraph_and_sentence_boundaries():
     assert all(not ({"Methods", "Results"} <= set(chunk.section_path)) for chunk in chunks)
     assert any(chunk.raw_text.endswith("sentence.") for chunk in chunks if chunk.section == "Methods")
     assert {chunk.section for chunk in chunks} == {"Methods", "Results"}
+
+
+def test_running_headers_and_footers_are_dropped_and_never_open_sections():
+    bodies = (
+        "1 Introduction\nPrior schedulers have unstable tail latency.",
+        "2 Methods\nWe evaluate a bounded controller.",
+        "More method detail.",
+        "3 Results\nLatency fell by 12 ms.",
+    )
+    pages = tuple(
+        (page, f"{810 + page} Annals of Telecommunications (2026) 81:809–834\n{body}\nPage {page} of 4")
+        for page, body in enumerate(bodies, start=1)
+    )
+
+    elements = recover_document_elements(pages)
+
+    assert {element.section for element in elements} == {"Introduction", "Methods", "Results"}
+    assert all("Annals" not in element.text and "Page " not in element.text for element in elements)
+
+
+def test_figure_labels_formulas_and_sentence_fragments_do_not_open_sections():
+    page = "\n".join(
+        (
+            "I. I NTRODUCTION",
+            "Prior schedulers have unstable tail latency.",
+            "II. R ELATED W ORK",
+            "Earlier controllers ignore burst traffic.",
+            "3 System Model",
+            "The system has one scheduler.",
+            "5G",
+            "∑ K",
+            "1G 2G 3G 4G 5G 6G",
+            "NFVI",
+            "10 m/s, indicating that the controller converges",
+            "1 Department of Information Technology, Example University",
+            "3.1 Channel Model",
+            "The channel is Rayleigh fading.",
+            "4 E VALUATION S TUDY C ASES",
+            "Two cases are evaluated.",
+            "5 F INAL REMARKS",
+            "The controller is stable.",
+            "6 A BRIEF OVERVIEW OF LEARNING",
+            "Learning methods are summarized.",
+            "VII. A CKNOWLEDGMENT",
+            "We thank the reviewers.",
+        )
+    )
+
+    elements = recover_document_elements(((1, page),))
+
+    assert [element.section_path for element in elements] == [
+        ("Introduction",),
+        ("Related Work",),
+        ("System Model",),
+        ("System Model", "Channel Model"),
+        ("Evaluation Study Cases",),
+        ("Final Remarks",),
+        ("A Brief Overview Of Learning",),
+        ("Acknowledgements",),
+    ]
+    assert "NFVI" in elements[2].text
+    assert "1 Department of Information Technology" in elements[2].text
+
+
+def test_bibliography_lines_stay_in_references_and_are_not_indexed(tmp_path):
+    library = _library(tmp_path)
+    page = "\n".join(
+        (
+            "1 Introduction",
+            "Prior schedulers have unstable tail latency.",
+            "References",
+            "[1] A. Author, Scheduler study, 2020.",
+            "IEEE TRANSACTIONS ON NETWORKING",
+            "2 Burst Traffic Control",
+            "Appendix",
+            "Proof details for the bound.",
+        )
+    )
+
+    elements = recover_document_elements(((1, page),))
+    chunked = library._chunk_pages("arXiv:references", _paper(), ((1, page),))
+
+    assert [element.section for element in elements] == ["Introduction", "References", "Appendix"]
+    assert "2 Burst Traffic Control" in elements[1].text
+    assert [chunk.metadata["section"] for chunk in chunked.chunks] == ["Introduction", "Appendix"]
+    assert all("IEEE TRANSACTIONS" not in chunk.metadata["raw_text"] for chunk in chunked.chunks)
+
+
+def test_short_sections_combine_until_the_threshold_and_chunks_stay_bounded():
+    elements = (
+        DocumentElement("paragraph", "M" * 100, 1, "Methods", "", ("Methods",)),
+        DocumentElement("paragraph", "S" * 100, 1, "Methods", "Setup", ("Methods", "Setup")),
+        DocumentElement("paragraph", "R" * 700, 2, "Results", "", ("Results",)),
+        DocumentElement("paragraph", "D" * 600, 3, "Discussion", "", ("Discussion",)),
+    )
+
+    combined = chunk_document_elements(elements, max_chars=1000, combine_under_chars=500)
+    separate = chunk_document_elements(elements, max_chars=1000)
+
+    assert [chunk.section_path for chunk in combined] == [("Results",), ("Discussion",)]
+    assert combined[0].raw_text.startswith("M" * 100)
+    assert (combined[0].page_start, combined[0].page_end) == (1, 2)
+    assert all(len(chunk.raw_text) <= 1000 for chunk in combined)
+    assert len(separate) == 4
+
+
+def test_short_equations_join_text_while_long_tables_stay_standalone():
+    table = "Table 1: Latency by load\n" + "\n".join(f"load{row} 1.0 2.0 3.0" for row in range(40))
+    elements = (
+        DocumentElement("paragraph", "We measure latency under burst traffic.", 4, "Results", "", ("Results",)),
+        DocumentElement("equation", "L = q / μ", 4, "Results", "", ("Results",)),
+        DocumentElement("paragraph", "Latency falls as service rate grows.", 4, "Results", "", ("Results",)),
+        DocumentElement("table", table, 5, "Results", "", ("Results",)),
+    )
+
+    chunks = chunk_document_elements(elements, max_chars=400, overlap_chars=50, standalone_min_chars=100)
+
+    assert chunks[0].element_type == "paragraph"
+    assert "L = q / μ" in chunks[0].raw_text
+    assert "Latency falls" in chunks[0].raw_text
+    table_chunks = chunks[1:]
+    assert len(table_chunks) > 1
+    assert all(chunk.element_type == "table" and len(chunk.raw_text) <= 400 for chunk in table_chunks)
+    assert sum(len(chunk.raw_text) for chunk in table_chunks) <= len(table)
 
 
 def test_pypdf_parser_recovers_structure_without_an_advanced_dependency(monkeypatch, tmp_path):
@@ -251,8 +377,8 @@ def test_persistent_index_embeds_retrieval_text_and_returns_raw_evidence(tmp_pat
     assert metadata["page_start"] == metadata["page_end"] == 5
     assert metadata["element_type"] == "paragraph"
     assert metadata["schema_version"] == "4"
-    assert metadata["parser_version"] == "pypdf-structured-2"
-    assert metadata["chunking_version"] == "section-paragraph-sentence-3"
+    assert metadata["parser_version"] == "pypdf-structured-3"
+    assert metadata["chunking_version"] == "section-paragraph-sentence-4"
     assert metadata["retrieval_template_version"] == "intrinsic-context-1"
     assert metadata["chunk_count"] == 2
     assert metadata["parent_id"]
