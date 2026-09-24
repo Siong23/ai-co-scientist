@@ -22,6 +22,10 @@ llm_model: "qwen/qwen3.8-27b"
 # llm_model: "qwen/qwen3.8-27b"
 # Dedicated model for generating executable PyTorch experiments.
 code_generation_model: "qwen/qwen3.8-27b"
+# Run the PyTorch experiment automatically after each cycle. When false, a
+# cycle ends once its hypotheses are reviewed and ranked, and no experiment
+# code is generated or executed.
+experiment_auto_run: true
 # query_rewrite_model: "qwen/qwen3.6-35b-a3b"
 query_rewrite_model: "qwen/qwen3.8-27b"
 

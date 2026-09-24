@@ -794,19 +794,21 @@ def execute_cycle(
         if remaining_budget_seconds is not None:
             experiment_timeout_seconds = int(min(EXPERIMENT_TIMEOUT_SECONDS, remaining_budget_seconds))
         experiment_has_budget = experiment_timeout_seconds >= EXPERIMENT_MIN_BUDGET_SECONDS
-        experiment_enabled = hypothesis_pipeline_enabled and experiment_has_budget
+        # With experiment_auto_run off a cycle ends after the agent workflow, so
+        # its hypotheses appear without waiting for code generation and training.
+        experiment_auto_run = bool(config.get("experiment_auto_run", True))
+        experiment_enabled = hypothesis_pipeline_enabled and experiment_auto_run and experiment_has_budget
         print("\n" + "=" * 60)
         print("AI CO-SCIENTIST WORKFLOW COMPLETED")
-        print(
-            "STARTING AUTOMATED EXPERIMENT PIPELINE"
-            if experiment_enabled
-            else "AUTOMATED EXPERIMENT NOT APPLICABLE TO THIS RESEARCH MODE"
-        )
+        print("STARTING AUTOMATED EXPERIMENT PIPELINE" if experiment_enabled else "AUTOMATED EXPERIMENT SKIPPED")
         print("=" * 60)
 
         if experiment_enabled:
             print("\n[2/2] Running automated deep-learning experiment...")
             logger.debug("Starting automated experiment pipeline.")
+        elif hypothesis_pipeline_enabled and not experiment_auto_run:
+            print("\n[2/2] Skipping the automated experiment: experiment_auto_run is off.")
+            logger.info("Skipping the automated experiment because experiment_auto_run is off.")
         elif hypothesis_pipeline_enabled:
             print("\n[2/2] Skipping the automated experiment: not enough cycle budget left.")
             logger.warning(
@@ -829,6 +831,8 @@ def execute_cycle(
                 "summary": (
                     "Selecting the best hypothesis and starting the PyTorch experiment."
                     if experiment_enabled
+                    else "Skipped: automatic experiments are turned off (experiment_auto_run)."
+                    if hypothesis_pipeline_enabled and not experiment_auto_run
                     else (
                         f"Skipped: only {format_timeout_duration(max(remaining_budget_seconds or 0.0, 0.0))} "
                         f"of the cycle budget was left, and the experiment needs at least "
@@ -884,6 +888,18 @@ def execute_cycle(
                     selected_hypothesis,
                     experiment_result.get("execution", {}),
                 )
+        elif hypothesis_pipeline_enabled and not experiment_auto_run:
+            experiment_result = {
+                "success": False,
+                "status": "skipped_auto_run_disabled",
+                "skipped": True,
+                "research_type": context.research_type,
+                "reason": (
+                    "Automatic experiments are turned off (experiment_auto_run: false in config.yaml). "
+                    "The hypotheses above are complete."
+                ),
+                "errors": [],
+            }
         elif hypothesis_pipeline_enabled:
             experiment_result = {
                 "success": False,

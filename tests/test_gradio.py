@@ -863,6 +863,42 @@ def test_execute_cycle_skips_experiment_without_enough_cycle_budget(gradio_app_m
     assert "timed out" not in result["status"]
 
 
+def test_execute_cycle_skips_experiment_when_auto_run_is_off(gradio_app_module, monkeypatch, tmp_path):
+    from app.config import config
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(config, "experiment_auto_run", False)
+
+    run_experiment = Mock()
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", run_experiment)
+
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment switch test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    run_experiment.assert_not_called()
+    experiment_result = result["cycle_details"]["experiment_result"]
+    assert experiment_result["status"] == "skipped_auto_run_disabled"
+    assert "experiment_auto_run" in experiment_result["reason"]
+    assert result["cycle_details"]["comparison_result"]["status"] == "skipped_auto_run_disabled"
+    assert "Automated Experiment Skipped" in result["results_html"]
+
+
 def test_execute_cycle_caps_experiment_timeout_to_remaining_budget(gradio_app_module, monkeypatch, tmp_path):
     import threading
 
