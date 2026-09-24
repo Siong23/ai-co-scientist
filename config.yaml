@@ -49,7 +49,9 @@ llm_max_tokens:
   query_rewriting: 1600
   relevance_grading: 512
   coverage_grading: 1024
-  literature_synthesis: 1800
+  # Each cited finding repeats 64-character chunk IDs, and a 1800 limit cut
+  # off a third of past syntheses, each then costing a format-repair call.
+  literature_synthesis: 3072
   generation: 3072
   format_repair: 2048
   hypothesis_audit: 3072

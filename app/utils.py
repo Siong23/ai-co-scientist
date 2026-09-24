@@ -343,6 +343,17 @@ def _format_lmstudio_error(exc: Exception, model: str) -> str:
     return f"Error: LM Studio call failed: {error}"
 
 
+def _warn_output_token_limit(model: str, prompt_chars: int, output_token_limit: int) -> None:
+    # A structured answer that stops at the limit is usually unparsable, so say
+    # so here instead of leaving callers to report a malformed response.
+    logger.warning(
+        "LLM output stopped at max_output_tokens=%d; the response may be truncated. model=%s prompt_chars=%d",
+        output_token_limit,
+        model,
+        prompt_chars,
+    )
+
+
 def call_llm(
     prompt: str,
     temperature: float = 0.7,
@@ -409,6 +420,11 @@ def call_llm(
                     response.raise_for_status()
                     response_payload = response.json()
                     output = response_payload.get("output", []) if isinstance(response_payload, dict) else []
+                    # The native API reports no stop reason, only token counts.
+                    stats = response_payload.get("stats") if isinstance(response_payload, dict) else None
+                    output_tokens = stats.get("total_output_tokens") if isinstance(stats, dict) else None
+                    if isinstance(output_tokens, int) and output_tokens >= output_token_limit:
+                        _warn_output_token_limit(selected_model, len(prompt), output_token_limit)
                     content = "\n".join(
                         str(item.get("content", ""))
                         for item in output
@@ -487,6 +503,8 @@ def call_llm(
         )
         if not completion.choices:
             return "Error: LM Studio returned no completion choices."
+        if getattr(completion.choices[0], "finish_reason", None) == "length":
+            _warn_output_token_limit(selected_model, len(prompt), output_token_limit)
         message = completion.choices[0].message
         content = getattr(message, "content", "")
         content = content.strip() if isinstance(content, str) else ""

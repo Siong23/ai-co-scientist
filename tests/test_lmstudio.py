@@ -322,6 +322,38 @@ def test_native_fallback_still_reads_non_reasoning_items():
         assert call_llm("return JSON", model="local-model", reasoning="on") == '{"ok": true}'
 
 
+def test_native_output_that_reaches_the_token_limit_is_logged(caplog):
+    response = _native_response([{"type": "message", "content": '{"findings": ['}])
+    response.json.return_value["stats"] = {"total_output_tokens": 64}
+    with caplog.at_level("WARNING", logger=utils.logger.name):
+        with patch.object(utils.requests, "post", return_value=response):
+            result = call_llm("return JSON", model="local-model", max_tokens=64, reasoning="off")
+
+    assert result == '{"findings": ['
+    assert "stopped at max_output_tokens=64" in caplog.text
+
+
+def test_native_output_below_the_token_limit_is_not_logged(caplog):
+    response = _native_response([{"type": "message", "content": '{"ok": true}'}])
+    response.json.return_value["stats"] = {"total_output_tokens": 12}
+    with caplog.at_level("WARNING", logger=utils.logger.name):
+        with patch.object(utils.requests, "post", return_value=response):
+            call_llm("return JSON", model="local-model", max_tokens=64, reasoning="off")
+
+    assert "max_output_tokens" not in caplog.text
+
+
+def test_compatible_output_cut_by_length_is_logged(caplog):
+    completion = _completion('{"findings": [')
+    completion.choices[0].finish_reason = "length"
+    with caplog.at_level("WARNING", logger=utils.logger.name):
+        with patch.object(utils, "OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.return_value = completion
+            call_llm("return JSON", model="local-model", max_tokens=32)
+
+    assert "stopped at max_output_tokens=32" in caplog.text
+
+
 def test_compatible_api_does_not_return_reasoning_content_as_the_answer():
     completion = _completion("")
     completion.choices[0].message.reasoning_content = "The user wants JSON, so I should..."
