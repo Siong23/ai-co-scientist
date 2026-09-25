@@ -12,22 +12,24 @@ lmstudio_base_url: "http://100.75.120.13:1234/v1"
 # The embedding model runs on its own LM Studio server so the chat server never
 # has to hold (or swap in) both models. LMSTUDIO_EMBEDDING_BASE_URL in .env
 # overrides this; with neither set, embeddings use lmstudio_base_url.
-lmstudio_embedding_base_url: "http://100.96.215.41:1234/v1"
+# lmstudio_embedding_base_url: "http://100.96.215.41:1234/v1"
+# lmstudio_embedding_base_url: "http://100.117.90.5:1234/v1"
 
+lmstudio_embedding_base_url: "http://100.75.120.13:1234/v1"
 # LLM Model. Use a compact free default so the public Hugging Face demo can
 # finish a full multi-call cycle within its UI timeout. If this one is delisted,
 # rate-limited, or too slow, call_llm auto-falls back to other live free models.
 
-llm_model: "qwen/qwen3.8-27b"
+llm_model: "qwen3.5-9b@q8_k_xl"
 # llm_model: "qwen/qwen3.8-27b"
 # Dedicated model for generating executable PyTorch experiments.
-code_generation_model: "qwen/qwen3.8-27b"
+code_generation_model: "qwen3.5-9b@q8_k_xl"
 # Run the PyTorch experiment automatically after each cycle. When false, a
 # cycle ends once its hypotheses are reviewed and ranked, and no experiment
 # code is generated or executed.
 experiment_auto_run: true
 # query_rewrite_model: "qwen/qwen3.6-35b-a3b"
-query_rewrite_model: "qwen/qwen3.8-27b"
+query_rewrite_model: "qwen3.5-9b@q8_k_xl"
 
 
 # Number of hypotheses to generate
@@ -106,7 +108,7 @@ elo_k_factor: 32
 # pairwise tournament debates. A smaller, faster model reduces latency when many
 # comparisons run in parallel.
 # ranking_llm_model: "qwen/qwen3.6-35b-a3b"
-ranking_llm_model: "qwen/qwen3.8-27b"
+ranking_llm_model: "qwen3.5-9b@q8_k_xl"
 # set ranking model to "null" to use the main llm_model for pairwise tournament debates. A smaller, faster model reduces latency when many comparisons run in parallel.
 
 ranking:
