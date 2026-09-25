@@ -1,1 +1,1 @@
-Goal 2: Create a machine learning orchestrator that injects post-quantum cryptographic keys into active 5G network slices without increasing latency.
+Create a machine learning orchestrator that injects post-quantum cryptographic keys into active 5G network slices without increasing latency.

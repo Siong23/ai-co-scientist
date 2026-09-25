@@ -1,1 +1,1 @@
-Goal 6: Investigate whether AI-driven traffic prediction can enable proactive network-slice resource allocation and reduce SLA violations in 5G networks.
+Investigate whether AI-driven traffic prediction can enable proactive network-slice resource allocation and reduce SLA violations in 5G networks.

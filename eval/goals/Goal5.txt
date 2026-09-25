@@ -1,1 +1,1 @@
-Goal 5: Develop novel methods for reducing energy consumption in 5G base stations while maintaining user throughput, latency, and quality-of-service requirements.
+Develop novel methods for reducing energy consumption in 5G base stations while maintaining user throughput, latency, and quality-of-service requirements.

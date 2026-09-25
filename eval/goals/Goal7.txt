@@ -1,1 +1,1 @@
-Goal 7: Identify security vulnerabilities introduced by network slicing and virtualization in private 5G networks and develop adaptive mechanisms for detecting cross-slice attacks.
+Identify security vulnerabilities introduced by network slicing and virtualization in private 5G networks and develop adaptive mechanisms for detecting cross-slice attacks.
