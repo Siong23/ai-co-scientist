@@ -276,8 +276,9 @@ def test_evolution_creates_new_children_with_lineage_and_selected_evidence():
         '{"title": "Divergent child", "hypothesis": "Transient membrane tension independently drives resistance.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
     ]
 
+    goal = _goal()
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
-        evolved = agent.evolve_hypotheses(context, _goal())
+        evolved = agent.evolve_hypotheses(context, goal)
 
     assert [child.evolution_strategy for child in evolved] == ["combination", "feasibility", "out_of_box"]
     assert evolved[0].parent_ids == ["H1", "H2"]
@@ -290,7 +291,7 @@ def test_evolution_creates_new_children_with_lineage_and_selected_evidence():
     assert second.to_dict() == original_second
     assert call_llm.call_count == 3
     assert call_llm.call_args_list[0].kwargs == {
-        "temperature": 0.7,
+        "temperature": goal.generation_temperature,
         "model": "offline-model",
         "max_tokens": 2048,
         "reasoning": "off",
