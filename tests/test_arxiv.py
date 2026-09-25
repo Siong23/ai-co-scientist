@@ -234,6 +234,32 @@ def test_paper_details_requests_the_identifier_without_sorting(monkeypatch):
     assert paper["arxiv_id"] == "2203.01590v1"
 
 
+def test_fetch_feed_uses_explicit_ssl_context_without_alpn(monkeypatch):
+    """Avoid sending ALPN http/1.1 extension which triggers arXiv Fastly/Varnish HTTP 406."""
+    import ssl
+    from unittest.mock import MagicMock
+
+    from app.tools.arxiv_search import _fetch_feed
+
+    captured = {}
+
+    def fake_urlopen(request, timeout=None, context=None):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        captured["context"] = context
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"<feed></feed>"
+        mock_resp.__enter__.return_value = mock_resp
+        return mock_resp
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("app.tools.arxiv_search._wait_for_request_slot", lambda: None)
+
+    _fetch_feed({"search_query": "all:test"})
+
+    assert isinstance(captured["context"], ssl.SSLContext)
+
+
 # --- Live arXiv API ---
 
 

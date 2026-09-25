@@ -1,6 +1,7 @@
 import logging
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -125,18 +126,18 @@ def _wait_for_request_slot() -> None:
         _next_request_at = time.monotonic() + _MIN_REQUEST_INTERVAL_SECONDS
 
 
-# arXiv's API frontend answers urllib3 (and therefore requests) with HTTP 406
-# regardless of headers. Once it throttles a host it also answers the standard
-# library with 406 for every query its cache misses, for tens of minutes; the
-# backoff treats that as a long cooldown. PDF downloads are unaffected and
-# still use requests.
+# arXiv's Varnish / Fastly frontend answers HTTP 406 if Python's TLS handshake
+# includes the ALPN extension for http/1.1 (which http.client._create_https_context
+# and urllib3 enable by default). Supplying an explicit ssl.create_default_context()
+# omits ALPN, allowing arXiv's frontend to forward uncached queries normally.
 def _fetch_feed(params: Dict[str, Any], timeout: int = _REQUEST_TIMEOUT_SECONDS) -> Any:
     """Fetch one arXiv Atom page and return the parsed feed."""
 
     _wait_for_request_slot()
     url = f"{_ARXIV_API_ENDPOINT}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(url, headers={"User-Agent": _ARXIV_USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    ssl_context = ssl.create_default_context()
+    with urllib.request.urlopen(request, timeout=timeout, context=ssl_context) as response:
         payload = response.read()
     return feedparser.parse(payload)
 
