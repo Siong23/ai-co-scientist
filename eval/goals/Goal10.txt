@@ -1,0 +1,1 @@
+Goal 10: Identify the main factors limiting ultra-reliable low-latency communication performance in dense 5G networks and develop strategies to reduce end-to-end latency while maintaining high reliability.

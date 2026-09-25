@@ -1,0 +1,1 @@
+Goal 4: Automate the root-cause diagnosis of 5G tower failures by deploying AI agents to read logs and execute patches.
