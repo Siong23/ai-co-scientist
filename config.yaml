@@ -229,6 +229,14 @@ use_lmstudio_embeddings: true
 # This only applies when both models share a server: with a separate
 # lmstudio_embedding_base_url, chat and embedding calls may overlap.
 serialize_lmstudio_model_calls: true
+# Keep one model loaded per LM Studio server. A server that holds only one model
+# fails to load a second beside it (CUDA out of memory), so before a request for
+# another model this waits for the requests still running, unloads every other
+# model on that server (including ones other clients loaded), and lets LM Studio
+# load the requested model. Each switch reloads a model, so a cycle whose chat
+# and embedding calls share one server runs slower. Set false to leave loading
+# and unloading to LM Studio.
+lmstudio_single_model_per_server: true
 sentence_transformer_model: "text-embedding-qwen3-embedding-8b"
 # sentence_transformer_model: "text-embedding-nomic-embed-text-v1.5"
 

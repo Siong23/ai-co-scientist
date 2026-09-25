@@ -36,6 +36,15 @@ def disable_external_provider_credentials(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def disable_lmstudio_model_switching(monkeypatch, request):
+    """Switching models queries the LM Studio server; tests of it opt back in."""
+
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setitem(config, "lmstudio_single_model_per_server", False)
+
+
+@pytest.fixture(autouse=True)
 def disable_automatic_paper_downloads(monkeypatch):
     """The canonical test suite must never download PDFs or call embeddings."""
 

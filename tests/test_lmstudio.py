@@ -362,6 +362,141 @@ def test_compatible_api_does_not_return_reasoning_content_as_the_answer():
         assert call_llm("return JSON", model="local-model") == utils.REASONING_ONLY_ERROR
 
 
+@pytest.fixture
+def single_model_server(monkeypatch):
+    """Keep one model per server, starting from a process that has used none."""
+
+    monkeypatch.setitem(utils.config, "lmstudio_single_model_per_server", True)
+    monkeypatch.setattr(utils, "_lmstudio_server_slots", {})
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://lm-server:1234/v1")
+
+
+def _loaded_models(*loaded):
+    """A GET /api/v1/models response in which each (key, instance_id) is loaded."""
+
+    response = MagicMock()
+    response.json.return_value = {
+        "models": [{"key": key, "loaded_instances": [{"id": instance_id}]} for key, instance_id in loaded]
+    }
+    return response
+
+
+def _unloaded_ids(mock_post):
+    return [
+        call.kwargs["json"]["instance_id"]
+        for call in mock_post.call_args_list
+        if call.args[0] == "http://lm-server:1234/api/v1/models/unload"
+    ]
+
+
+def test_a_new_model_first_unloads_every_other_model_on_the_server(single_model_server):
+    loaded = _loaded_models(("chat-model", "chat-model"), ("qwen/qwen3.6-27b", "qwen/qwen3.6-27b"))
+    with (
+        patch.object(utils.requests, "get", return_value=loaded) as mock_get,
+        patch.object(utils.requests, "post") as mock_post,
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        mock_openai.return_value.embeddings.create.return_value = MagicMock(data=[MagicMock(embedding=[1.0, 0.0])])
+        _LMSTUDIO_ENCODE(utils.LMStudioSentenceTransformer("embedding-model"), "text")
+
+    mock_get.assert_called_once()
+    assert mock_get.call_args.args[0] == "http://lm-server:1234/api/v1/models"
+    assert _unloaded_ids(mock_post) == ["chat-model", "qwen/qwen3.6-27b"]
+    mock_openai.return_value.embeddings.create.assert_called_once()
+
+
+def test_the_model_in_use_is_neither_unloaded_nor_rechecked(single_model_server):
+    loaded = _loaded_models(("chat-model", "chat-model@q8_k_xl"))
+    with (
+        patch.object(utils.requests, "get", return_value=loaded) as mock_get,
+        patch.object(utils.requests, "post") as mock_post,
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        mock_openai.return_value.chat.completions.create.return_value = _completion()
+        assert call_llm("first", model="chat-model") == "LOCAL RESPONSE"
+        assert call_llm("second", model="chat-model") == "LOCAL RESPONSE"
+
+    mock_get.assert_called_once()
+    assert _unloaded_ids(mock_post) == []
+
+
+def test_a_model_switch_waits_for_running_requests_and_goes_first(single_model_server):
+    """New requests for the loaded model queue behind a waiting switch."""
+
+    slot_for = utils._lmstudio_model_slot
+    base_url = "http://lm-server:1234/v1"
+    entered = []
+    events = []
+
+    def unload_after_release(*_args, **kwargs):
+        events.append(f"unload {kwargs['json']['instance_id']}")
+        return MagicMock()
+
+    def request(model):
+        with slot_for(base_url, model):
+            entered.append(model)
+
+    def wait_until_waiting(model):
+        slot = utils._lmstudio_server_slots["http://lm-server:1234"]
+        deadline = time.monotonic() + 5
+        while model not in slot.waiting:
+            assert time.monotonic() < deadline, f"{model} never started waiting"
+            time.sleep(0.01)
+
+    with (
+        patch.object(utils.requests, "get", side_effect=lambda *a, **k: _loaded_models(*current)),
+        patch.object(utils.requests, "post", side_effect=unload_after_release),
+    ):
+        current = []
+        with slot_for(base_url, "model-a"):
+            current = [("model-a", "model-a")]
+            switch = threading.Thread(target=request, args=("model-b",))
+            switch.start()
+            wait_until_waiting("model-b")
+            same_model = threading.Thread(target=request, args=("model-a",))
+            same_model.start()
+            wait_until_waiting("model-a")
+            time.sleep(0.1)
+            assert entered == []
+            events.append("model-a finished")
+        switch.join(timeout=5)
+        same_model.join(timeout=5)
+
+    assert entered == ["model-b", "model-a"]
+    assert events[:2] == ["model-a finished", "unload model-a"]
+
+
+def test_a_failed_model_load_unloads_other_models_and_retries_once(single_model_server):
+    responses = iter([_loaded_models(), _loaded_models(("other-model", "other-model"))])
+    with (
+        patch.object(utils.requests, "get", side_effect=lambda *a, **k: next(responses)),
+        patch.object(utils.requests, "post") as mock_post,
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        mock_openai.return_value.chat.completions.create.side_effect = [
+            RuntimeError('Error code: 400 - Failed to load model "chat-model". Error: out of memory'),
+            _completion(),
+        ]
+        result = call_llm("prompt", model="chat-model")
+
+    assert result == "LOCAL RESPONSE"
+    assert mock_openai.return_value.chat.completions.create.call_count == 2
+    assert _unloaded_ids(mock_post) == ["other-model"]
+
+
+def test_other_errors_are_not_retried_with_a_model_switch(single_model_server):
+    with (
+        patch.object(utils.requests, "get", return_value=_loaded_models()) as mock_get,
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        mock_openai.return_value.chat.completions.create.side_effect = RuntimeError("Connection refused")
+        result = call_llm("prompt", model="chat-model")
+
+    assert "Could not connect" in result
+    mock_openai.return_value.chat.completions.create.assert_called_once()
+    mock_get.assert_called_once()
+
+
 def test_lmstudio_key_is_redacted_from_error_and_logs(monkeypatch, caplog):
     secret = "lmstudio-secret-canary"
     monkeypatch.setenv("LMSTUDIO_API_KEY", secret)
