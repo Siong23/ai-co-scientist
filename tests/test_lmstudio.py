@@ -466,6 +466,66 @@ def test_a_model_switch_waits_for_running_requests_and_goes_first(single_model_s
     assert events[:2] == ["model-a finished", "unload model-a"]
 
 
+def test_the_request_that_switched_the_model_runs_alone_while_it_loads(single_model_server):
+    """A second request sent while LM Studio loads the model fails, so it waits."""
+
+    slot_for = utils._lmstudio_model_slot
+    base_url = "http://lm-server:1234/v1"
+    events = []
+    first_entered = threading.Event()
+    release_first = threading.Event()
+
+    def first():
+        with slot_for(base_url, "model-a"):
+            events.append("first start")
+            first_entered.set()
+            release_first.wait(timeout=5)
+            events.append("first end")
+
+    def second():
+        with slot_for(base_url, "model-a"):
+            events.append("second start")
+
+    with (
+        patch.object(utils.requests, "get", return_value=_loaded_models()),
+        patch.object(utils.requests, "post"),
+    ):
+        first_thread = threading.Thread(target=first)
+        first_thread.start()
+        assert first_entered.wait(timeout=5)
+        second_thread = threading.Thread(target=second)
+        second_thread.start()
+        time.sleep(0.2)
+        assert events == ["first start"]
+        release_first.set()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+
+    assert events == ["first start", "first end", "second start"]
+
+
+def test_an_embedding_server_error_during_a_model_load_is_retried_once(single_model_server):
+    server_error = RuntimeError("<!DOCTYPE html><pre>Internal Server Error</pre>")
+    server_error.status_code = 500
+    with (
+        patch.object(utils.requests, "get", return_value=_loaded_models()),
+        patch.object(utils.requests, "post"),
+        patch.object(utils, "OpenAI") as mock_openai,
+    ):
+        mock_openai.return_value.embeddings.create.side_effect = [
+            server_error,
+            MagicMock(data=[MagicMock(embedding=[1.0, 0.0])]),
+        ]
+        vector = _LMSTUDIO_ENCODE(utils.LMStudioSentenceTransformer("embedding-model"), "text")
+
+    assert list(vector) == [1.0, 0.0]
+    assert mock_openai.return_value.embeddings.create.call_count == 2
+
+
+def test_model_does_not_exist_counts_as_a_failed_load():
+    assert utils._lmstudio_model_load_failed('{"error": {"message": "Model does not exist."}}')
+
+
 def test_a_failed_model_load_unloads_other_models_and_retries_once(single_model_server):
     responses = iter([_loaded_models(), _loaded_models(("other-model", "other-model"))])
     with (

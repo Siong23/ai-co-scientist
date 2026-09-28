@@ -273,9 +273,12 @@ def fetch_lmstudio_models() -> List[str]:
 # Studio fails that load with out-of-memory. With lmstudio_single_model_per_server
 # a request for another model waits until this process has no request running on
 # that server, every other loaded model is unloaded, and LM Studio then loads the
-# requested model on demand. Requests for the model in use still run together,
-# but not once a request for another model is waiting, so that one cannot starve.
-_LMSTUDIO_MODEL_LOAD_FAILURES = ("failed to load model", "model unloaded")
+# requested model on demand. The request that switched the model runs alone until
+# it finishes: LM Studio loads the model for that request, and a second request
+# sent during the load fails with "Model does not exist" (chat) or a bare HTTP
+# 500 (embeddings). Requests for the model in use then run together, but not once
+# a request for another model is waiting, so that one cannot starve.
+_LMSTUDIO_MODEL_LOAD_FAILURES = ("failed to load model", "model unloaded", "model does not exist")
 
 
 class _ModelSwitchCancelled(RuntimeError):
@@ -290,6 +293,8 @@ class _LMStudioServerSlot:
         self.model: Optional[str] = None
         self.running = 0
         self.switching = False
+        # The switching request is still running while LM Studio loads its model.
+        self.warming = False
         self.waiting: Dict[str, int] = {}
 
 
@@ -373,7 +378,7 @@ def _lmstudio_model_slot(base_url: str, model: str, refresh: bool = False):
         slot.waiting[model] = slot.waiting.get(model, 0) + 1
         try:
             while True:
-                if not slot.switching:
+                if not slot.switching and not slot.warming:
                     if slot.model == model and refresh:
                         break
                     if slot.model == model:
@@ -390,6 +395,7 @@ def _lmstudio_model_slot(base_url: str, model: str, refresh: bool = False):
                 del slot.waiting[model]
         switch = refresh or slot.model != model
         slot.switching = switch
+        slot.warming = switch
         slot.running += 1
     try:
         if switch:
@@ -406,6 +412,8 @@ def _lmstudio_model_slot(base_url: str, model: str, refresh: bool = False):
     finally:
         with slot.condition:
             slot.running -= 1
+            if switch:
+                slot.warming = False
             slot.condition.notify_all()
 
 
@@ -781,7 +789,13 @@ class LMStudioSentenceTransformer:
                     )
                 break
             except Exception as exc:
-                if attempt or not lmstudio_single_model_per_server() or not _lmstudio_model_load_failed(str(exc)):
+                # A load race on /v1/embeddings surfaces as a bare HTML 500
+                # with no message, so any server error counts as a failed load.
+                status_code = getattr(exc, "status_code", None)
+                load_failed = _lmstudio_model_load_failed(str(exc)) or (
+                    isinstance(status_code, int) and 500 <= status_code < 600
+                )
+                if attempt or not lmstudio_single_model_per_server() or not load_failed:
                     raise
                 logger.warning(
                     "LM Studio could not load %s; unloading other models and retrying once.",

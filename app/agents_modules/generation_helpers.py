@@ -231,6 +231,27 @@ def _is_incomplete_generation_error(hypotheses: List[Dict]) -> bool:
     )
 
 
+_INVALID_JSON_ESCAPE = re.compile(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})')
+
+
+def _escape_stray_backslashes(text: str) -> str:
+    """Double backslashes that do not start a JSON escape, such as LaTeX's \\dots."""
+
+    return _INVALID_JSON_ESCAPE.sub(r"\\\\", text)
+
+
+def _decode_generation_json(text: str):
+    """Decode the first JSON value, tolerating LaTeX backslashes inside strings."""
+
+    decoder = json.JSONDecoder()
+    try:
+        return decoder.raw_decode(text)[0]
+    except json.JSONDecodeError as exc:
+        if not exc.msg.startswith("Invalid \\escape"):
+            raise
+        return decoder.raw_decode(_escape_stray_backslashes(text))[0]
+
+
 def _parse_generation_response(response: str) -> List[Dict]:
     """Parse the small set of JSON shapes commonly returned by local LLMs."""
     try:
@@ -249,7 +270,7 @@ def _parse_generation_response(response: str) -> List[Dict]:
         starts = [index for index in (cleaned.find("["), cleaned.find("{")) if index >= 0]
         if not starts:
             raise ValueError("No JSON object or array was found.")
-        hypotheses_data, _ = json.JSONDecoder().raw_decode(cleaned[min(starts) :])
+        hypotheses_data = _decode_generation_json(cleaned[min(starts) :])
 
         if isinstance(hypotheses_data, dict):
             error_text = hypotheses_data.get("error")
@@ -371,7 +392,8 @@ def call_llm_for_generation(
         "coverage has already been validated upstream. Do not re-grade "
         "coverage and do not return an error object; return the requested "
         "hypothesis array. Keep each title under 20 words and each hypothesis, "
-        "rationale, and feasibility value under 120 words."
+        "rationale, and feasibility value under 120 words. Write equations and "
+        "symbols in plain text, never LaTeX, because backslashes break JSON."
     )
     full_prompt = f"{prompt}\n\n{schema_instruction}"
 
@@ -569,9 +591,14 @@ def call_llm_for_search_queries(
             raise ValueError("Expected one goal-anchored primary, alternative, and null provisional hypothesis.")
         return tuple(hypotheses)
 
-    def parse_research_plan(response: str) -> ResearchPlan:
+    def parse_research_plan(response: str, previous_payload: dict | None = None) -> ResearchPlan:
         payload = parse_json_object(response)
-        string_fields = (
+        if previous_payload:
+            # A repair answer often fixes the named field and drops others the
+            # first answer had right; keep those rather than failing the plan.
+            payload = {**previous_payload, **payload}
+        # These only describe the plan; a plan without them still searches.
+        optional_string_fields = (
             "research_goal",
             "research_type",
             "freshness_requirement",
@@ -582,12 +609,12 @@ def call_llm_for_search_queries(
             "constraints",
             "sub_questions",
             "evidence_requirements",
-            "ambiguities",
             "provisional_hypotheses",
         )
-        if any(not isinstance(payload.get(field), str) for field in string_fields) or any(
-            not isinstance(payload.get(field), list) for field in list_fields
-        ):
+        if any(
+            payload.get(field) is not None and not isinstance(payload.get(field), str)
+            for field in optional_string_fields
+        ) or any(not isinstance(payload.get(field), list) for field in list_fields):
             raise ValueError("Research Planner returned an incomplete plan schema.")
         plan_research_type = fixed_research_type or normalize_research_type(payload.get("research_type"))
         parsed_hypotheses = parse_provisional_hypotheses(
@@ -610,14 +637,17 @@ def call_llm_for_search_queries(
         competing_explanations = values("competing_explanations")
         comparison_dimensions = values("comparison_dimensions")
         research_questions = values("research_questions", sub_questions)
-        topic_dimensions = values("topic_dimensions")
         themes = values("themes")
+        topic_dimensions = values("topic_dimensions") or themes
         evidence_dimensions = values("evidence_dimensions")
         claims = values("claims")
         risks = values("risks")
         counterclaims = values("counterclaims")
         primary_source_checks = values("primary_source_checks")
-        missing_evidence = values("missing_evidence")
+        literature_gaps = values("literature_gaps")
+        # The planner often lists the gaps as literature_gaps or evidence
+        # requirements instead of missing_evidence; they name the same thing.
+        missing_evidence = values("missing_evidence") or literature_gaps or values("evidence_requirements")
 
         if plan_research_type == "comparative" and (
             len((*competing_candidates, *competing_explanations)) < 2 or not comparison_dimensions
@@ -634,7 +664,6 @@ def call_llm_for_search_queries(
             )
         areas_of_agreement = values("areas_of_agreement")
         areas_of_disagreement = values("areas_of_disagreement")
-        literature_gaps = values("literature_gaps")
         if plan_research_type == "literature_review" and (
             not themes
             or not evidence_dimensions
@@ -663,9 +692,9 @@ def call_llm_for_search_queries(
             constraints=values("constraints"),
             sub_questions=sub_questions,
             evidence_requirements=values("evidence_requirements"),
-            freshness_requirement=str(payload["freshness_requirement"]).strip(),
+            freshness_requirement=str(payload.get("freshness_requirement") or "").strip(),
             ambiguities=values("ambiguities"),
-            search_strategy=str(payload["search_strategy"]).strip(),
+            search_strategy=str(payload.get("search_strategy") or "").strip(),
             provisional_hypotheses=parsed_hypotheses,
             competing_candidates=competing_candidates,
             competing_explanations=competing_explanations,
@@ -685,7 +714,7 @@ def call_llm_for_search_queries(
             missing_evidence=missing_evidence,
         )
 
-    def parse_response(response: str) -> SearchQueryPlan:
+    def parse_response(response: str, allow_goal_scope_requirement: bool = False) -> SearchQueryPlan:
         payload = parse_json_object(response)
         queries = payload.get("queries")
         required_terms = payload.get("required_terms")
@@ -747,6 +776,23 @@ def call_llm_for_search_queries(
                     goal_quote=goal_quote,
                 )
             )
+        if not explicit_requirements and allow_goal_scope_requirement and raw_requirements:
+            # The model kept quoting its own sub-questions instead of the goal.
+            # Its queries are still usable, so gate on the whole goal instead
+            # of discarding the plan for the weaker goal-sentence fallback.
+            logger.warning(
+                "No explicit requirement quoted the goal verbatim; keeping the planned queries "
+                "and requiring evidence for the whole goal. Rejected goal_quote values: %s",
+                json.dumps(rejected_quotes, ensure_ascii=False),
+            )
+            explicit_requirements.append(
+                EvidenceAspect(
+                    aspect_id="goal_scope",
+                    description=research_goal.strip(),
+                    goal_quote=research_goal.strip(),
+                )
+            )
+            rejected_quotes = []
         if not 1 <= len(explicit_requirements) <= 5:
             raise ValueError(
                 "Expected 1 to 5 unique explicit requirements with verbatim goal quotes. "
@@ -1066,7 +1112,10 @@ TODAY'S DATE
                 if planner_response.startswith("Error:"):
                     return None, f"Query rewriting failed: Research planning repair failed: {planner_response}"
             try:
-                structured_research_plan = parse_research_plan(planner_response)
+                structured_research_plan = parse_research_plan(
+                    planner_response,
+                    previous_payload=first_payload if attempt else None,
+                )
                 research_plan = structured_research_plan.to_dict()
                 planner_declared_type = str(first_payload.get("research_type") or "").strip()
                 if planner_declared_type and planner_declared_type != structured_research_plan.research_type:
@@ -1189,7 +1238,7 @@ STRUCTURED RESEARCH PLAN
         if response.startswith("Error:"):
             return None, f"Query rewriting failed: {response}"
         try:
-            query_plan = parse_response(response)
+            query_plan = parse_response(response, allow_goal_scope_requirement=attempt == 1)
             if query_fidelity_validator is not None:
                 fidelity_valid, fidelity_reason = query_fidelity_validator(query_plan)
                 if not fidelity_valid:

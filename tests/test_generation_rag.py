@@ -1253,7 +1253,8 @@ def test_query_rewriting_rejects_invalid_or_incomplete_json():
         assert error.startswith("Query rewriting failed:")
 
 
-def test_query_rewriting_rejects_hard_requirement_absent_from_goal():
+def test_query_rewriting_drops_hard_requirement_absent_from_goal():
+    goal = "Compare concept bottleneck models with Grad-CAM."
     payload = json.dumps(
         {
             "queries": ["one", "two", "three", "four", "five"],
@@ -1269,11 +1270,13 @@ def test_query_rewriting_rejects_hard_requirement_absent_from_goal():
     )
 
     with patch("app.agents.call_llm", return_value=payload) as mock_call:
-        plan, error = call_llm_for_search_queries("Compare concept bottleneck models with Grad-CAM.")
+        plan, error = call_llm_for_search_queries(goal)
 
-    assert plan is None
-    assert error is not None
-    assert "verbatim goal quotes" in error
+    # The invented condition never becomes an evidence gate; after the repair
+    # also fails, the plan keeps its queries and gates on the whole goal.
+    assert error is None
+    assert plan is not None
+    assert [(aspect.aspect_id, aspect.goal_quote) for aspect in plan.explicit_requirements] == [("goal_scope", goal)]
     repair_prompt = mock_call.call_args.args[0]
     assert 'Rejected goal_quote values: ["adversarial perturbations"]' in repair_prompt
     assert "PREVIOUS INVALID RESPONSE" in repair_prompt

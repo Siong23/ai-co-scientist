@@ -238,6 +238,58 @@ def test_exploratory_planner_repairs_missing_hypotheses():
     assert "primary, alternative, and null provisional hypothesis" in llm.call_args_list[1].args[0]
 
 
+def test_exploratory_plan_without_missing_evidence_uses_its_listed_gaps():
+    goal = "Assess target evidence"
+    payload = json.loads(_planner_payload("exploratory", goal, hypotheses=_hypotheses(goal)))
+    del payload["missing_evidence"]
+    del payload["search_strategy"]
+    payload["literature_gaps"] = ["No long-term field measurements"]
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[json.dumps(payload), _query_payload(goal, with_hypothesis_ids=True)],
+    ) as llm:
+        plan, error = call_llm_for_search_queries(goal, research_type="exploratory", query_count=3)
+
+    assert error is None
+    assert plan is not None and plan.research_plan is not None
+    assert plan.research_plan.missing_evidence == ("No long-term field measurements",)
+    assert plan.research_plan.search_strategy == ""
+    assert llm.call_count == 2
+
+
+def test_planner_repair_keeps_fields_the_first_answer_had():
+    goal = "Assess target evidence"
+    first = json.loads(_planner_payload("exploratory", goal))
+    repair = {"provisional_hypotheses": _hypotheses(goal)}
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[json.dumps(first), json.dumps(repair), _query_payload(goal, with_hypothesis_ids=True)],
+    ):
+        plan, error = call_llm_for_search_queries(goal, research_type="exploratory", query_count=3)
+
+    assert error is None
+    assert plan is not None and plan.research_plan is not None
+    assert plan.research_plan.topic_dimensions == ("mechanisms", "boundary conditions")
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == ["primary", "alternative", "null"]
+
+
+def test_query_plan_with_only_paraphrased_quotes_keeps_its_queries():
+    goal = "Assess target evidence"
+    query_payload = json.loads(_query_payload(goal, with_hypothesis_ids=True))
+    query_payload["explicit_requirements"][0]["goal_quote"] = "Can the target be assessed accurately?"
+    paraphrased = json.dumps(query_payload)
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_planner_payload("exploratory", goal, hypotheses=_hypotheses(goal)), paraphrased, paraphrased],
+    ):
+        plan, error = call_llm_for_search_queries(goal, research_type="exploratory", query_count=3)
+
+    assert error is None
+    assert plan is not None
+    assert [(aspect.aspect_id, aspect.goal_quote) for aspect in plan.explicit_requirements] == [("goal_scope", goal)]
+    assert plan.queries[0].query == f"{goal} empirical supporting evidence"
+
+
 def _complete_evidence_mode(context: ContextMemory, mode: str = "exploratory") -> None:
     context.research_type = mode
     context.research_plan = {
