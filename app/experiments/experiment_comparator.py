@@ -43,6 +43,7 @@ import math
 import re
 import time
 from typing import Any, Dict, List, Optional
+
 from app.experiments.paper_reader import PaperReader
 from app.paper_library import ChromaPaperLibrary
 
@@ -62,15 +63,38 @@ class ExperimentComparator:
 
     Python performs numerical calculations.
     The LLM is used only for scientific extraction and explanation.
+
+    Important design principle:
+
+        The paper's reported evaluation metrics are authoritative
+        for scientific comparison.
+
+    The comparator therefore does NOT restrict comparisons to a fixed
+    list such as accuracy/precision/recall/F1. Any finite numerical
+    metric reported by both the paper and automated experiment may be
+    considered, subject to compatibility checks.
     """
 
-    COMPARABLE_METRICS = (
-        "accuracy",
-        "precision_weighted",
-        "recall_weighted",
-        "f1_weighted",
-    )
+    # ============================================================
+    # Metric aliases
+    # ============================================================
 
+    # These aliases are used only to normalize common metric names.
+    #
+    # They are NOT a whitelist of comparable metrics.
+    #
+    # This allows metrics such as:
+    #   - handshake_latency_ms
+    #   - certificate_size_bytes
+    #   - throughput_mbps
+    #   - overhead_percent
+    #   - recovery_time_ms
+    #   - accuracy
+    #   - f1
+    #   - reward
+    #   - risk
+    #
+    # to pass through the comparator.
     METRIC_ALIASES = {
         "accuracy": [
             "accuracy",
@@ -90,6 +114,8 @@ class ExperimentComparator:
             "f1_weighted",
             "weighted_f1",
             "weighted f1",
+            "f1-score",
+            "f1 score",
         ],
     }
 
@@ -126,6 +152,10 @@ class ExperimentComparator:
         if value is None:
             return None
 
+        # Do not silently interpret booleans as numerical metrics.
+        if isinstance(value, bool):
+            return None
+
         try:
             number = float(value)
         except (TypeError, ValueError):
@@ -140,6 +170,13 @@ class ExperimentComparator:
     def _normalise_metric_name(name: Any) -> str:
         """
         Normalize a metric name for comparison.
+
+        Examples:
+
+            "F1 Score"              -> "f1_score"
+            "Weighted F1"           -> "weighted_f1"
+            "Handshake Latency"     -> "handshake_latency"
+            "Certificate Size (B)"  -> "certificate_size_b"
         """
 
         if name is None:
@@ -151,22 +188,133 @@ class ExperimentComparator:
             str(name).strip().lower(),
         ).strip("_")
 
+    @classmethod
+    def _canonical_metric_name(
+        cls,
+        name: Any,
+    ) -> str:
+        """
+        Convert common metric aliases to a canonical metric name.
+
+        Unknown metrics are simply normalized and preserved.
+
+        This is intentionally NOT a whitelist.
+        """
+
+        normalized = cls._normalise_metric_name(name)
+
+        if not normalized:
+            return ""
+
+        for canonical_name, aliases in cls.METRIC_ALIASES.items():
+            candidates = [
+                canonical_name,
+                *aliases,
+            ]
+
+            normalized_candidates = {
+                cls._normalise_metric_name(alias)
+                for alias in candidates
+            }
+
+            if normalized in normalized_candidates:
+                return canonical_name
+
+        return normalized
+
     @staticmethod
-    def _clamp_metric(value: float) -> float:
+    def _normalise_metric_value(
+        value: Any,
+        unit: Optional[str] = None,
+        value_type: Optional[str] = None,
+    ) -> Optional[float]:
         """
-        Convert percentage-style metric values to [0, 1].
+        Normalize a numerical metric without assuming that every
+        metric is a percentage.
 
-        For example:
+        Percentage conversion is performed only when the metric
+        metadata explicitly indicates a percentage.
 
-            96.5 -> 0.965
-            0.965 -> 0.965
+        This prevents errors such as:
 
-        This is useful because papers may report percentages while
-        experiment metrics are usually stored as decimal values.
+            latency = 5.2 ms
+            being incorrectly converted to 0.052
+
+        or:
+
+            certificate_size = 1200 bytes
+            being incorrectly converted to 12.
         """
 
-        if value > 1.0 and value <= 100.0:
-            return value / 100.0
+        number = ExperimentComparator._safe_float(value)
+
+        if number is None:
+            return None
+
+        normalized_unit = (
+            str(unit or "")
+            .strip()
+            .lower()
+        )
+
+        normalized_value_type = (
+            str(value_type or "")
+            .strip()
+            .lower()
+        )
+
+        percentage_units = {
+            "%",
+            "percent",
+            "percentage",
+            "percentage_point",
+            "percentage_points",
+        }
+
+        percentage_types = {
+            "percentage",
+            "percent",
+            "proportion",
+        }
+
+        if (
+            normalized_unit in percentage_units
+            or normalized_value_type in percentage_types
+        ):
+            if number > 1.0 and number <= 100.0:
+                return number / 100.0
+
+        return number
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """
+        Convert non-finite floating-point values into JSON-safe values.
+        """
+
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return None
+
+            return value
+
+        if isinstance(value, dict):
+            return {
+                key: ExperimentComparator._json_safe(item)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, list):
+            return [
+                ExperimentComparator._json_safe(item)
+                for item in value
+            ]
+
+        if isinstance(value, tuple):
+            return [
+                ExperimentComparator._json_safe(item)
+                for item in value
+            ]
 
         return value
 
@@ -241,36 +389,6 @@ class ExperimentComparator:
         raise ValueError(
             "The LLM response did not contain a valid JSON object."
         )
-
-    @staticmethod
-    def _json_safe(value: Any) -> Any:
-        """
-        Convert non-finite floating-point values into JSON-safe values.
-        """
-        if isinstance(value, float):
-            if not math.isfinite(value):
-                return None
-            return value
-
-        if isinstance(value, dict):
-            return {
-                key: ExperimentComparator._json_safe(item)
-                for key, item in value.items()
-            }
-
-        if isinstance(value, list):
-            return [
-                ExperimentComparator._json_safe(item)
-                for item in value
-            ]
-
-        if isinstance(value, tuple):
-            return [
-                ExperimentComparator._json_safe(item)
-                for item in value
-            ]
-
-        return value
 
     # ============================================================
     # Evidence Handling
@@ -372,6 +490,10 @@ class ExperimentComparator:
             "recall",
             "f1",
             "f1-score",
+            "latency",
+            "throughput",
+            "overhead",
+            "certificate",
             "table",
             "comparison",
         )
@@ -385,11 +507,18 @@ class ExperimentComparator:
         abstract_sources = []
         other_sources = []
 
-        for index, source in enumerate(evidence_sources, start=1):
+        for index, source in enumerate(
+            evidence_sources,
+            start=1,
+        ):
             if not isinstance(source, dict):
                 continue
 
-            title = str(source.get("title") or "")
+            title = str(
+                source.get("title")
+                or ""
+            )
+
             section = str(
                 source.get("section")
                 or source.get("section_title")
@@ -423,16 +552,22 @@ class ExperimentComparator:
                 keyword in searchable_text
                 for keyword in priority_keywords
             ):
-                prioritized_sources.append(formatted_source)
+                prioritized_sources.append(
+                    formatted_source
+                )
 
             elif any(
                 keyword in searchable_text
                 for keyword in abstract_keywords
             ):
-                abstract_sources.append(formatted_source)
+                abstract_sources.append(
+                    formatted_source
+                )
 
             else:
-                other_sources.append(formatted_source)
+                other_sources.append(
+                    formatted_source
+                )
 
         ordered_sources = (
             prioritized_sources
@@ -443,13 +578,17 @@ class ExperimentComparator:
         if not ordered_sources:
             return "No usable scientific evidence was provided."
 
-        return "\n\n---\n\n".join(ordered_sources)
+        return "\n\n---\n\n".join(
+            ordered_sources
+        )
 
     def _load_paper_chunks(
         self,
         evidence_sources: List[Dict[str, Any]],
     ) -> List[Any]:
-        """Load indexed chunks for the evidence sources."""
+        """
+        Load indexed chunks for the evidence sources.
+        """
 
         chunks = []
 
@@ -464,10 +603,16 @@ class ExperimentComparator:
                 continue
 
             try:
-                source_chunks = self.paper_library.get_source_chunks(
-                    source_id
+                source_chunks = (
+                    self.paper_library.get_source_chunks(
+                        source_id
+                    )
                 )
-                chunks.extend(source_chunks)
+
+                chunks.extend(
+                    source_chunks
+                )
+
             except Exception as error:
                 print(
                     f"[ExperimentComparator] "
@@ -488,20 +633,34 @@ class ExperimentComparator:
         is available.
         """
 
-        if not isinstance(reference_experiment, dict):
+        if not isinstance(
+            reference_experiment,
+            dict,
+        ):
             return {}
 
         if not reference_experiment:
             return {}
 
-        normalized = dict(reference_experiment)
+        normalized = dict(
+            reference_experiment
+        )
 
-        sources = normalized.get("sources", [])
+        sources = normalized.get(
+            "sources",
+            [],
+        )
 
-        if isinstance(sources, dict):
+        if isinstance(
+            sources,
+            dict,
+        ):
             sources = [sources]
 
-        if not isinstance(sources, list):
+        if not isinstance(
+            sources,
+            list,
+        ):
             sources = []
 
         normalized["sources"] = [
@@ -520,7 +679,7 @@ class ExperimentComparator:
         )
 
         return normalized
-    
+
     # ============================================================
     # LLM
     # ============================================================
@@ -549,6 +708,7 @@ class ExperimentComparator:
                 system_prompt=system_prompt,
                 **kwargs,
             )
+
         except TypeError:
             # Fallback for facades that do not accept model=.
             return facade.call_llm(
@@ -556,7 +716,6 @@ class ExperimentComparator:
                 system_prompt=system_prompt,
             )
 
-        
     # ============================================================
     # Paper Evidence Loading
     # ============================================================
@@ -565,36 +724,62 @@ class ExperimentComparator:
         self,
         evidence_sources: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Load full paper text from evidence sources."""
+        """
+        Load full paper text from evidence sources.
+        """
 
         loaded_sources = []
 
         for source in evidence_sources:
             source_copy = dict(source)
 
-            url = self._get_paper_url(source)
+            url = self._get_paper_url(
+                source
+            )
 
             if url:
                 try:
-                    paper_text = self.paper_reader.read_paper(url)
+                    paper_text = (
+                        self.paper_reader.read_paper(
+                            url
+                        )
+                    )
 
                     if paper_text:
-                        source_copy["content"] = paper_text
-                        source_copy["paper_retrieved"] = True
+                        source_copy["content"] = (
+                            paper_text
+                        )
+
+                        source_copy[
+                            "paper_retrieved"
+                        ] = True
+
                     else:
-                        source_copy["paper_retrieved"] = False
-                        source_copy["paper_retrieval_error"] = (
-                            "Paper was downloaded but no text was extracted."
+                        source_copy[
+                            "paper_retrieved"
+                        ] = False
+
+                        source_copy[
+                            "paper_retrieval_error"
+                        ] = (
+                            "Paper was downloaded but "
+                            "no text was extracted."
                         )
 
                 except Exception as error:
-                    source_copy["paper_retrieved"] = False
-                    source_copy["paper_retrieval_error"] = str(error)
+                    source_copy[
+                        "paper_retrieved"
+                    ] = False
 
-            loaded_sources.append(source_copy)
+                    source_copy[
+                        "paper_retrieval_error"
+                    ] = str(error)
+
+            loaded_sources.append(
+                source_copy
+            )
 
         return loaded_sources
-
 
     # ============================================================
     # Paper Result Extraction
@@ -607,14 +792,21 @@ class ExperimentComparator:
         """
         Get a PDF-compatible URL from an evidence source.
 
-        arXiv evidence may provide an HTML URL such as:
+        arXiv evidence may provide:
+
             https://arxiv.org/html/2603.11006v1
 
-        PaperReader expects a PDF URL, so convert arXiv HTML
-        URLs to their corresponding PDF URLs.
+        or:
+
+            https://arxiv.org/abs/2603.11006v1
+
+        Both are converted to the corresponding PDF URL.
         """
 
-        if not isinstance(source, dict):
+        if not isinstance(
+            source,
+            dict,
+        ):
             return None
 
         url = (
@@ -635,8 +827,13 @@ class ExperimentComparator:
                 "arxiv.org/pdf/",
             )
 
-        return url
+        elif "arxiv.org/abs/" in url:
+            url = url.replace(
+                "arxiv.org/abs/",
+                "arxiv.org/pdf/",
+            )
 
+        return url
 
     def _extract_results_from_chunks(
         self,
@@ -681,22 +878,58 @@ IMPORTANT RULES:
 
 4. Do not calculate metrics that are not explicitly reported.
 
-5. If the chunk contains methodology, background, or setup only,
-return found_relevant_result as false.
+5. Preserve the numerical value as reported in the paper.
 
-6. If the chunk contains numerical results, extract only values
-explicitly stated in the chunk.
+6. Do NOT automatically convert milliseconds, bytes, seconds,
+   throughput, rates, percentages, or other units into another unit.
 
-7. Classification metrics such as accuracy, precision, recall, and
-F1-score should only be extracted when explicitly reported.
+7. If a percentage is explicitly reported, preserve the percentage
+   value as the numerical value unless the paper explicitly gives
+   another representation.
 
-8. Other quantitative results may include latency, risk, reward,
-overhead, recovery time, throughput, or constraint feasibility.
+8. If the chunk contains methodology, background, or setup only,
+   return found_relevant_result as false.
 
-9. The result must be relevant to the selected hypothesis.
+9. If the chunk contains numerical results, extract only values
+   explicitly stated in the chunk.
 
-10. If multiple metrics are explicitly reported in the same chunk,
-extract all of them.
+10. Extract ANY relevant quantitative evaluation metric, not only
+    accuracy, precision, recall, or F1.
+
+11. Other quantitative results may include:
+    - latency
+    - handshake latency
+    - certificate size
+    - overhead
+    - throughput
+    - recovery time
+    - response time
+    - memory usage
+    - computational cost
+    - risk
+    - reward
+    - security rate
+    - unauthorized-access rate
+    - constraint violations
+    - optimization objective
+    - other explicitly reported numerical measurements
+
+12. The result must be relevant to the selected hypothesis.
+
+13. If multiple metrics are explicitly reported in the same chunk,
+    extract all relevant metrics.
+
+14. If the paper provides a metric with a unit, preserve the unit
+    in metric_definitions.
+
+15. If the paper indicates whether higher or lower values are
+    desirable, preserve that direction in metric_definitions.
+
+16. Do not infer a direction when the paper does not explicitly
+    establish one.
+
+17. Do not combine numbers from unrelated experiments merely because
+    they appear in the same chunk.
 
 Return exactly this JSON structure:
 
@@ -704,8 +937,40 @@ Return exactly this JSON structure:
     "found_relevant_result": false,
     "result_type": "none",
     "metrics": {},
+    "metric_definitions": {},
     "evidence_quote": null,
     "reason": "",
+    "chunk_id": null,
+    "page_start": null,
+    "page_end": null
+}
+
+The "metrics" object must contain only explicitly reported numerical
+values.
+
+Example:
+
+{
+    "found_relevant_result": true,
+    "result_type": "network_performance",
+    "metrics": {
+        "handshake_latency_ms": 5.2,
+        "certificate_size_bytes": 1200
+    },
+    "metric_definitions": {
+        "handshake_latency_ms": {
+            "unit": "ms",
+            "value_type": "numeric",
+            "direction": "lower_is_better"
+        },
+        "certificate_size_bytes": {
+            "unit": "bytes",
+            "value_type": "numeric",
+            "direction": "lower_is_better"
+        }
+    },
+    "evidence_quote": "The measured handshake latency was 5.2 ms...",
+    "reason": "The chunk reports explicit quantitative evaluation results.",
     "chunk_id": null,
     "page_start": null,
     "page_end": null
@@ -722,12 +987,18 @@ Possible result_type values:
 - "none"
 """
 
-        # Store results from every relevant chunk.
         extracted_results = []
 
-        for chunk_index, chunk in enumerate(chunks):
+        for chunk_index, chunk in enumerate(
+            chunks
+        ):
             chunk_text = str(
-                getattr(chunk, "text", "") or ""
+                getattr(
+                    chunk,
+                    "text",
+                    "",
+                )
+                or ""
             ).strip()
 
             if not chunk_text:
@@ -755,38 +1026,34 @@ Possible result_type values:
 Selected Rank #1 hypothesis:
 
 Title:
-
 {hypothesis_title}
 
 Hypothesis:
-
 {hypothesis_text}
 
 Current paper chunk number:
-
 {chunk_index + 1} of {len(chunks)}
 
 Chunk ID:
-
 {chunk_id}
 
 Page range:
-
 {page_start} - {page_end}
 
 Paper chunk:
-
 {chunk_text}
 
 Determine whether this chunk contains explicit quantitative
-results relevant to the selected hypothesis.
+evaluation results relevant to the selected hypothesis.
 
 If it does not, return found_relevant_result as false.
 
 If it does, extract ALL explicitly reported quantitative
-results relevant to the selected hypothesis.
+evaluation results relevant to the selected hypothesis.
 
-Do not calculate or infer missing values.
+Preserve the numerical values and units exactly as reported.
+
+Do not calculate, estimate, infer, or fabricate missing values.
 """
 
             try:
@@ -795,9 +1062,14 @@ Do not calculate or infer missing values.
                     user_prompt,
                 )
 
-                parsed = self._extract_json(response)
+                parsed = self._extract_json(
+                    response
+                )
 
-                if not isinstance(parsed, dict):
+                if not isinstance(
+                    parsed,
+                    dict,
+                ):
                     continue
 
                 found_result = bool(
@@ -829,12 +1101,96 @@ Do not calculate or infer missing values.
                     {},
                 )
 
-                if not isinstance(metrics, dict):
+                if not isinstance(
+                    metrics,
+                    dict,
+                ):
                     metrics = {}
 
-                parsed["metrics"] = metrics
+                # Keep only finite numerical values.
+                normalized_metrics = {}
 
-                extracted_results.append(parsed)
+                metric_definitions = parsed.get(
+                    "metric_definitions",
+                    {},
+                )
+
+                if not isinstance(
+                    metric_definitions,
+                    dict,
+                ):
+                    metric_definitions = {}
+
+                for raw_name, raw_value in metrics.items():
+                    if not isinstance(
+                        raw_name,
+                        str,
+                    ):
+                        continue
+
+                    metric_definition = (
+                        metric_definitions.get(
+                            raw_name,
+                            {},
+                        )
+                    )
+
+                    if not isinstance(
+                        metric_definition,
+                        dict,
+                    ):
+                        metric_definition = {}
+
+                    safe_value = (
+                        self._normalise_metric_value(
+                            raw_value,
+                            unit=metric_definition.get(
+                                "unit"
+                            ),
+                            value_type=metric_definition.get(
+                                "value_type"
+                            ),
+                        )
+                    )
+
+                    if safe_value is None:
+                        continue
+
+                    normalized_name = (
+                        self._canonical_metric_name(
+                            raw_name
+                        )
+                    )
+
+                    if not normalized_name:
+                        continue
+
+                    normalized_metrics[
+                        normalized_name
+                    ] = safe_value
+
+                    if raw_name != normalized_name:
+                        if raw_name in metric_definitions:
+                            metric_definitions[
+                                normalized_name
+                            ] = metric_definitions[
+                                raw_name
+                            ]
+
+                parsed["metrics"] = (
+                    normalized_metrics
+                )
+
+                parsed[
+                    "metric_definitions"
+                ] = metric_definitions
+
+                if not normalized_metrics:
+                    continue
+
+                extracted_results.append(
+                    parsed
+                )
 
             except Exception as error:
                 print(
@@ -863,7 +1219,8 @@ Do not calculate or infer missing values.
         # Combine metrics from all relevant chunks
         # ========================================================
 
-        combined_metrics: Dict[str, Any] = {}
+        combined_metrics: Dict[str, float] = {}
+        combined_definitions: Dict[str, Dict[str, Any]] = {}
 
         for result in extracted_results:
             metrics = result.get(
@@ -871,12 +1228,34 @@ Do not calculate or infer missing values.
                 {},
             )
 
+            definitions = result.get(
+                "metric_definitions",
+                {},
+            )
+
+            if not isinstance(
+                definitions,
+                dict,
+            ):
+                definitions = {}
+
             for metric_name, value in metrics.items():
-                # Keep the first explicitly reported value for
-                # each metric. This avoids silently overwriting
-                # conflicting values from different chunks.
                 if metric_name not in combined_metrics:
-                    combined_metrics[metric_name] = value
+                    combined_metrics[
+                        metric_name
+                    ] = value
+
+                    definition = definitions.get(
+                        metric_name
+                    )
+
+                    if isinstance(
+                        definition,
+                        dict,
+                    ):
+                        combined_definitions[
+                            metric_name
+                        ] = definition
 
         # ========================================================
         # Build combined result
@@ -884,7 +1263,7 @@ Do not calculate or infer missing values.
 
         first_result = extracted_results[0]
 
-        combined_result = {
+        return {
             "success": True,
             "status": "results_found",
             "found_relevant_result": True,
@@ -893,6 +1272,7 @@ Do not calculate or infer missing values.
                 "other_quantitative_result",
             ),
             "metrics": combined_metrics,
+            "metric_definitions": combined_definitions,
             "evidence_quote": first_result.get(
                 "evidence_quote"
             ),
@@ -927,6 +1307,10 @@ Do not calculate or infer missing values.
                         "metrics",
                         {},
                     ),
+                    "metric_definitions": result.get(
+                        "metric_definitions",
+                        {},
+                    ),
                     "evidence_quote": result.get(
                         "evidence_quote"
                     ),
@@ -934,9 +1318,6 @@ Do not calculate or infer missing values.
                 for result in extracted_results
             ],
         }
-
-        return combined_result
-
 
     def _extract_results_from_reference_experiment(
         self,
@@ -946,7 +1327,22 @@ Do not calculate or infer missing values.
         Extract paper results from the reference experiment already
         prepared by ExperimentOrchestrator.
 
-        This avoids downloading and parsing the same paper again.
+        The reference experiment may contain scientific metrics such as:
+
+            accuracy
+            F1
+            latency
+            risk
+            reward
+            overhead
+            recovery time
+            throughput
+            certificate size
+            etc.
+
+        The comparator preserves all finite numerical metrics.
+
+        Comparability is determined later by check_comparability().
         """
 
         reference_experiment = (
@@ -955,7 +1351,9 @@ Do not calculate or infer missing values.
             )
         )
 
-        if not reference_experiment.get("available"):
+        if not reference_experiment.get(
+            "available"
+        ):
             return {
                 "success": False,
                 "status": "reference_experiment_unavailable",
@@ -965,8 +1363,15 @@ Do not calculate or infer missing values.
                 ],
             }
 
-        combined_metrics: Dict[str, Any] = {}
-        extracted_sources: List[Dict[str, Any]] = []
+        combined_metrics: Dict[str, float] = {}
+        combined_definitions: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
+
+        extracted_sources: List[
+            Dict[str, Any]
+        ] = []
 
         for source in reference_experiment.get(
             "sources",
@@ -977,77 +1382,153 @@ Do not calculate or infer missing values.
                 {},
             )
 
-            if not isinstance(details, dict):
+            if not isinstance(
+                details,
+                dict,
+            ):
                 details = {}
 
-            # ----------------------------------------------------
-            # Prefer metrics explicitly extracted by PaperReader.
-            # ----------------------------------------------------
+            # --------------------------------------------------------
+            # Collect explicit reference metrics.
+            # --------------------------------------------------------
+
+            source_metrics: Dict[str, Any] = {}
 
             reference_metrics = details.get(
                 "reference_metrics",
                 {},
             )
 
-            if isinstance(reference_metrics, dict):
-                for metric_name, value in reference_metrics.items():
-                    if not isinstance(metric_name, str):
-                        continue
+            if isinstance(
+                reference_metrics,
+                dict,
+            ):
+                source_metrics.update(
+                    reference_metrics
+                )
 
-                    metric_lower = metric_name.strip().lower()
+            # --------------------------------------------------------
+            # Some PaperReader versions may store numerical metrics
+            # directly inside "metrics".
+            # --------------------------------------------------------
 
-                    # ----------------------------------------------------
-                    # Preserve metric specificity.
-                    #
-                    # Only map to weighted metrics when the paper
-                    # explicitly identifies the metric as weighted.
-                    # ----------------------------------------------------
-                    if "weighted" in metric_lower:
-                        normalized_name = self._normalise_metric_name(
+            experiment_metrics = details.get(
+                "metrics",
+                [],
+            )
+
+            if isinstance(
+                experiment_metrics,
+                dict,
+            ):
+                for metric_name, value in (
+                    experiment_metrics.items()
+                ):
+                    if metric_name not in source_metrics:
+                        source_metrics[
                             metric_name
-                        )
-                    else:
-                        # Preserve generic paper metrics such as:
-                        #   F1
-                        #   Precision
-                        #   Recall
-                        #
-                        # Do NOT silently convert them to weighted metrics.
-                        if metric_lower in {"f1", "f1-score", "f1 score"}:
-                            normalized_name = "f1"
+                        ] = value
 
-                        elif metric_lower in {
-                            "precision",
-                            "precision score",
-                        }:
-                            normalized_name = "precision"
+            # --------------------------------------------------------
+            # Metric metadata.
+            # --------------------------------------------------------
 
-                        elif metric_lower in {
-                            "recall",
-                            "recall score",
-                            "sensitivity",
-                        }:
-                            normalized_name = "recall"
+            metric_definitions = details.get(
+                "metric_definitions",
+                {},
+            )
 
-                        elif metric_lower in {
-                            "accuracy",
-                            "acc",
-                        }:
-                            normalized_name = "accuracy"
+            if not isinstance(
+                metric_definitions,
+                dict,
+            ):
+                metric_definitions = {}
 
-                        else:
-                            normalized_name = metric_name.strip()
+            normalized_source_metrics: Dict[
+                str,
+                float,
+            ] = {}
 
-                    safe_value = self._safe_float(value)
+            normalized_source_definitions: Dict[
+                str,
+                Dict[str, Any],
+            ] = {}
 
-                    if safe_value is not None and normalized_name:
-                        combined_metrics[normalized_name] = (
-                            self._clamp_metric(safe_value)
-                        )
+            # --------------------------------------------------------
+            # Normalize and preserve all finite numerical metrics.
+            # --------------------------------------------------------
 
-            # ----------------------------------------------------
-            # Preserve useful experiment metadata.
-            # ----------------------------------------------------
+            for metric_name, value in (
+                source_metrics.items()
+            ):
+                if not isinstance(
+                    metric_name,
+                    str,
+                ):
+                    continue
+
+                normalized_name = (
+                    self._canonical_metric_name(
+                        metric_name
+                    )
+                )
+
+                if not normalized_name:
+                    continue
+
+                definition = metric_definitions.get(
+                    metric_name,
+                    metric_definitions.get(
+                        normalized_name,
+                        {},
+                    ),
+                )
+
+                if not isinstance(
+                    definition,
+                    dict,
+                ):
+                    definition = {}
+
+                safe_value = (
+                    self._normalise_metric_value(
+                        value,
+                        unit=definition.get(
+                            "unit"
+                        ),
+                        value_type=definition.get(
+                            "value_type"
+                        ),
+                    )
+                )
+
+                if safe_value is None:
+                    continue
+
+                normalized_source_metrics[
+                    normalized_name
+                ] = safe_value
+
+                if definition:
+                    normalized_source_definitions[
+                        normalized_name
+                    ] = definition
+
+                # Preserve the first explicitly reported value when
+                # multiple evidence sources report the same metric.
+                if normalized_name not in combined_metrics:
+                    combined_metrics[
+                        normalized_name
+                    ] = safe_value
+
+                    if definition:
+                        combined_definitions[
+                            normalized_name
+                        ] = definition
+
+            # --------------------------------------------------------
+            # Preserve source-level metadata.
+            # --------------------------------------------------------
 
             extracted_sources.append(
                 {
@@ -1079,6 +1560,11 @@ Do not calculate or infer missing values.
                         {},
                     ),
                     "reference_metrics": reference_metrics,
+                    "metric_definitions": metric_definitions,
+                    "normalized_metrics": normalized_source_metrics,
+                    "normalized_metric_definitions": (
+                        normalized_source_definitions
+                    ),
                     "results_text": source.get(
                         "results_text",
                         "",
@@ -1086,11 +1572,20 @@ Do not calculate or infer missing values.
                 }
             )
 
+        # ------------------------------------------------------------
+        # A reference experiment is usable if it contains any valid
+        # numerical scientific results.
+        #
+        # Do NOT require those metrics to be directly comparable here.
+        # Comparability is checked separately.
+        # ------------------------------------------------------------
+
         if not combined_metrics:
             return {
                 "success": False,
                 "status": "no_reference_metrics",
                 "metrics": {},
+                "metric_definitions": {},
                 "sources": extracted_sources,
                 "errors": [
                     "The extracted reference experiment did not "
@@ -1098,54 +1593,85 @@ Do not calculate or infer missing values.
                 ],
             }
 
-        # --------------------------------------------------------
+        # ------------------------------------------------------------
         # Collect model and dataset information.
-        # --------------------------------------------------------
+        # ------------------------------------------------------------
 
         models: List[str] = []
         datasets: List[str] = []
 
         for source in extracted_sources:
-            for model in source.get("models", []):
-                if model and model not in models:
-                    models.append(model)
+            source_models = source.get(
+                "models",
+                [],
+            )
 
-            for dataset in source.get("datasets", []):
-                if dataset and dataset not in datasets:
-                    datasets.append(dataset)
+            source_datasets = source.get(
+                "datasets",
+                [],
+            )
+
+            if isinstance(
+                source_models,
+                str,
+            ):
+                source_models = [
+                    source_models
+                ]
+
+            if isinstance(
+                source_datasets,
+                str,
+            ):
+                source_datasets = [
+                    source_datasets
+                ]
+
+            for model in source_models:
+                if (
+                    model
+                    and model not in models
+                ):
+                    models.append(
+                        model
+                    )
+
+            for dataset in source_datasets:
+                if (
+                    dataset
+                    and dataset not in datasets
+                ):
+                    datasets.append(
+                        dataset
+                    )
 
         return {
             "success": True,
             "status": "reference_results_available",
-            "metrics": {
-                metric_name: value
-                for metric_name, value in combined_metrics.items()
-                if metric_name in self.COMPARABLE_METRICS
-                or metric_name in {
-                    "accuracy",
-                    "precision",
-                    "recall",
-                    "f1",
-                }
-            },
+            "metrics": combined_metrics,
+            "metric_definitions": combined_definitions,
             "models": models,
             "datasets": datasets,
             "sources": extracted_sources,
         }
 
-
     def extract_paper_results(
         self,
         hypothesis: Any,
-        reference_experiment: Optional[Dict[str, Any]] = None,
+        reference_experiment: Optional[
+            Dict[str, Any]
+        ] = None,
     ) -> Dict[str, Any]:
         """
-        Extract numerical results reported by the paper/evidence
+        Extract numerical results reported by the scientific evidence
         supporting the selected hypothesis.
 
-        The comparator retrieves indexed PaperChunk objects from
-        ChromaPaperLibrary and asks the LLM to extract explicitly
-        reported quantitative results.
+        When a pre-extracted reference experiment is provided by
+        ExperimentOrchestrator, use it directly to avoid downloading
+        and parsing the same papers again.
+
+        If no usable pre-extracted reference experiment is available,
+        fall back to indexed PaperChunk objects from ChromaPaperLibrary.
 
         The LLM must NOT invent or calculate missing values.
         """
@@ -1167,31 +1693,40 @@ Do not calculate or infer missing values.
                 )
             )
 
-            if reference_result.get("success"):
-                reference_result["extraction_seconds"] = (
-                    time.perf_counter() - started
-                )
-
-                return reference_result
-
-            print(
-                "[ExperimentComparator] "
-                "Pre-extracted reference experiment did not "
-                "contain usable metrics. Falling back to "
-                "indexed paper chunks."
+            reference_result[
+                "extraction_seconds"
+            ] = (
+                time.perf_counter()
+                - started
             )
+
+            return reference_result
 
         # ========================================================
         # Get evidence supporting the selected hypothesis
         # ========================================================
 
-        evidence_sources = self._get_hypothesis_evidence(
-            hypothesis
+        evidence_sources = (
+            self._get_hypothesis_evidence(
+                hypothesis
+            )
         )
 
-        print("\n===== HYPOTHESIS EVIDENCE SOURCES =====")
-        print(json.dumps(evidence_sources, indent=2, default=str))
-        print("=======================================\n")
+        print(
+            "\n===== HYPOTHESIS EVIDENCE SOURCES ====="
+        )
+
+        print(
+            json.dumps(
+                evidence_sources,
+                indent=2,
+                default=str,
+            )
+        )
+
+        print(
+            "=======================================\n"
+        )
 
         if not evidence_sources:
             return {
@@ -1199,11 +1734,13 @@ Do not calculate or infer missing values.
                 "status": "no_evidence",
                 "comparable": False,
                 "metrics": {},
+                "metric_definitions": {},
                 "errors": [
                     "The selected hypothesis has no attached evidence sources."
                 ],
                 "extraction_seconds": (
-                    time.perf_counter() - started
+                    time.perf_counter()
+                    - started
                 ),
             }
 
@@ -1211,16 +1748,20 @@ Do not calculate or infer missing values.
         # Get hypothesis information
         # ========================================================
 
-        hypothesis_title = self._get_hypothesis_field(
-            hypothesis,
-            "title",
-            "",
+        hypothesis_title = (
+            self._get_hypothesis_field(
+                hypothesis,
+                "title",
+                "",
+            )
         )
 
-        hypothesis_text = self._get_hypothesis_field(
-            hypothesis,
-            "text",
-            "",
+        hypothesis_text = (
+            self._get_hypothesis_field(
+                hypothesis,
+                "text",
+                "",
+            )
         )
 
         # ========================================================
@@ -1237,17 +1778,24 @@ Do not calculate or infer missing values.
                 "status": "no_indexed_chunks",
                 "comparable": False,
                 "metrics": {},
+                "metric_definitions": {},
                 "errors": [
                     "No indexed paper chunks were found for "
                     "the evidence sources supporting the hypothesis."
                 ],
                 "extraction_seconds": (
-                    time.perf_counter() - started
+                    time.perf_counter()
+                    - started
                 ),
             }
 
-        print("\n===== PAPER CHUNKS USED =====")
-        print(f"Number of chunks: {len(chunks)}")
+        print(
+            "\n===== PAPER CHUNKS USED ====="
+        )
+
+        print(
+            f"Number of chunks: {len(chunks)}"
+        )
 
         for chunk in chunks:
             print(
@@ -1259,106 +1807,195 @@ Do not calculate or infer missing values.
                 f"section={getattr(chunk, 'section', None)}"
             )
 
-        print("=============================\n")
+        print(
+            "=============================\n"
+        )
 
         # ========================================================
         # Extract result from paper chunks
         # ========================================================
 
         try:
-            parsed = self._extract_results_from_chunks(
-                chunks,
-                hypothesis_title,
-                hypothesis_text,
+            parsed = (
+                self._extract_results_from_chunks(
+                    chunks,
+                    hypothesis_title,
+                    hypothesis_text,
+                )
             )
 
-            if not isinstance(parsed, dict):
+            if not isinstance(
+                parsed,
+                dict,
+            ):
                 return {
                     "success": False,
                     "status": "invalid_extraction_result",
                     "comparable": False,
                     "metrics": {},
+                    "metric_definitions": {},
                     "errors": [
                         "Paper-result extraction did not return "
                         "a valid result."
                     ],
                     "extraction_seconds": (
-                        time.perf_counter() - started
+                        time.perf_counter()
+                        - started
                     ),
                 }
 
-            # If no quantitative result was found, preserve
-            # the status returned by _extract_results_from_chunks().
-            if not parsed.get("success", False):
-                parsed["extraction_seconds"] = (
-                    time.perf_counter() - started
+            if not parsed.get(
+                "success",
+                False,
+            ):
+                parsed[
+                    "extraction_seconds"
+                ] = (
+                    time.perf_counter()
+                    - started
                 )
-                return parsed
 
-            # ====================================================
-            # Normalize comparable metrics
-            # ====================================================
+                return parsed
 
             metrics = parsed.get(
                 "metrics",
                 {},
             )
 
-            if not isinstance(metrics, dict):
+            if not isinstance(
+                metrics,
+                dict,
+            ):
                 metrics = {}
 
-            normalized_metrics: Dict[str, float] = {}
+            metric_definitions = parsed.get(
+                "metric_definitions",
+                {},
+            )
 
-            for metric_name in self.COMPARABLE_METRICS:
-                value = None
+            if not isinstance(
+                metric_definitions,
+                dict,
+            ):
+                metric_definitions = {}
 
-                aliases = self.METRIC_ALIASES.get(
-                    metric_name,
-                    [metric_name],
+            normalized_metrics: Dict[
+                str,
+                float,
+            ] = {}
+
+            normalized_definitions: Dict[
+                str,
+                Dict[str, Any],
+            ] = {}
+
+            for raw_name, raw_value in (
+                metrics.items()
+            ):
+                if not isinstance(
+                    raw_name,
+                    str,
+                ):
+                    continue
+
+                normalized_name = (
+                    self._canonical_metric_name(
+                        raw_name
+                    )
                 )
 
-                for alias in aliases:
-                    normalized_alias = (
-                        self._normalise_metric_name(alias)
+                if not normalized_name:
+                    continue
+
+                definition = metric_definitions.get(
+                    raw_name,
+                    metric_definitions.get(
+                        normalized_name,
+                        {},
+                    ),
+                )
+
+                if not isinstance(
+                    definition,
+                    dict,
+                ):
+                    definition = {}
+
+                safe_value = (
+                    self._normalise_metric_value(
+                        raw_value,
+                        unit=definition.get(
+                            "unit"
+                        ),
+                        value_type=definition.get(
+                            "value_type"
+                        ),
                     )
+                )
 
-                    for key, raw_value in metrics.items():
-                        normalized_key = (
-                            self._normalise_metric_name(key)
-                        )
+                if safe_value is None:
+                    continue
 
-                        if normalized_key == normalized_alias:
-                            value = self._safe_float(
-                                raw_value
-                            )
-                            break
+                normalized_metrics[
+                    normalized_name
+                ] = safe_value
 
-                    if value is not None:
-                        break
+                if definition:
+                    normalized_definitions[
+                        normalized_name
+                    ] = definition
 
-                if value is not None:
-                    normalized_metrics[
-                        metric_name
-                    ] = self._clamp_metric(value)
+            parsed["metrics"] = (
+                normalized_metrics
+            )
 
-            parsed["metrics"] = normalized_metrics
+            parsed[
+                "metric_definitions"
+            ] = normalized_definitions
+
+            if not normalized_metrics:
+                return {
+                    "success": False,
+                    "status": "no_valid_paper_metrics",
+                    "comparable": False,
+                    "metrics": {},
+                    "metric_definitions": {},
+                    "errors": [
+                        "Paper-result extraction found relevant "
+                        "content but no usable numerical metrics."
+                    ],
+                    "extraction_seconds": (
+                        time.perf_counter()
+                        - started
+                    ),
+                }
 
             parsed["success"] = True
 
-            parsed["extraction_seconds"] = (
-                time.perf_counter() - started
+            parsed[
+                "extraction_seconds"
+            ] = (
+                time.perf_counter()
+                - started
             )
 
             return parsed
 
         except Exception as error:
-            error_message = str(error)
+            error_message = str(
+                error
+            )
 
-            if "timed out" in error_message.lower():
+            if (
+                "timed out"
+                in error_message.lower()
+            ):
                 status = "llm_timeout"
+
                 message = (
                     "The paper-result extraction LLM request timed out."
                 )
+
             else:
                 status = "llm_error"
                 message = error_message
@@ -1368,12 +2005,15 @@ Do not calculate or infer missing values.
                 "status": status,
                 "comparable": False,
                 "metrics": {},
-                "errors": [message],
+                "metric_definitions": {},
+                "errors": [
+                    message
+                ],
                 "extraction_seconds": (
-                    time.perf_counter() - started
+                    time.perf_counter()
+                    - started
                 ),
             }
-
 
     # ============================================================
     # Experiment Result Extraction
@@ -1384,8 +2024,17 @@ Do not calculate or infer missing values.
         experiment_result: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Extract the standardized metrics collected by
-        ExperimentRunner.
+        Extract numerical metrics collected by ExperimentRunner.
+
+        Unlike the previous implementation, this method does not
+        restrict experiment results to accuracy/precision/recall/F1.
+
+        Any finite numerical metric returned by ExperimentRunner is
+        preserved.
+
+        This is necessary because the experiment should eventually
+        reproduce the evaluation metrics reported by the supporting
+        paper.
         """
 
         if not isinstance(
@@ -1458,73 +2107,87 @@ Do not calculate or infer missing values.
                 ],
             }
 
-        normalized_metrics: Dict[str, float] = {}
+        # Optional metric metadata produced by the experiment.
+        metric_definitions = outputs.get(
+            "metric_definitions",
+            experiment_result.get(
+                "metric_definitions",
+                {},
+            ),
+        )
 
-        for metric_name in self.COMPARABLE_METRICS:
-            value = None
+        if not isinstance(
+            metric_definitions,
+            dict,
+        ):
+            metric_definitions = {}
 
-            aliases = self.METRIC_ALIASES.get(
-                metric_name,
-                [metric_name],
+        normalized_metrics: Dict[
+            str,
+            float,
+        ] = {}
+
+        normalized_definitions: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
+
+        for raw_name, raw_value in (
+            metrics.items()
+        ):
+            if not isinstance(
+                raw_name,
+                str,
+            ):
+                continue
+
+            normalized_name = (
+                self._canonical_metric_name(
+                    raw_name
+                )
             )
 
-            # ExperimentRunner metrics are defined for the CLAIR-5G
-            # classification experiment. Accept common generic names
-            # used by experiment outputs and interpret them according
-            # to the experiment's standardized metric schema.
-            if metric_name == "precision_weighted":
-                aliases.extend([
-                    "precision",
-                    "precision_score",
-                ])
+            if not normalized_name:
+                continue
 
-            elif metric_name == "recall_weighted":
-                aliases.extend([
-                    "recall",
-                    "recall_score",
-                ])
+            definition = metric_definitions.get(
+                raw_name,
+                metric_definitions.get(
+                    normalized_name,
+                    {},
+                ),
+            )
 
-            elif metric_name == "f1_weighted":
-                aliases.extend([
-                    "f1",
-                    "f1_score",
-                    "f1-score",
-                    "f1 score",
-                ])
+            if not isinstance(
+                definition,
+                dict,
+            ):
+                definition = {}
 
-            for alias in aliases:
-                normalized_alias = (
-                    self._normalise_metric_name(
-                        alias
-                    )
+            safe_value = (
+                self._normalise_metric_value(
+                    raw_value,
+                    unit=definition.get(
+                        "unit"
+                    ),
+                    value_type=definition.get(
+                        "value_type"
+                    ),
                 )
+            )
 
-                for key, raw_value in metrics.items():
-                    normalized_key = (
-                        self._normalise_metric_name(
-                            key
-                        )
-                    )
+            if safe_value is None:
+                continue
 
-                    if (
-                        normalized_key
-                        == normalized_alias
-                    ):
-                        value = self._safe_float(
-                            raw_value
-                        )
-                        break
+            normalized_metrics[
+                normalized_name
+            ] = safe_value
 
-                if value is not None:
-                    break
+            if definition:
+                normalized_definitions[
+                    normalized_name
+                ] = definition
 
-            if value is not None:
-                normalized_metrics[
-                    metric_name
-                ] = self._clamp_metric(
-                    value
-                )
-            
         if not normalized_metrics:
             return {
                 "success": False,
@@ -1533,7 +2196,7 @@ Do not calculate or infer missing values.
                 "raw_metrics": metrics,
                 "errors": [
                     "ExperimentRunner returned no valid finite "
-                    "comparison metrics."
+                    "numerical metrics."
                 ],
             }
 
@@ -1541,6 +2204,7 @@ Do not calculate or infer missing values.
             "success": True,
             "status": "completed",
             "metrics": normalized_metrics,
+            "metric_definitions": normalized_definitions,
             "raw_metrics": metrics,
             "run_directory": experiment_result.get(
                 "run_directory"
@@ -1560,6 +2224,119 @@ Do not calculate or infer missing values.
     # Compatibility Check
     # ============================================================
 
+    @staticmethod
+    def _normalise_unit(
+        unit: Any,
+    ) -> str:
+        """
+        Normalize a metric unit for compatibility checks.
+        """
+
+        if unit is None:
+            return ""
+
+        return re.sub(
+            r"[^a-z0-9%]+",
+            "",
+            str(unit).strip().lower(),
+        )
+
+    def _check_metric_units(
+        self,
+        common_metrics: List[str],
+        paper_definitions: Dict[str, Any],
+        experiment_definitions: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Check whether metric units are compatible.
+
+        Missing units do not automatically make a metric invalid.
+        Instead, they generate a warning.
+
+        Explicitly different units cause that metric to be excluded
+        from the directly comparable set.
+        """
+
+        comparable_metrics = []
+        incompatible_metrics = []
+        warnings = []
+
+        for metric_name in common_metrics:
+            paper_definition = (
+                paper_definitions.get(
+                    metric_name,
+                    {},
+                )
+            )
+
+            experiment_definition = (
+                experiment_definitions.get(
+                    metric_name,
+                    {},
+                )
+            )
+
+            if not isinstance(
+                paper_definition,
+                dict,
+            ):
+                paper_definition = {}
+
+            if not isinstance(
+                experiment_definition,
+                dict,
+            ):
+                experiment_definition = {}
+
+            paper_unit = self._normalise_unit(
+                paper_definition.get(
+                    "unit"
+                )
+            )
+
+            experiment_unit = self._normalise_unit(
+                experiment_definition.get(
+                    "unit"
+                )
+            )
+
+            if (
+                paper_unit
+                and experiment_unit
+                and paper_unit != experiment_unit
+            ):
+                incompatible_metrics.append(
+                    metric_name
+                )
+
+                warnings.append(
+                    f"Metric '{metric_name}' has incompatible "
+                    f"units: paper='{paper_unit}', "
+                    f"experiment='{experiment_unit}'."
+                )
+
+                continue
+
+            if (
+                not paper_unit
+                or not experiment_unit
+            ):
+                warnings.append(
+                    f"Metric '{metric_name}' does not have "
+                    "complete unit metadata; numerical comparison "
+                    "assumes the values use compatible units."
+                )
+
+            comparable_metrics.append(
+                metric_name
+            )
+
+        return {
+            "comparable_metrics": comparable_metrics,
+            "incompatible_metrics": incompatible_metrics,
+            "warnings": warnings,
+        }
+
     def check_comparability(
         self,
         paper_result: Dict[str, Any],
@@ -1569,6 +2346,11 @@ Do not calculate or infer missing values.
         """
         Determine whether the paper result and automated experiment
         can reasonably be compared.
+
+        A metric is considered a candidate when it is reported by
+        both the paper and experiment.
+
+        The method does NOT use a fixed metric whitelist.
         """
 
         paper_metrics = paper_result.get(
@@ -1581,22 +2363,95 @@ Do not calculate or infer missing values.
             {},
         )
 
+        if not isinstance(
+            paper_metrics,
+            dict,
+        ):
+            paper_metrics = {}
+
+        if not isinstance(
+            experiment_metrics,
+            dict,
+        ):
+            experiment_metrics = {}
+
         common_metrics = sorted(
             set(paper_metrics)
             & set(experiment_metrics)
-            & set(self.COMPARABLE_METRICS)
         )
 
-        if not common_metrics:
+        paper_definitions = paper_result.get(
+            "metric_definitions",
+            {},
+        )
+
+        experiment_definitions = (
+            experiment_result.get(
+                "metric_definitions",
+                {},
+            )
+        )
+
+        if not isinstance(
+            paper_definitions,
+            dict,
+        ):
+            paper_definitions = {}
+
+        if not isinstance(
+            experiment_definitions,
+            dict,
+        ):
+            experiment_definitions = {}
+
+        unit_check = (
+            self._check_metric_units(
+                common_metrics,
+                paper_definitions,
+                experiment_definitions,
+            )
+        )
+
+        comparable_metrics = (
+            unit_check[
+                "comparable_metrics"
+            ]
+        )
+
+        incompatible_metrics = (
+            unit_check[
+                "incompatible_metrics"
+            ]
+        )
+
+        warnings = list(
+            unit_check[
+                "warnings"
+            ]
+        )
+
+        if not comparable_metrics:
+            reason = (
+                "No common numerical evaluation metrics "
+                "with compatible units were found between "
+                "the paper and experiment."
+            )
+
+            if incompatible_metrics:
+                reason += (
+                    " The common metrics had incompatible "
+                    "units."
+                )
+
             return {
                 "comparable": False,
                 "comparison_level": "none",
-                "reason": (
-                    "No common numerical evaluation metrics "
-                    "were found between the paper and experiment."
-                ),
+                "reason": reason,
                 "common_metrics": [],
-                "warnings": [],
+                "incompatible_metrics": (
+                    incompatible_metrics
+                ),
+                "warnings": warnings,
             }
 
         # --------------------------------------------------------
@@ -1604,32 +2459,62 @@ Do not calculate or infer missing values.
         # legacy paper-result format used by existing tests.
         # --------------------------------------------------------
 
-        paper_models = paper_result.get("models", [])
+        paper_models = paper_result.get(
+            "models",
+            [],
+        )
 
         if not paper_models:
-            legacy_model = paper_result.get("model_name")
+            legacy_model = paper_result.get(
+                "model_name"
+            )
+
             if legacy_model:
-                paper_models = [legacy_model]
+                paper_models = [
+                    legacy_model
+                ]
 
-        if isinstance(paper_models, str):
-            paper_models = [paper_models]
+        if isinstance(
+            paper_models,
+            str,
+        ):
+            paper_models = [
+                paper_models
+            ]
 
-        paper_datasets = paper_result.get("datasets", [])
+        paper_datasets = paper_result.get(
+            "datasets",
+            [],
+        )
 
         if not paper_datasets:
-            legacy_dataset = paper_result.get("dataset")
-            if legacy_dataset:
-                paper_datasets = [legacy_dataset]
+            legacy_dataset = paper_result.get(
+                "dataset"
+            )
 
-        if isinstance(paper_datasets, str):
-            paper_datasets = [paper_datasets]
+            if legacy_dataset:
+                paper_datasets = [
+                    legacy_dataset
+                ]
+
+        if isinstance(
+            paper_datasets,
+            str,
+        ):
+            paper_datasets = [
+                paper_datasets
+            ]
 
         paper_model = ", ".join(
-            str(model) for model in paper_models if model
+            str(model)
+            for model in paper_models
+            if model
         )
 
         paper_dataset = ", ".join(
-            str(dataset) for dataset in paper_datasets if dataset
+            str(dataset)
+            for dataset in paper_datasets
+            if dataset
         )
 
         experiment_summary = (
@@ -1659,7 +2544,10 @@ Do not calculate or infer missing values.
 
         experiment_dataset = ""
 
-        if isinstance(experiment_summary, dict):
+        if isinstance(
+            experiment_summary,
+            dict,
+        ):
             experiment_dataset = str(
                 experiment_summary.get(
                     "dataset",
@@ -1681,43 +2569,69 @@ Do not calculate or infer missing values.
             or ""
         )
 
-        # Dataset compatibility is important, but do not reject
-        # comparison simply because the paper extractor could not
-        # identify the dataset name.
+        # --------------------------------------------------------
+        # Dataset compatibility
+        # --------------------------------------------------------
+
         dataset_warning = None
 
         if paper_dataset:
-            normalized_dataset = paper_dataset.lower()
+            normalized_dataset = (
+                paper_dataset.lower()
+            )
 
             if (
-                "5g-nidd" not in normalized_dataset
-                and "5g nidd" not in normalized_dataset
+                "5g-nidd"
+                not in normalized_dataset
+                and "5g nidd"
+                not in normalized_dataset
             ):
                 dataset_warning = (
-                    "The paper appears to report results using a dataset "
-                    "different from the offline 5G-NIDD dataset used by "
-                    "the automated experiment."
+                    "The paper appears to report results using "
+                    "a dataset or testbed different from the "
+                    "offline 5G-NIDD dataset used by the "
+                    "automated experiment."
                 )
+
+                warnings.append(
+                    dataset_warning
+                )
+
+        # --------------------------------------------------------
+        # Comparison level
+        #
+        # Same dataset does not automatically mean identical
+        # experimental methodology. "direct" therefore means
+        # dataset compatibility only, not full reproduction.
+        # --------------------------------------------------------
 
         comparison_level = (
             "direct"
             if paper_dataset
             and (
-                "5g-nidd" in paper_dataset.lower()
-                or "5g nidd" in paper_dataset.lower()
+                "5g-nidd"
+                in paper_dataset.lower()
+                or "5g nidd"
+                in paper_dataset.lower()
             )
             else "partial"
         )
 
         return {
-            "comparable": bool(common_metrics),
-            "common_metrics": common_metrics,
+            "comparable": bool(
+                comparable_metrics
+            ),
+            "common_metrics": comparable_metrics,
+            "incompatible_metrics": (
+                incompatible_metrics
+            ),
             "paper_model": paper_model,
             "experiment_model": experiment_model,
             "paper_dataset": paper_dataset,
             "experiment_dataset": experiment_dataset,
             "comparison_level": comparison_level,
             "dataset_warning": dataset_warning,
+            "warnings": warnings,
             "hypothesis": hypothesis_text,
         }
 
@@ -1737,8 +2651,28 @@ Do not calculate or infer missing values.
 
             experiment - paper
 
-        Positive values mean the automated experiment achieved
-        a higher score.
+        For arbitrary numerical metrics:
+
+            difference
+                = experiment - paper
+
+            relative_difference
+                = (experiment - paper) / paper
+
+        The comparator does not assume that every metric is a
+        percentage.
+
+        Examples:
+
+            latency:
+                paper = 5.2 ms
+                experiment = 5.7 ms
+                difference = +0.5 ms
+
+            accuracy:
+                paper = 0.88
+                experiment = 0.91
+                difference = +0.03
         """
 
         paper_metrics = paper_result.get(
@@ -1751,18 +2685,42 @@ Do not calculate or infer missing values.
             {},
         )
 
-        comparisons: Dict[str, Dict[str, Any]] = {}
+        if not isinstance(
+            paper_metrics,
+            dict,
+        ):
+            paper_metrics = {}
 
-        for metric_name in self.COMPARABLE_METRICS:
-            paper_value = self._safe_float(
-                paper_metrics.get(
-                    metric_name
+        if not isinstance(
+            experiment_metrics,
+            dict,
+        ):
+            experiment_metrics = {}
+
+        common_metrics = sorted(
+            set(paper_metrics)
+            & set(experiment_metrics)
+        )
+
+        comparisons: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
+
+        for metric_name in common_metrics:
+            paper_value = (
+                self._safe_float(
+                    paper_metrics.get(
+                        metric_name
+                    )
                 )
             )
 
-            experiment_value = self._safe_float(
-                experiment_metrics.get(
-                    metric_name
+            experiment_value = (
+                self._safe_float(
+                    experiment_metrics.get(
+                        metric_name
+                    )
                 )
             )
 
@@ -1777,15 +2735,30 @@ Do not calculate or infer missing values.
                 - paper_value
             )
 
-            comparisons[metric_name] = {
+            relative_difference = None
+
+            if abs(paper_value) > 1e-12:
+                relative_difference = (
+                    difference
+                    / paper_value
+                )
+
+            comparisons[
+                metric_name
+            ] = {
                 "paper": paper_value,
                 "experiment": experiment_value,
                 "difference": difference,
-                "difference_percentage_points": (
-                    difference * 100.0
-                ),
                 "absolute_difference": abs(
                     difference
+                ),
+                "relative_difference": (
+                    relative_difference
+                ),
+                "relative_difference_percent": (
+                    relative_difference * 100.0
+                    if relative_difference is not None
+                    else None
                 ),
                 "higher_than_paper": (
                     difference > 0
@@ -1808,24 +2781,32 @@ Do not calculate or infer missing values.
         improved = [
             name
             for name, values in comparisons.items()
-            if values["difference"] > 0
+            if values[
+                "difference"
+            ] > 0
         ]
 
         worse = [
             name
             for name, values in comparisons.items()
-            if values["difference"] < 0
+            if values[
+                "difference"
+            ] < 0
         ]
 
         unchanged = [
             name
             for name, values in comparisons.items()
-            if values["same_as_paper"]
+            if values[
+                "same_as_paper"
+            ]
         ]
 
         average_difference = (
             sum(
-                item["difference"]
+                item[
+                    "difference"
+                ]
                 for item in comparisons.values()
             )
             / len(comparisons)
@@ -1839,9 +2820,6 @@ Do not calculate or infer missing values.
             "worse_metrics": worse,
             "unchanged_metrics": unchanged,
             "average_difference": average_difference,
-            "average_difference_percentage_points": (
-                average_difference * 100.0
-            ),
         }
 
     # ============================================================
@@ -1882,17 +2860,28 @@ Do not calculate or infer missing values.
         system_prompt = """
 You are a scientific experiment analysis assistant.
 
-Explain the difference between a published machine-learning
-result and an automatically reproduced experiment.
+Explain the difference between a published scientific result
+and an automatically reproduced experiment.
 
 IMPORTANT:
 
 1. Do not invent numerical results.
+
 2. Do not change any metric values supplied to you.
+
 3. Do not claim that the automated experiment reproduced the
    paper exactly unless the evidence supports that conclusion.
-4. Consider differences in:
+
+4. Do not assume that higher values are always better.
+   The meaning depends on the metric.
+
+5. Consider metric direction when it is explicitly supplied:
+   - higher_is_better
+   - lower_is_better
+
+6. Consider differences in:
    - dataset version
+   - dataset source
    - preprocessing
    - train/validation/test split
    - random seed
@@ -1903,10 +2892,21 @@ IMPORTANT:
    - feature selection
    - evaluation protocol
    - hardware/software environment
-5. If the evidence is insufficient to identify the exact cause,
+   - implementation details
+   - measurement methodology
+
+7. If the paper metric and automated metric are not measuring
+   exactly the same construct, identify that limitation.
+
+8. If the evidence is insufficient to identify the exact cause,
    explicitly say so.
-6. Distinguish confirmed facts from plausible explanations.
-7. Return ONLY valid JSON.
+
+9. Distinguish confirmed facts from plausible explanations.
+
+10. Do not describe an experiment as a faithful reproduction
+    when it uses a substantially different evaluation protocol.
+
+11. Return ONLY valid JSON.
 
 Use this schema:
 
@@ -1932,7 +2932,9 @@ Hypothesis:
 Published/Paper Result:
 
 {json.dumps(
-    self._json_safe(paper_result),
+    self._json_safe(
+        paper_result
+    ),
     indent=2,
     ensure_ascii=False,
     default=str,
@@ -1942,7 +2944,9 @@ Published/Paper Result:
 Automated Experiment Result:
 
 {json.dumps(
-    self._json_safe(experiment_result),
+    self._json_safe(
+        experiment_result
+    ),
     indent=2,
     ensure_ascii=False,
     default=str,
@@ -1952,7 +2956,9 @@ Automated Experiment Result:
 Python-calculated Metric Comparison:
 
 {json.dumps(
-    self._json_safe(metric_comparison),
+    self._json_safe(
+        metric_comparison
+    ),
     indent=2,
     ensure_ascii=False,
     default=str,
@@ -1962,6 +2968,8 @@ Python-calculated Metric Comparison:
 Explain the difference scientifically.
 
 Do not recalculate or modify the numerical values.
+
+Do not invent missing experimental details.
 """
 
         try:
@@ -1970,9 +2978,17 @@ Do not recalculate or modify the numerical values.
                 user_prompt,
             )
 
-            print("\n===== COMPARISON EXTRACTION RESPONSE =====")
-            print(repr(response))
-            print("=====================================\n")
+            print(
+                "\n===== COMPARISON EXTRACTION RESPONSE ====="
+            )
+
+            print(
+                repr(response)
+            )
+
+            print(
+                "=====================================\n"
+            )
 
             parsed = self._extract_json(
                 response
@@ -2027,7 +3043,9 @@ Do not recalculate or modify the numerical values.
         self,
         hypothesis: Any,
         experiment_result: Dict[str, Any],
-        reference_experiment: Optional[Dict[str, Any]] = None,
+        reference_experiment: Optional[
+            Dict[str, Any]
+        ] = None,
     ) -> Dict[str, Any]:
         """
         Perform the complete paper-vs-experiment comparison.
@@ -2040,6 +3058,10 @@ Do not recalculate or modify the numerical values.
 
         experiment_result:
             The standardized result returned by ExperimentRunner.
+
+        reference_experiment:
+            Optional paper experiment information already extracted
+            by ExperimentOrchestrator / PaperReader.
         """
 
         started = time.perf_counter()
@@ -2047,13 +3069,17 @@ Do not recalculate or modify the numerical values.
         result: Dict[str, Any] = {
             "success": False,
             "status": "not_started",
-            "hypothesis_id": self._get_hypothesis_field(
-                hypothesis,
-                "hypothesis_id",
+            "hypothesis_id": (
+                self._get_hypothesis_field(
+                    hypothesis,
+                    "hypothesis_id",
+                )
             ),
-            "hypothesis_title": self._get_hypothesis_field(
-                hypothesis,
-                "title",
+            "hypothesis_title": (
+                self._get_hypothesis_field(
+                    hypothesis,
+                    "title",
+                )
             ),
             "paper_result": None,
             "reference_experiment": None,
@@ -2066,7 +3092,9 @@ Do not recalculate or modify the numerical values.
         }
 
         try:
-            result["reference_experiment"] = (
+            result[
+                "reference_experiment"
+            ] = (
                 self._normalise_reference_experiment(
                     reference_experiment
                 )
@@ -2114,7 +3142,9 @@ Do not recalculate or modify the numerical values.
             paper_result = (
                 self.extract_paper_results(
                     hypothesis,
-                    reference_experiment=reference_experiment,
+                    reference_experiment=(
+                        reference_experiment
+                    ),
                 )
             )
 
@@ -2164,6 +3194,21 @@ Do not recalculate or modify the numerical values.
                 result[
                     "status"
                 ] = "not_comparable"
+
+                # The experiment completed and the paper was read
+                # successfully, so this is a valid scientific
+                # comparison outcome rather than an execution error.
+                result[
+                    "success"
+                ] = True
+
+                result[
+                    "reason"
+                ] = comparability.get(
+                    "reason",
+                    "The paper and automated experiment "
+                    "do not report compatible metrics.",
+                )
 
                 result[
                     "errors"
@@ -2271,6 +3316,8 @@ Do not recalculate or modify the numerical values.
         """
         Convert a comparison result into a simple human-readable
         summary suitable for logs or UI output.
+
+        This method does not assume that all metrics are percentages.
         """
 
         if not isinstance(
@@ -2331,28 +3378,138 @@ Do not recalculate or modify the numerical values.
             {},
         )
 
-        for metric_name, values in metrics.items():
-            paper_value = (
-                values["paper"] * 100
+        paper_result = (
+            comparison_result.get(
+                "paper_result",
+                {},
+            )
+            or {}
+        )
+
+        experiment_result = (
+            comparison_result.get(
+                "experiment_result",
+                {},
+            )
+            or {}
+        )
+
+        paper_definitions = paper_result.get(
+            "metric_definitions",
+            {},
+        )
+
+        experiment_definitions = (
+            experiment_result.get(
+                "metric_definitions",
+                {},
+            )
+        )
+
+        if not isinstance(
+            paper_definitions,
+            dict,
+        ):
+            paper_definitions = {}
+
+        if not isinstance(
+            experiment_definitions,
+            dict,
+        ):
+            experiment_definitions = {}
+
+        for metric_name, values in (
+            metrics.items()
+        ):
+            paper_value = values.get(
+                "paper"
             )
 
-            experiment_value = (
-                values["experiment"] * 100
+            experiment_value = values.get(
+                "experiment"
             )
 
-            difference = (
-                values[
-                    "difference_percentage_points"
-                ]
+            difference = values.get(
+                "difference"
             )
 
-            sign = "+" if difference > 0 else ""
+            relative_difference = values.get(
+                "relative_difference_percent"
+            )
+
+            definition = paper_definitions.get(
+                metric_name,
+                {},
+            )
+
+            if not isinstance(
+                definition,
+                dict,
+            ):
+                definition = {}
+
+            unit = (
+                definition.get(
+                    "unit"
+                )
+                or experiment_definitions.get(
+                    metric_name,
+                    {},
+                ).get(
+                    "unit"
+                )
+                if isinstance(
+                    experiment_definitions.get(
+                        metric_name,
+                        {},
+                    ),
+                    dict,
+                )
+                else definition.get(
+                    "unit"
+                )
+            )
+
+            unit_text = (
+                f" {unit}"
+                if unit
+                else ""
+            )
+
+            if paper_value is not None:
+                paper_text = (
+                    f"{paper_value:.4f}"
+                )
+            else:
+                paper_text = "N/A"
+
+            if experiment_value is not None:
+                experiment_text = (
+                    f"{experiment_value:.4f}"
+                )
+            else:
+                experiment_text = "N/A"
+
+            if difference is not None:
+                difference_text = (
+                    f"{difference:+.4f}"
+                )
+            else:
+                difference_text = "N/A"
+
+            if relative_difference is not None:
+                relative_text = (
+                    f"{relative_difference:+.2f}%"
+                )
+            else:
+                relative_text = "N/A"
 
             lines.append(
                 f"{metric_name}: "
-                f"Paper={paper_value:.2f}%, "
-                f"Experiment={experiment_value:.2f}%, "
-                f"Difference={sign}{difference:.2f} pp"
+                f"Paper={paper_text}{unit_text}, "
+                f"Experiment={experiment_text}{unit_text}, "
+                f"Difference={difference_text}{unit_text}, "
+                f"Relative={relative_text}"
             )
 
         explanation = (
@@ -2368,6 +3525,7 @@ Do not recalculate or modify the numerical values.
 
         if assessment:
             lines.append("")
+
             lines.append(
                 f"Assessment: {assessment}"
             )

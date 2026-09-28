@@ -1,63 +1,421 @@
 """
-A Real Test for the Automated Experiment Runner.
+Real Integration Test for the Automated Experiment Pipeline.
 
-This test is meant to be run manually, as it requires a real experiment to be run.
-It is not meant to be run as part of the automated test suite.
+This test is intended to be run manually because it executes a real
+experiment and may download/read research papers.
+
+It is NOT intended to be part of the automated pytest test suite.
 
 Run with:
+
     python test_real_comparison.py
-    
+
+Pipeline:
+
+    Rank #1 Hypothesis
+            |
+            v
+    Evidence Sources
+            |
+            v
+    PaperReader / PaperLibrary
+            |
+            v
+    Evidence-Derived Evaluation Metrics
+            |
+            v
+    CodeGenerationAgent
+            |
+            v
+    ExperimentRunner
+            |
+            v
+    ExperimentComparator
+            |
+            v
+    Paper vs Experiment
 """
 
 import json
 from pathlib import Path
+from typing import Any, Dict
+
 
 from app.experiments.experiment_orchestrator import ExperimentOrchestrator
 
 
 # ============================================================
-# Load existing Rank #1 hypothesis
+# Configuration
 # ============================================================
 
-config_path = Path(
+CONFIG_PATH = Path(
     "app/experiments/results/runs/"
-    "G7417_20260917_130843_533045/" # can change this according to your runs
+    "E1906_20260925_125141_931703/"
     "experiment_config.json"
 )
 
-with config_path.open("r", encoding="utf-8") as f:
-    config = json.load(f)
+DATASET_NAME = "5G-NIDD"
+DATASET_PATH = "data/5g_nidd/5g_nidd.csv"
+DEVICE = "cpu"
 
-specification = config["specification"]
-hypothesis = specification["selected_hypothesis"]
-research_goal = specification.get("research_goal")
 
+# ============================================================
+# Utility Functions
+# ============================================================
+
+def print_json(
+    value: Any,
+    title: str = "",
+) -> None:
+    """Pretty-print a JSON-compatible value."""
+
+    if title:
+        print(title)
+
+    print(
+        json.dumps(
+            value,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+
+
+def print_list(
+    values: Any,
+    empty_message: str = "None",
+) -> None:
+    """Print a list in a readable format."""
+
+    if not isinstance(values, list) or not values:
+        print(empty_message)
+        return
+
+    for value in values:
+        if isinstance(value, dict):
+            print(
+                "-",
+                value.get("name")
+                or value.get("metric")
+                or value.get("title")
+                or str(value),
+            )
+        else:
+            print("-", value)
+
+
+def get_nested_dict(
+    value: Any,
+    key: str,
+) -> Dict[str, Any]:
+    """Safely retrieve a nested dictionary."""
+
+    if not isinstance(value, dict):
+        return {}
+
+    nested = value.get(key)
+
+    if isinstance(nested, dict):
+        return nested
+
+    return {}
+
+
+def extract_reference_metric_guidance(
+    reference_experiment: Any,
+) -> Dict[str, Any]:
+    """
+    Extract evidence-derived evaluation metrics from the reference
+    experiment.
+
+    This mirrors the revised evidence-driven architecture and is
+    intentionally generic. It does not assume classification metrics.
+    """
+
+    guidance = {
+        "metrics": [],
+        "metric_definitions": {},
+        "reference_metrics": {},
+    }
+
+    if not isinstance(reference_experiment, dict):
+        return guidance
+
+    sources = reference_experiment.get(
+        "sources",
+        [],
+    )
+
+    if not isinstance(sources, list):
+        return guidance
+
+    seen_metrics = set()
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+
+        details = source.get(
+            "experiment_details",
+            {},
+        )
+
+        if not isinstance(details, dict):
+            continue
+
+        metrics = details.get(
+            "metrics",
+            [],
+        )
+
+        if isinstance(metrics, list):
+            for metric in metrics:
+                if not isinstance(metric, str):
+                    continue
+
+                metric_name = metric.strip()
+
+                if not metric_name:
+                    continue
+
+                metric_key = metric_name.lower()
+
+                if metric_key not in seen_metrics:
+                    guidance["metrics"].append(
+                        metric_name
+                    )
+                    seen_metrics.add(metric_key)
+
+        definitions = details.get(
+            "metric_definitions",
+            {},
+        )
+
+        if isinstance(definitions, dict):
+            for name, definition in definitions.items():
+                metric_name = str(name)
+
+                if metric_name not in guidance[
+                    "metric_definitions"
+                ]:
+                    guidance[
+                        "metric_definitions"
+                    ][metric_name] = definition
+
+        reference_metrics = details.get(
+            "reference_metrics",
+            {},
+        )
+
+        if isinstance(reference_metrics, dict):
+            for name, value in reference_metrics.items():
+                metric_name = str(name)
+
+                if metric_name not in guidance[
+                    "reference_metrics"
+                ]:
+                    guidance[
+                        "reference_metrics"
+                    ][metric_name] = value
+
+    return guidance
+
+
+def extract_experiment_metrics(
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Extract the metrics produced by the automated experiment.
+
+    This function intentionally does not assume accuracy, precision,
+    recall, F1, confusion matrix, latency, throughput, or any other
+    specific metric.
+    """
+
+    execution = result.get(
+        "execution",
+        {}
+    )
+
+    if not isinstance(execution, dict):
+        return {}
+
+    metrics = execution.get(
+        "metrics"
+    )
+
+    if isinstance(metrics, dict):
+        return metrics
+
+    # Some runner implementations may place metrics inside an
+    # experiment_result field.
+    experiment_result = execution.get(
+        "experiment_result",
+        {}
+    )
+
+    if isinstance(experiment_result, dict):
+        metrics = experiment_result.get(
+            "metrics"
+        )
+
+        if isinstance(metrics, dict):
+            return metrics
+
+    return {}
+
+
+def extract_comparison_section(
+    comparison: Any,
+    key: str,
+) -> Any:
+    """Safely retrieve a field from the comparison result."""
+
+    if not isinstance(comparison, dict):
+        return None
+
+    value = comparison.get(key)
+
+    if value is not None:
+        return value
+
+    metric_comparison = comparison.get(
+        "metric_comparison"
+    )
+
+    if isinstance(metric_comparison, dict):
+        return metric_comparison.get(key)
+
+    return None
+
+
+# ============================================================
+# Load Existing Rank #1 Hypothesis
+# ============================================================
 
 print("=" * 70)
 print("REAL RANK #1 EXPERIMENT TEST")
 print("=" * 70)
 
+print("\nConfiguration path:")
+print(CONFIG_PATH)
+
+if not CONFIG_PATH.exists():
+    raise FileNotFoundError(
+        f"Experiment configuration not found: {CONFIG_PATH}"
+    )
+
+with CONFIG_PATH.open(
+    "r",
+    encoding="utf-8",
+) as f:
+    config = json.load(f)
+
+if not isinstance(config, dict):
+    raise ValueError(
+        "experiment_config.json must contain a JSON object."
+    )
+
+specification = config.get(
+    "specification",
+    {}
+)
+
+if not isinstance(specification, dict):
+    raise ValueError(
+        "The configuration does not contain a valid "
+        "'specification' object."
+    )
+
+hypothesis = specification.get(
+    "selected_hypothesis",
+    {}
+)
+
+if not isinstance(hypothesis, dict):
+    raise ValueError(
+        "The specification does not contain a valid "
+        "'selected_hypothesis'."
+    )
+
+research_goal = specification.get(
+    "research_goal"
+)
+
 print("\nRank #1 Hypothesis:")
-print(hypothesis.get("title"))
+print(
+    hypothesis.get("title")
+    or hypothesis.get("text")
+    or hypothesis.get("hypothesis")
+    or "Unknown"
+)
 
 print("\nResearch Goal:")
-print(research_goal)
+print(
+    research_goal
+    if research_goal
+    else "Not provided"
+)
 
 print("\nEvidence Sources:")
 
-for source in hypothesis.get("evidence_sources", []):
-    print(
-        "-",
-        source.get("title"),
-        "|",
-        source.get("canonical_url")
-        or source.get("url")
-        or source.get("arxiv_url"),
-    )
+evidence_sources = hypothesis.get(
+    "evidence_sources",
+    []
+)
+
+if not isinstance(evidence_sources, list):
+    evidence_sources = []
+
+if evidence_sources:
+    for index, source in enumerate(
+        evidence_sources,
+        start=1,
+    ):
+        if not isinstance(source, dict):
+            print(f"- Source #{index}: {source}")
+            continue
+
+        title = (
+            source.get("title")
+            or source.get("name")
+            or "Untitled source"
+        )
+
+        url = (
+            source.get("canonical_url")
+            or source.get("url")
+            or source.get("arxiv_url")
+            or source.get("source_url")
+            or "No URL"
+        )
+
+        print(
+            f"- Source #{index}: {title}"
+        )
+        print(
+            f"  URL: {url}"
+        )
+else:
+    print("None")
 
 
 # ============================================================
-# Create orchestrator
+# Display Original Specification
+# ============================================================
+
+print("\n" + "=" * 70)
+print("LOADED EXPERIMENT SPECIFICATION")
+print("=" * 70)
+
+print_json(
+    specification
+)
+
+
+# ============================================================
+# Create Orchestrator
 # ============================================================
 
 print("\n" + "=" * 70)
@@ -65,17 +423,25 @@ print("CREATING EXPERIMENT ORCHESTRATOR")
 print("=" * 70)
 
 orchestrator = ExperimentOrchestrator(
-    dataset_name="5G-NIDD",
-    dataset_path="data/5g_nidd/5g_nidd.csv",
-    device="cpu",
+    dataset_name=DATASET_NAME,
+    dataset_path=DATASET_PATH,
+    device=DEVICE,
 )
 
-print("ExperimentOrchestrator created successfully.")
-print("Shared PaperLibrary:", type(orchestrator.paper_library).__name__)
+print(
+    "ExperimentOrchestrator created successfully."
+)
+
+print(
+    "Shared PaperLibrary:",
+    type(orchestrator.paper_library).__name__,
+)
+
 print(
     "PaperReader:",
     type(orchestrator.paper_reader).__name__,
 )
+
 print(
     "ExperimentComparator:",
     type(orchestrator.experiment_comparator).__name__,
@@ -83,7 +449,7 @@ print(
 
 
 # ============================================================
-# Run complete experiment pipeline
+# Run Complete Experiment Pipeline
 # ============================================================
 
 print("\n" + "=" * 70)
@@ -95,7 +461,7 @@ print(
     "\nRank #1 Hypothesis"
     "\n    -> Evidence Sources"
     "\n    -> PaperReader / PaperLibrary"
-    "\n    -> Reference Experiment"
+    "\n    -> Evidence-Derived Evaluation Metrics"
     "\n    -> CodeGenerationAgent"
     "\n    -> ExperimentRunner"
     "\n    -> ExperimentComparator"
@@ -109,23 +475,39 @@ result = orchestrator.run_experiment(
     execute_generated_code=True,
 )
 
+if not isinstance(result, dict):
+    raise ValueError(
+        "ExperimentOrchestrator.run_experiment() "
+        "did not return a dictionary."
+    )
+
 
 # ============================================================
-# Display pipeline result
+# Display Pipeline Result
 # ============================================================
 
 print("\n" + "=" * 70)
 print("PIPELINE RESULT")
 print("=" * 70)
 
-print("Success:", result.get("success"))
-print("Status:", result.get("status"))
+print(
+    "Success:",
+    result.get("success"),
+)
+
+print(
+    "Status:",
+    result.get("status"),
+)
 
 print("\nErrors:")
 
-errors = result.get("errors", [])
+errors = result.get(
+    "errors",
+    []
+)
 
-if errors:
+if isinstance(errors, list) and errors:
     for error in errors:
         print("-", error)
 else:
@@ -133,690 +515,1047 @@ else:
 
 
 # ============================================================
-# Reference experiment extracted from paper
+# Experiment Preparation
 # ============================================================
 
-preparation = result.get("experiment_preparation", {})
+preparation = result.get(
+    "experiment_preparation",
+    {}
+)
+
+if not isinstance(preparation, dict):
+    preparation = {}
+
+
+# ============================================================
+# Reference Experiment Extracted from Evidence
+# ============================================================
 
 reference_experiment = preparation.get(
     "reference_experiment"
 )
 
 print("\n" + "=" * 70)
-print("REFERENCE EXPERIMENT FROM PAPER")
+print("REFERENCE EXPERIMENT FROM EVIDENCE")
 print("=" * 70)
 
 if reference_experiment:
     print(
-        json.dumps(
-            reference_experiment,
-            indent=2,
-            ensure_ascii=False,
-        )
+        "Reference experiment available: YES"
     )
 
-    print("\nReference source count:")
     print(
+        "Reference extraction status:",
         reference_experiment.get(
-            "source_count"
-        )
+            "status",
+            "unknown",
+        ),
     )
 
-    for index, source in enumerate(
-        reference_experiment.get("sources", []),
-        start=1,
-    ):
-        print(
-            f"\nReference Source #{index}:"
-        )
+    print(
+        "Reference source count:",
+        reference_experiment.get(
+            "source_count",
+            len(
+                reference_experiment.get(
+                    "sources",
+                    [],
+                )
+            ),
+        ),
+    )
 
-        print(
-            "Title:",
-            source.get("title")
-            or source.get("source_title"),
-        )
+    print("\nReference experiment data:")
 
-        print(
-            "URL:",
-            source.get("source_url"),
-        )
+    print_json(
+        reference_experiment
+    )
 
-        print(
-            "Source ID:",
-            source.get("source_id"),
-        )
+    sources = reference_experiment.get(
+        "sources",
+        [],
+    )
 
-        print(
-            "Indexed:",
-            source.get("indexed"),
-        )
+    if not isinstance(sources, list):
+        sources = []
 
-        experiment_details = source.get(
-            "experiment_details"
-        )
+    if sources:
+        print("\nReference sources:")
 
-        if experiment_details:
+        for index, source in enumerate(
+            sources,
+            start=1,
+        ):
             print(
-                "Experiment details extracted: YES"
+                f"\nReference Source #{index}:"
             )
-        else:
+
+            if not isinstance(source, dict):
+                print(
+                    "Source data:",
+                    source,
+                )
+                continue
+
             print(
-                "Experiment details extracted: NO"
+                "Title:",
+                source.get(
+                    "title",
+                    "Unknown",
+                ),
             )
+
+            print(
+                "URL:",
+                source.get(
+                    "source_url"
+                )
+                or source.get(
+                    "url"
+                )
+                or source.get(
+                    "canonical_url"
+                ),
+            )
+
+            print(
+                "Source type:",
+                source.get(
+                    "source_type"
+                ),
+            )
+
+            print(
+                "Source ID:",
+                source.get(
+                    "source_id"
+                ),
+            )
+
+            print(
+                "Indexed:",
+                source.get(
+                    "indexed"
+                ),
+            )
+
+            experiment_details = source.get(
+                "experiment_details"
+            )
+
+            if isinstance(
+                experiment_details,
+                dict,
+            ):
+                print(
+                    "Experiment details extracted: YES"
+                )
+
+                print(
+                    "Metrics:",
+                )
+
+                print_list(
+                    experiment_details.get(
+                        "metrics",
+                        [],
+                    )
+                )
+
+                print(
+                    "Metric definitions:"
+                )
+
+                metric_definitions = (
+                    experiment_details.get(
+                        "metric_definitions",
+                        {},
+                    )
+                )
+
+                if isinstance(
+                    metric_definitions,
+                    dict,
+                ):
+                    if metric_definitions:
+                        print_json(
+                            metric_definitions
+                        )
+                    else:
+                        print("None")
+                else:
+                    print("None")
+
+                print(
+                    "Reference metrics:"
+                )
+
+                reference_metrics = (
+                    experiment_details.get(
+                        "reference_metrics",
+                        {},
+                    )
+                )
+
+                if isinstance(
+                    reference_metrics,
+                    dict,
+                ):
+                    if reference_metrics:
+                        print_json(
+                            reference_metrics
+                        )
+                    else:
+                        print("None")
+                else:
+                    print("None")
+
+                print(
+                    "Results text available:",
+                    bool(
+                        source.get(
+                            "results_text"
+                        )
+                    ),
+                )
+
+            else:
+                print(
+                    "Experiment details extracted: NO"
+                )
 
 else:
-    print("No reference experiment was extracted.")
+    print(
+        "Reference experiment available: NO"
+    )
 
 
 # ============================================================
-# Automated experiment
+# Evidence-Derived Evaluation Guidance
 # ============================================================
 
-execution = result.get("execution")
+print("\n" + "=" * 70)
+print("EVIDENCE-DERIVED EVALUATION GUIDANCE")
+print("=" * 70)
+
+evaluation_guidance = preparation.get(
+    "evaluation_guidance"
+)
+
+if not isinstance(
+    evaluation_guidance,
+    dict,
+):
+    evaluation_guidance = specification.get(
+        "evaluation_guidance",
+        {}
+    )
+
+if not isinstance(
+    evaluation_guidance,
+    dict,
+):
+    evaluation_guidance = {}
+
+print("\nHypothesis metrics:")
+
+hypothesis_metrics = (
+    evaluation_guidance.get(
+        "hypothesis_metrics",
+        []
+    )
+)
+
+print_list(
+    hypothesis_metrics
+)
+
+print("\nEvidence metrics:")
+
+evidence_metrics = (
+    evaluation_guidance.get(
+        "evidence_metrics",
+        evaluation_guidance.get(
+            "metrics",
+            []
+        ),
+    )
+)
+
+print_list(
+    evidence_metrics
+)
+
+print("\nMetric definitions:")
+
+metric_definitions = (
+    evaluation_guidance.get(
+        "metric_definitions",
+        {}
+    )
+)
+
+if isinstance(
+    metric_definitions,
+    dict
+) and metric_definitions:
+    print_json(
+        metric_definitions
+    )
+else:
+    print("None")
+
+print("\nPaper/reference metric values:")
+
+reference_metrics = (
+    evaluation_guidance.get(
+        "reference_metrics",
+        {}
+    )
+)
+
+if isinstance(
+    reference_metrics,
+    dict
+) and reference_metrics:
+    print_json(
+        reference_metrics
+    )
+else:
+    print("None")
+
+print(
+    "\nImportant:"
+    "\nReference metric values are paper results only."
+    "\nThey must NOT be copied into the generated experiment."
+)
+
+
+# ============================================================
+# Evaluation Metrics in Final Specification
+# ============================================================
+
+print("\n" + "=" * 70)
+print("FINAL EXPERIMENT EVALUATION METRICS")
+print("=" * 70)
+
+prepared_specification = preparation.get(
+    "experiment_specification",
+    {}
+)
+
+if not isinstance(prepared_specification, dict):
+    prepared_specification = {}
+
+final_evaluation_metrics = prepared_specification.get(
+    "evaluation_metrics",
+    []
+)
+
+if not final_evaluation_metrics:
+    final_evaluation_metrics = specification.get(
+        "evaluation_metrics",
+        []
+    )
+
+evaluation_metric_definitions = prepared_specification.get(
+    "evaluation_metric_definitions",
+    prepared_specification.get(
+        "metric_definitions",
+        {}
+    ),
+)
+
+if not evaluation_metric_definitions:
+    evaluation_metric_definitions = specification.get(
+        "evaluation_metric_definitions",
+        specification.get(
+            "metric_definitions",
+            {}
+        ),
+    )
+
+print(
+    "Final metrics selected/guided for the automated experiment:"
+)
+
+print_list(
+    final_evaluation_metrics
+)
+
+print(
+    "\nEvaluation metric definitions:"
+)
+
+if (
+    isinstance(
+        evaluation_metric_definitions,
+        dict,
+    )
+    and evaluation_metric_definitions
+):
+    print_json(
+        evaluation_metric_definitions
+    )
+else:
+    print("None")
+
+
+# ============================================================
+# Final Experiment Design
+# ============================================================
+
+print("\n" + "=" * 70)
+print("FINAL EXPERIMENT DESIGN")
+print("=" * 70)
+
+experiment_design = prepared_specification.get(
+    "experiment_design",
+    {}
+)
+
+if isinstance(experiment_design, dict):
+    print_json(experiment_design)
+else:
+    print("No experiment design available.")
+
+print("\nExperiment type:")
+print(
+    prepared_specification.get(
+        "experiment_type",
+        "Unknown",
+    )
+)
+
+
+# ============================================================
+# Code Generation Requirements
+# ============================================================
+
+print("\n" + "=" * 70)
+print("CODE GENERATION REQUIREMENTS")
+print("=" * 70)
+
+code_generation_requirements = prepared_specification.get(
+    "code_generation_requirements",
+    {}
+)
+
+if isinstance(code_generation_requirements, dict):
+    print_json(code_generation_requirements)
+else:
+    print("No code generation requirements available.")
+
+
+# ============================================================
+# Automated Experiment
+# ============================================================
+
+execution = result.get(
+    "execution"
+)
 
 print("\n" + "=" * 70)
 print("AUTOMATED EXPERIMENT")
 print("=" * 70)
 
-if execution:
+if isinstance(
+    execution,
+    dict,
+):
     print(
-        json.dumps(
-            execution,
-            indent=2,
-            ensure_ascii=False,
-        )
+        "Automated experiment result available: YES"
+    )
+
+    print_json(
+        execution
     )
 else:
-    print("No execution result.")
+    print(
+        "Automated experiment result available: NO"
+    )
 
 
 # ============================================================
-# Paper vs experiment comparison
+# Automated Experiment Metrics
 # ============================================================
 
-comparison = result.get("comparison")
+print("\n" + "=" * 70)
+print("AUTOMATED EXPERIMENT METRICS")
+print("=" * 70)
+
+experiment_metrics = extract_experiment_metrics(
+    result
+)
+
+if experiment_metrics:
+    print_json(
+        experiment_metrics
+    )
+else:
+    print(
+        "No experiment metrics were found."
+    )
+
+print(
+    "\nNote:"
+    "\nThese values must be independently produced by the"
+    "\nautomated experiment and must not come from paper"
+    "\nreference values."
+)
+
+
+# ============================================================
+# Paper vs Experiment Comparison
+# ============================================================
+
+comparison = result.get(
+    "comparison"
+)
 
 print("\n" + "=" * 70)
 print("PAPER VS AUTOMATED EXPERIMENT")
 print("=" * 70)
 
-if comparison:
-    print(
-        json.dumps(
-            comparison,
-            indent=2,
-            ensure_ascii=False,
-        )
+if isinstance(
+    comparison,
+    dict,
+):
+    print_json(
+        comparison
     )
 
     print("\nComparison status:")
+
     print(
-        comparison.get("status")
+        comparison.get(
+            "status",
+            "unknown",
+        )
     )
+
+    comparability_result = comparison.get(
+        "comparability"
+    )
+
+    if isinstance(
+        comparability_result,
+        dict,
+    ):
+        comparable = comparability_result.get(
+            "comparable"
+        )
+    else:
+        comparable = comparison.get(
+            "comparable"
+        )
 
     print(
         "Comparable:",
-        comparison.get("comparable"),
+        comparable,
     )
 
     print(
         "Comparison success:",
-        comparison.get("success"),
-    )
-
-    print(
-        "Metrics:",
-        json.dumps(
-            comparison.get("metrics", {}),
-            indent=2,
-            ensure_ascii=False,
+        comparison.get(
+            "success"
         ),
     )
 
-    if comparison.get("errors"):
-        print("\nComparison errors:")
+    # --------------------------------------------------------
+    # Common Metrics
+    # --------------------------------------------------------
 
-        for error in comparison["errors"]:
-            print("-", error)
+    common_metrics = extract_comparison_section(
+        comparison,
+        "common_metrics",
+    )
+
+    if common_metrics is None:
+        common_metrics = (
+            extract_comparison_section(
+                comparison,
+                "comparable_metrics",
+            )
+        )
+
+    print(
+        "\nCommon metrics:"
+    )
+
+    print_list(
+        common_metrics
+    )
+
+    # --------------------------------------------------------
+    # Paper-only Metrics
+    # --------------------------------------------------------
+
+    paper_only_metrics = extract_comparison_section(
+        comparison,
+        "paper_only_metrics",
+    )
+
+    print(
+        "\nPaper-only metrics:"
+    )
+
+    print_list(
+        paper_only_metrics
+    )
+
+    # --------------------------------------------------------
+    # Experiment-only Metrics
+    # --------------------------------------------------------
+
+    experiment_only_metrics = extract_comparison_section(
+        comparison,
+        "experiment_only_metrics",
+    )
+
+    print(
+        "\nExperiment-only metrics:"
+    )
+
+    print_list(
+        experiment_only_metrics
+    )
+
+    # --------------------------------------------------------
+    # Unit Mismatches
+    # --------------------------------------------------------
+
+    unit_mismatches = extract_comparison_section(
+        comparison,
+        "unit_mismatches",
+    )
+
+    print(
+        "\nUnit mismatches:"
+    )
+
+    print_list(
+        unit_mismatches
+    )
+
+    # --------------------------------------------------------
+    # Warnings
+    # --------------------------------------------------------
+
+    warnings = comparison.get(
+        "warnings",
+        []
+    )
+
+    print(
+        "\nComparison warnings:"
+    )
+
+    print_list(
+        warnings
+    )
+
+    # --------------------------------------------------------
+    # Metric Comparison
+    # --------------------------------------------------------
+
+    metric_comparison = comparison.get(
+        "metric_comparison",
+        {},
+    )
+
+    print(
+        "\nMetric comparison:"
+    )
+
+    if isinstance(
+        metric_comparison,
+        dict,
+    ):
+        metrics = metric_comparison.get(
+            "metrics",
+            {}
+        )
+
+        if isinstance(
+            metrics,
+            dict
+        ) and metrics:
+            print_json(
+                metrics
+            )
+        else:
+            print(
+                "No directly comparable metric values."
+            )
+    else:
+        print(
+            "No metric comparison data."
+        )
+
+    # --------------------------------------------------------
+    # Dataset Compatibility
+    # --------------------------------------------------------
+
+    dataset_compatibility = extract_comparison_section(
+        comparison,
+        "dataset_compatibility",
+    )
+
+    print(
+        "\nDataset compatibility:"
+    )
+
+    if isinstance(
+        dataset_compatibility,
+        dict,
+    ):
+        print_json(
+            dataset_compatibility
+        )
+    elif dataset_compatibility is not None:
+        print(
+            dataset_compatibility
+        )
+    else:
+        print(
+            "Not reported."
+        )
+
+    # --------------------------------------------------------
+    # Comparison Errors
+    # --------------------------------------------------------
+
+    comparison_errors = comparison.get(
+        "errors",
+        []
+    )
+
+    if comparison_errors:
+        print(
+            "\nComparison errors:"
+        )
+
+        if isinstance(
+            comparison_errors,
+            list,
+        ):
+            for error in comparison_errors:
+                print(
+                    "-",
+                    error,
+                )
+        else:
+            print(
+                comparison_errors
+            )
 
 else:
-    print("No comparison result.")
+    print(
+        "No comparison result."
+    )
 
 
 # ============================================================
-# Final test summary
+# Scientific Fidelity / Comparison Interpretation
+# ============================================================
+
+print("\n" + "=" * 70)
+print("SCIENTIFIC COMPARISON INTERPRETATION")
+print("=" * 70)
+
+if isinstance(
+    comparison,
+    dict,
+):
+    comparability_result = comparison.get(
+        "comparability",
+        {}
+    )
+
+    if isinstance(
+        comparability_result,
+        dict,
+    ):
+        comparable = comparability_result.get(
+            "comparable"
+        )
+
+        if comparable is True:
+            print(
+                "The comparator found compatible metrics/data"
+                "\nthat can be compared between the paper and"
+                "\nthe automated experiment."
+            )
+
+        elif comparable is False:
+            print(
+                "The experiment and paper are not directly"
+                "\ncomparable based on the available evidence."
+            )
+
+            print(
+                "\nThis does NOT necessarily mean the"
+                "\nautomated experiment failed."
+            )
+
+            print(
+                "It means the measured quantities, units,"
+                "\ndataset/methodology, or available evidence"
+                "\ndo not support a direct comparison."
+            )
+
+        else:
+            print(
+                "Comparability could not be determined."
+            )
+    else:
+        print(
+            "No structured comparability result available."
+        )
+
+else:
+    print(
+        "No comparison was available for interpretation."
+    )
+
+
+# ============================================================
+# Final Test Summary
 # ============================================================
 
 print("\n" + "=" * 70)
 print("TEST SUMMARY")
 print("=" * 70)
 
+reference_available = bool(
+    reference_experiment
+)
+
+execution_available = isinstance(
+    execution,
+    dict,
+)
+
+execution_success = bool(
+    execution_available
+    and execution.get(
+        "success"
+    )
+)
+
+comparison_available = isinstance(
+    comparison,
+    dict,
+)
+
+comparison_success = bool(
+    comparison_available
+    and comparison.get(
+        "success"
+    )
+)
+
+comparison_status = (
+    comparison.get(
+        "status"
+    )
+    if comparison_available
+    else None
+)
+
+comparability = None
+
+if comparison_available:
+    comparability_result = comparison.get(
+        "comparability"
+    )
+
+    if isinstance(
+        comparability_result,
+        dict,
+    ):
+        comparability = (
+            comparability_result.get(
+                "comparable"
+            )
+        )
+    else:
+        comparability = comparison.get(
+            "comparable"
+        )
+
 print(
     "Pipeline success:",
-    result.get("success"),
+    result.get(
+        "success"
+    ),
 )
 
 print(
-    "Reference experiment available:",
-    bool(reference_experiment),
+    "Pipeline status:",
+    result.get(
+        "status"
+    ),
+)
+
+print(
+    "Reference experiment extracted:",
+    reference_available,
+)
+
+print(
+    "Evidence metrics extracted:",
+    bool(evidence_metrics),
+)
+
+print(
+    "Experiment evaluation metrics defined:",
+    bool(final_evaluation_metrics),
 )
 
 print(
     "Automated execution available:",
-    bool(execution),
+    execution_available,
 )
 
 print(
-    "Comparison available:",
-    bool(comparison),
+    "Automated execution successful:",
+    execution_success,
 )
 
-if reference_experiment:
-    indexed_sources = [
-        source
-        for source in reference_experiment.get(
-            "sources",
-            [],
-        )
-        if source.get("indexed") is True
-    ]
+print(
+    "Automated experiment metrics available:",
+    bool(experiment_metrics),
+)
 
-    print(
-        "Indexed paper sources used:",
-        len(indexed_sources),
+print(
+    "Comparison result available:",
+    comparison_available,
+)
+
+print(
+    "Comparison successful:",
+    comparison_success,
+)
+
+print(
+    "Comparison status:",
+    comparison_status,
+)
+
+print(
+    "Results comparable:",
+    comparability,
+)
+
+
+# ============================================================
+# Indexed Paper Sources
+# ============================================================
+
+if reference_experiment:
+    sources = reference_experiment.get(
+        "sources",
+        [],
     )
+
+    if isinstance(
+        sources,
+        list,
+    ):
+        indexed_sources = [
+            source
+            for source in sources
+            if isinstance(source, dict)
+            and source.get("indexed") is True
+        ]
+
+        print(
+            "Indexed paper sources:",
+            len(indexed_sources),
+        )
+
+
+# ============================================================
+# Final Diagnostic
+# ============================================================
+
+print("\n" + "=" * 70)
+print("FINAL DIAGNOSTIC")
+print("=" * 70)
+
+if not reference_available:
+    print(
+        "WARNING: No reference experiment was extracted "
+        "from the evidence sources."
+    )
+
+if not evidence_metrics:
+    print(
+        "WARNING: No evidence-derived evaluation metrics "
+        "were extracted."
+    )
+
+if not final_evaluation_metrics:
+    print(
+        "WARNING: No explicit evaluation metrics were "
+        "present in the final experiment specification."
+    )
+
+if not execution_available:
+    print(
+        "WARNING: No automated experiment execution result "
+        "was returned."
+    )
+elif not execution_success:
+    print(
+        "WARNING: Automated experiment execution failed."
+    )
+else:
+    print(
+        "OK: Automated experiment executed successfully."
+    )
+
+if not experiment_metrics:
+    print(
+        "WARNING: No independently generated experiment "
+        "metrics were found."
+    )
+else:
+    print(
+        "OK: Automated experiment produced metrics."
+    )
+
+if not comparison_available:
+    print(
+        "WARNING: No paper-vs-experiment comparison result "
+        "was returned."
+    )
+elif not comparison_success:
+    print(
+        "WARNING: Comparator did not complete successfully."
+    )
+elif comparability is False:
+    print(
+        "INFO: Comparison completed, but the results are "
+        "not directly comparable."
+    )
+elif comparability is True:
+    print(
+        "OK: Comparison completed with comparable results."
+    )
+else:
+    print(
+        "INFO: Comparison completed, but comparability "
+        "could not be determined."
+    )
+
+
+# ============================================================
+# End
+# ============================================================
 
 print("\n" + "=" * 70)
 print("TEST COMPLETE")
 print("=" * 70)
-
-
-
-# import json
-# from pathlib import Path
-
-# import torch
-# import torch.nn as nn
-
-
-# # ============================================================
-# # Load existing Rank #1 hypothesis
-# # ============================================================
-
-# config_path = Path(
-#     "app/experiments/results/runs/"
-#     "G7417_20260917_130843_533045/"
-#     "experiment_config.json"
-# )
-
-# with config_path.open("r", encoding="utf-8") as f:
-#     config = json.load(f)
-
-# specification = config["specification"]
-
-# hypothesis = specification["selected_hypothesis"]
-# research_goal = specification.get("research_goal")
-
-
-# print("=" * 70)
-# print("RANK #1 HYPOTHESIS")
-# print("=" * 70)
-
-# print("Title:", hypothesis.get("title"))
-# print("Research goal:", research_goal)
-
-# print("\nEvidence Sources:")
-# for source in hypothesis.get("evidence_sources", []):
-#     print(
-#         "-",
-#         source.get("title"),
-#         "|",
-#         source.get("canonical_url")
-#         or source.get("url")
-#         or source.get("arxiv_url"),
-#     )
-
-
-# # ============================================================
-# # PyTorch experiment configuration
-# # ============================================================
-
-# DEVICE = torch.device("cpu")
-
-# NUM_TIME_STEPS = 1000
-# NUM_SLICES = 3
-
-# BASE_LATENCY_MS = 5.0
-# MLKEM_ROTATION_OVERHEAD_MS = 3.5
-# LATENCY_THRESHOLD_MS = 10.0
-
-# KEY_ROTATION_INTERVAL = 50
-
-# torch.manual_seed(42)
-
-
-# # ============================================================
-# # Simulate 5G network load
-# # ============================================================
-
-# def generate_network_load(
-#     num_time_steps: int,
-#     num_slices: int,
-# ) -> torch.Tensor:
-#     """
-#     Generate synthetic 5G slice load values.
-
-#     Values are normalized between 0 and 1:
-#         0.0 = low load
-#         1.0 = high load
-#     """
-
-#     load = torch.rand(
-#         num_time_steps,
-#         num_slices,
-#         device=DEVICE,
-#     )
-
-#     # Add a changing load pattern over time.
-#     time_pattern = torch.sin(
-#         torch.linspace(
-#             0,
-#             8 * torch.pi,
-#             num_time_steps,
-#             device=DEVICE,
-#         )
-#     )
-
-#     time_pattern = (
-#         time_pattern.unsqueeze(1) + 1.0
-#     ) / 2.0
-
-#     load = 0.5 * load + 0.5 * time_pattern
-
-#     return load.clamp(0.0, 1.0)
-
-
-# # ============================================================
-# # Latency model
-# # ============================================================
-
-# def calculate_latency(
-#     load: torch.Tensor,
-#     key_rotation: torch.Tensor,
-# ) -> torch.Tensor:
-#     """
-#     Calculate latency for each time step and network slice.
-
-#     Latency consists of:
-#         base latency
-#         traffic/load latency
-#         ML-KEM key-rotation overhead
-#     """
-
-#     traffic_latency = load * 8.0
-
-#     rotation_overhead = (
-#         key_rotation
-#         * MLKEM_ROTATION_OVERHEAD_MS
-#     )
-
-#     latency = (
-#         BASE_LATENCY_MS
-#         + traffic_latency
-#         + rotation_overhead
-#     )
-
-#     return latency
-
-
-# # ============================================================
-# # Baseline policy
-# # ============================================================
-
-# def fixed_period_key_rotation(
-#     num_time_steps: int,
-#     num_slices: int,
-#     interval: int,
-# ) -> torch.Tensor:
-#     """
-#     Baseline policy.
-
-#     Rotate ML-KEM keys at a fixed interval,
-#     regardless of current network load.
-#     """
-
-#     key_rotation = torch.zeros(
-#         num_time_steps,
-#         num_slices,
-#         device=DEVICE,
-#     )
-
-#     for step in range(0, num_time_steps, interval):
-#         key_rotation[step, :] = 1.0
-
-#     return key_rotation
-
-
-# # ============================================================
-# # CMDP-inspired policy
-# # ============================================================
-
-# def cmdp_scheduled_key_rotation(
-#     load: torch.Tensor,
-#     load_threshold: float = 0.45,
-#     minimum_rotation_interval: int = 50,
-# ) -> torch.Tensor:
-#     """
-#     CMDP-inspired load-aware key-rotation policy.
-
-#     Keys are rotated only when:
-
-#     1. The average network load is below the threshold.
-#     2. The minimum interval since the previous rotation
-#        has been reached.
-
-#     This is a simplified policy approximation. It is not
-#     a complete trained CMDP solver.
-#     """
-
-#     num_time_steps, num_slices = load.shape
-
-#     key_rotation = torch.zeros(
-#         num_time_steps,
-#         num_slices,
-#         device=DEVICE,
-#     )
-
-#     last_rotation_step = -minimum_rotation_interval
-
-#     for step in range(num_time_steps):
-#         average_load = load[step].mean().item()
-
-#         enough_time_passed = (
-#             step - last_rotation_step
-#             >= minimum_rotation_interval
-#         )
-
-#         low_load_window = (
-#             average_load <= load_threshold
-#         )
-
-#         if enough_time_passed and low_load_window:
-#             key_rotation[step, :] = 1.0
-#             last_rotation_step = step
-
-#     return key_rotation
-
-
-# # ============================================================
-# # Evaluation metrics
-# # ============================================================
-
-# def evaluate_policy(
-#     name: str,
-#     latency: torch.Tensor,
-#     key_rotation: torch.Tensor,
-# ) -> dict:
-#     """
-#     Evaluate latency, QoS violations, and key rotations.
-#     """
-
-#     average_latency = latency.mean().item()
-
-#     maximum_latency = latency.max().item()
-
-#     qos_violations = (
-#         latency > LATENCY_THRESHOLD_MS
-#     ).float().mean().item()
-
-#     total_key_rotations = (
-#         key_rotation.sum().item()
-#     )
-
-#     return {
-#         "policy": name,
-#         "average_latency_ms": round(
-#             average_latency,
-#             4,
-#         ),
-#         "maximum_latency_ms": round(
-#             maximum_latency,
-#             4,
-#         ),
-#         "qos_violation_rate": round(
-#             qos_violations,
-#             4,
-#         ),
-#         "total_key_rotations": int(
-#             total_key_rotations
-#         ),
-#     }
-
-
-# # ============================================================
-# # Optional PyTorch model
-# # ============================================================
-
-# class LoadAwareRotationModel(nn.Module):
-#     """
-#     Small PyTorch model representing a load-aware
-#     key-rotation decision function.
-
-#     The main experiment uses the explicit CMDP-inspired
-#     policy above. This model is included as a PyTorch
-#     implementation component for future training.
-#     """
-
-#     def __init__(self):
-#         super().__init__()
-
-#         self.network = nn.Sequential(
-#             nn.Linear(1, 8),
-#             nn.ReLU(),
-#             nn.Linear(8, 1),
-#             nn.Sigmoid(),
-#         )
-
-#     def forward(self, load):
-#         return self.network(load)
-
-
-# # ============================================================
-# # Run experiment
-# # ============================================================
-
-# def main():
-#     print("\n" + "=" * 70)
-#     print("PYTORCH EXPERIMENT")
-#     print("=" * 70)
-
-#     print("Device:", DEVICE)
-#     print("Time steps:", NUM_TIME_STEPS)
-#     print("Network slices:", NUM_SLICES)
-#     print(
-#         "ML-KEM overhead:",
-#         MLKEM_ROTATION_OVERHEAD_MS,
-#         "ms",
-#     )
-
-#     load = generate_network_load(
-#         num_time_steps=NUM_TIME_STEPS,
-#         num_slices=NUM_SLICES,
-#     )
-
-#     # --------------------------------------------------------
-#     # Baseline: fixed-period rotation
-#     # --------------------------------------------------------
-
-#     baseline_rotation = fixed_period_key_rotation(
-#         num_time_steps=NUM_TIME_STEPS,
-#         num_slices=NUM_SLICES,
-#         interval=KEY_ROTATION_INTERVAL,
-#     )
-
-#     baseline_latency = calculate_latency(
-#         load=load,
-#         key_rotation=baseline_rotation,
-#     )
-
-#     baseline_result = evaluate_policy(
-#         name="Fixed-period key rotation",
-#         latency=baseline_latency,
-#         key_rotation=baseline_rotation,
-#     )
-
-#     # --------------------------------------------------------
-#     # Proposed: CMDP-inspired low-load scheduling
-#     # --------------------------------------------------------
-
-#     proposed_rotation = cmdp_scheduled_key_rotation(
-#         load=load,
-#         load_threshold=0.45,
-#     )
-
-#     proposed_latency = calculate_latency(
-#         load=load,
-#         key_rotation=proposed_rotation,
-#     )
-
-#     proposed_result = evaluate_policy(
-#         name="CMDP-inspired low-load scheduling",
-#         latency=proposed_latency,
-#         key_rotation=proposed_rotation,
-#     )
-
-#     # --------------------------------------------------------
-#     # Compare results
-#     # --------------------------------------------------------
-
-#     average_latency_difference = (
-#         proposed_result["average_latency_ms"]
-#         - baseline_result["average_latency_ms"]
-#     )
-
-#     qos_violation_difference = (
-#         proposed_result["qos_violation_rate"]
-#         - baseline_result["qos_violation_rate"]
-#     )
-
-#     key_rotation_difference = (
-#         proposed_result["total_key_rotations"]
-#         - baseline_result["total_key_rotations"]
-#     )
-
-#     comparison = {
-#         "hypothesis": hypothesis.get("title"),
-#         "research_goal": research_goal,
-#         "experiment_type": (
-#             "Synthetic PyTorch simulation of "
-#             "load-aware ML-KEM key rotation"
-#         ),
-#         "baseline": baseline_result,
-#         "proposed_method": proposed_result,
-#         "comparison": {
-#             "average_latency_difference_ms": round(
-#                 average_latency_difference,
-#                 4,
-#             ),
-#             "qos_violation_rate_difference": round(
-#                 qos_violation_difference,
-#                 4,
-#             ),
-#             "key_rotation_difference": int(
-#                 key_rotation_difference
-#             ),
-#             "average_latency_result": (
-#                 "improved"
-#                 if average_latency_difference < 0
-#                 else "worse"
-#                 if average_latency_difference > 0
-#                 else "unchanged"
-#             ),
-#             "qos_result": (
-#                 "improved"
-#                 if qos_violation_difference < 0
-#                 else "worse"
-#                 if qos_violation_difference > 0
-#                 else "unchanged"
-#             ),
-#             "key_rotation_result": (
-#                 "reduced"
-#                 if key_rotation_difference < 0
-#                 else "increased"
-#                 if key_rotation_difference > 0
-#                 else "unchanged"
-#             ),
-#         },
-#         "limitations": [
-#             "Synthetic network-load data was used.",
-#             "The CMDP scheduler is represented by a "
-#             "low-load threshold policy.",
-#             "The experiment does not reproduce the "
-#             "paper's complete protocol or hardware setup.",
-#             "The result is an adaptation of the hypothesis "
-#             "rather than a direct paper reproduction.",
-#         ],
-#     }
-
-#     print("\n" + "=" * 70)
-#     print("BASELINE RESULT")
-#     print("=" * 70)
-
-#     print(json.dumps(
-#         baseline_result,
-#         indent=2,
-#     ))
-
-#     print("\n" + "=" * 70)
-#     print("PROPOSED METHOD RESULT")
-#     print("=" * 70)
-
-#     print(json.dumps(
-#         proposed_result,
-#         indent=2,
-#     ))
-
-#     print("\n" + "=" * 70)
-#     print("COMPARISON RESULT")
-#     print("=" * 70)
-
-#     print(json.dumps(
-#         comparison,
-#         indent=2,
-#     ))
-
-#     # --------------------------------------------------------
-#     # Save experiment result
-#     # --------------------------------------------------------
-
-#     output_path = Path(
-#         "app/experiments/results/"
-#         "manual_pytorch_comparison.json"
-#     )
-
-#     output_path.parent.mkdir(
-#         parents=True,
-#         exist_ok=True,
-#     )
-
-#     with output_path.open(
-#         "w",
-#         encoding="utf-8",
-#     ) as f:
-#         json.dump(
-#             comparison,
-#             f,
-#             indent=2,
-#             ensure_ascii=False,
-#         )
-
-#     print("\nSaved result to:")
-#     print(output_path)
-
-#     print("\n" + "=" * 70)
-#     print("TEST COMPLETE")
-#     print("=" * 70)
-
-
-# if __name__ == "__main__":
-#     main()

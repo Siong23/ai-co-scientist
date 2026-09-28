@@ -2,29 +2,48 @@
 Code Generation Agent.
 
 This module connects the AI Co-Scientist hypothesis workflow with the
-automated deep-learning experiment pipeline.
+automated experiment pipeline.
 
 Workflow:
 
-    Selected Hypothesis
+    Selected Rank #1 Hypothesis
             +
     Research Goal
             +
     Reflection Report
             +
-    Experiment Specification
-            ↓
+    Evidence Sources
+            +
+    PaperReader Experimental Details
+            |
+            v
     CodeGenerationAgent
-            ↓
-    Model / Approach Recommendation
-            +
-    Experiment Plan
-            +
-    Executable PyTorch Code
+            |
+            +--> Model / Approach Recommendation
+            +--> Experiment Plan
+            +--> Evidence-derived Evaluation Metrics
+            +--> Executable Python / PyTorch Code
+            |
+            v
+    ExperimentRunner
 
-The generated code is intended to be executed later by the experiment
-runner. This agent is responsible for CODE GENERATION and does not
-execute training itself.
+The agent is responsible for CODE GENERATION only.
+It does not execute the generated experiment.
+
+Scientific priority:
+
+    Rank #1 Hypothesis
+        >
+    Research Goal
+        >
+    Experiment Specification
+        >
+    Dataset / Environment
+        >
+    Evidence-derived Reference Experiment
+
+Evidence sources guide methodology and evaluation metrics, but they do
+not silently replace the selected hypothesis.
 """
 
 from __future__ import annotations
@@ -32,6 +51,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -39,17 +59,18 @@ from ..config import config
 from ..utils import logger
 from ..data.dataset_manager import DatasetManager
 
+
 # ============================================================
 # LLM Boundary
 # ============================================================
+
 
 def _call_llm(*args, **kwargs):
     """
     Use the existing application LLM façade.
 
-    This follows the same pattern used by generation_helpers.py
-    so that the project's existing LLM configuration and mocks
-    remain effective.
+    This follows the same pattern used by generation_helpers.py so that
+    the project's existing LLM configuration and mocks remain effective.
     """
     from .. import agents as facade
 
@@ -60,6 +81,7 @@ def _call_llm(*args, **kwargs):
 # Configuration Helpers
 # ============================================================
 
+
 def _output_token_limit(
     task: str,
     default: int,
@@ -67,8 +89,8 @@ def _output_token_limit(
     """
     Retrieve the configured output-token budget.
 
-    Falls back to the supplied default when the configuration
-    does not contain a valid value.
+    Falls back to the supplied default when the configuration does not
+    contain a valid value.
     """
     configured = config.get("llm_max_tokens", {})
 
@@ -88,35 +110,39 @@ def _output_token_limit(
 # Code Generation Agent
 # ============================================================
 
+
 class CodeGenerationAgent:
     """
-    Generates an executable PyTorch experiment from a selected
-    AI Co-Scientist hypothesis.
+    Generates an executable experiment from a selected AI Co-Scientist
+    hypothesis.
 
     The agent does not execute generated code.
 
     Responsibilities:
         1. Validate the experiment specification.
-        2. Build a detailed code-generation prompt.
-        3. Ask the configured LLM for a structured experiment plan.
-        4. Extract the generated PyTorch code.
-        5. Validate the generated response.
-        6. Save generated code when requested.
-        7. Return structured results to ExperimentOrchestrator.
+        2. Inspect the actual dataset schema when required by the experiment.
+        3. Extract evidence-derived metric guidance.
+        4. Build a detailed code-generation prompt.
+        5. Ask the configured LLM for a structured experiment plan.
+        6. Extract the generated Python/PyTorch code.
+        7. Validate the generated response.
+        8. Recover incomplete generations.
+        9. Repair failed generated code when requested.
+        10. Save generated code/results when requested.
     """
 
     DEFAULT_TEMPERATURE = 0.2
-    DEFAULT_MAX_TOKENS = 16000
-    REPAIR_MAX_TOKENS = 16000
-    MAX_REPAIR_SOURCE_CHARS = 64000
-    MAX_REPAIR_LOG_CHARS = 8000
+    DEFAULT_MAX_TOKENS = 5000
+    REPAIR_MAX_TOKENS = 5000
 
-    # A complete experiment can exceed a single response budget. The agent
-    # then continues the unfinished file instead of regenerating it, because
-    # a regeneration stops at the same limit.
+    MAX_REPAIR_SOURCE_CHARS = 50000
+    MAX_REPAIR_LOG_CHARS = 5000
+
+    # A complete experiment can exceed a single response budget.
+    # The agent continues the unfinished file instead of regenerating it.
     MAX_CONTINUATION_ATTEMPTS = 3
     MAX_CONTINUATION_REWIND_LINES = 400
-    MAX_CONTINUATION_SOURCE_CHARS = 80000
+    MAX_CONTINUATION_SOURCE_CHARS = 50000
     MIN_TRUNCATION_LINES = 40
 
     TRUNCATION_SYNTAX_MARKERS = (
@@ -127,16 +153,86 @@ class CodeGenerationAgent:
     )
 
     CONTINUATION_SYSTEM_PROMPT = (
-        "You continue partially written Python source files.\n"
-        "You never repeat code that already exists.\n"
-        "You return raw Python source code only, without Markdown "
-        "fences, JSON, or commentary."
+        "You continue a partially written Python experiment file.\n"
+        "You must preserve the existing experiment design, methodology, "
+        "dataset, target, model, and evaluation approach.\n"
+        "The selected Rank #1 hypothesis is authoritative for the "
+        "implemented model/algorithm.\n"
+        "The supporting paper is reference-only and must NOT replace the "
+        "Rank #1 model/algorithm.\n"
+        "Preserve the distinction between the reference model and the "
+        "implemented Rank #1 model.\n"
+        "Preserve scientifically compatible evidence-derived metrics.\n"
+        "Calculate experiment metrics independently.\n"
+        "NEVER copy, average, sample, simulate, or derive experiment "
+        "results from paper reference values.\n"
+        "If a required metric cannot be measured, record it as unavailable "
+        "or not_directly_comparable rather than fabricating a value.\n"
+        "If experiment_type is measurement_benchmark and training_required "
+        "is false, do NOT introduce training, epochs, batches, optimizers, "
+        "training loops, checkpoints, or training_history.json.\n"
+        "Do NOT redesign or replace the experiment.\n"
+        # ---------------------------------------------------------
+        # IMPORTANT CONTINUATION RULES
+        # ---------------------------------------------------------
+
+        "Continue ONLY from the exact end of the supplied source code.\n"
+        "Do NOT repeat, rewrite, or modify any code that already exists.\n"
+        "Do NOT repeat existing imports, functions, classes, statements, "
+        "artifact-writing code, or experiment logic.\n"
+        "Return ONLY the missing suffix of the Python source.\n"
+        "The returned text will be appended directly to the existing "
+        "source code.\n"
+        "Preserve the exact indentation level required by the preceding "
+        "line and surrounding Python block.\n"
+        "Do NOT start a new top-level program.\n"
+        "Do NOT restart the experiment from the beginning.\n"
+        "Do NOT add duplicate definitions of existing functions or variables.\n"
+        "Do NOT repeat existing code merely to provide context.\n"
+        "If the previous source already contains an artifact-writing block, "
+        "do not generate that block again.\n"
+        "The continuation must form valid Python when appended directly "
+        "to the existing source.\n"
+        "Do NOT add Markdown fences, JSON, explanations, commentary, or "
+        "natural-language text.\n"
+        "The completed program must remain compatible with the "
+        "ExperimentRunner artifact contract.\n"
+        "You return raw Python source code only."
     )
 
     REPAIR_SYSTEM_PROMPT = (
-        "You repair automatically generated Python experiment files.\n"
-        "You preserve the scientific objective and intended methodology.\n"
-        "You return the complete corrected Python source code only.\n"
+        "You repair an automatically generated Python experiment file.\n"
+        "Preserve the existing scientific objective, experiment design, "
+        "methodology, dataset, target, model, and evaluation approach.\n"
+        "The selected Rank #1 hypothesis is authoritative for the "
+        "implemented model/algorithm.\n"
+        "The supporting paper is reference-only and must NOT replace "
+        "the Rank #1 model/algorithm.\n"
+        "Preserve the distinction between the reference model and the "
+        "implemented Rank #1 model.\n"
+        "Do NOT redesign the experiment.\n"
+        "Do NOT replace the experiment with the methodology from an "
+        "evidence paper unless explicitly required by the specification.\n"
+        "Preserve scientifically compatible evidence-derived metrics.\n"
+        "Calculate experiment metrics independently.\n"
+        "NEVER copy, average, sample, simulate, or derive experiment "
+        "results from paper reference values.\n"
+        "NEVER assign a paper result directly to an experiment metric.\n"
+        "If a required metric cannot be measured, record it as "
+        "unavailable or not_directly_comparable.\n"
+        "A proxy must be explicitly labelled as a proxy.\n"
+        "Do NOT replace experiment-specific metrics with generic "
+        "classification metrics merely to make the experiment run.\n"
+        "Do NOT invent paper results or experiment results.\n"
+        "If experiment_type is measurement_benchmark and training_required "
+        "is false, do NOT introduce epochs, batches, optimizers, training "
+        "loops, model training, checkpoints, or training_history.json.\n"
+        "Do not fabricate measurements using random sampling.\n"
+        "Only fix syntax errors, incomplete code, missing required "
+        "sections, or genuine implementation errors.\n"
+        "The repaired program must remain compatible with the "
+        "ExperimentRunner artifact contract.\n"
+        "Return the complete corrected Python source code only.\n"
         "Do not return JSON, Markdown fences, explanations, or commentary."
     )
 
@@ -158,8 +254,7 @@ class CodeGenerationAgent:
             LLM generation temperature.
 
         output_directory:
-            Optional directory where generated Python files
-            are saved.
+            Optional directory where generated Python files are saved.
         """
         self.model = model or config.get(
             "code_generation_model",
@@ -255,8 +350,8 @@ class CodeGenerationAgent:
         hypothesis: Any,
     ) -> Dict[str, Any]:
         """
-        Serialize the selected Hypothesis using the actual
-        fields used by app/models.py.
+        Serialize the selected Hypothesis using the actual fields used
+        by app/models.py.
         """
         if hypothesis is None:
             return {}
@@ -279,10 +374,8 @@ class CodeGenerationAgent:
                 except Exception:
                     reflection_data = {}
             else:
-                reflection_data = (
-                    self._to_serializable(
-                        reflection_report
-                    )
+                reflection_data = self._to_serializable(
+                    reflection_report
                 )
         else:
             reflection_data = None
@@ -355,8 +448,7 @@ class CodeGenerationAgent:
         research_goal: Any,
     ) -> Dict[str, Any]:
         """
-        Serialize ResearchGoal using the actual fields in
-        app/models.py.
+        Serialize ResearchGoal using the actual fields in app/models.py.
         """
         if research_goal is None:
             return {}
@@ -508,10 +600,171 @@ class CodeGenerationAgent:
         if reference_experiment is None:
             reference_experiment = {}
 
-        if not isinstance(reference_experiment, dict):
+        if not isinstance(
+            reference_experiment,
+            dict,
+        ):
             raise ValueError(
                 "'reference_experiment' must be a dictionary."
             )
+
+        evaluation_metrics = specification.get(
+            "evaluation_metrics",
+            [],
+        )
+
+        if evaluation_metrics is None:
+            specification["evaluation_metrics"] = []
+        elif not isinstance(
+            evaluation_metrics,
+            list,
+        ):
+            raise ValueError(
+                "'evaluation_metrics' must be a list."
+            )
+
+    # ========================================================
+    # Evidence Metric Extraction
+    # ========================================================
+
+    @staticmethod
+    def _extract_reference_metric_requirements(
+        reference_experiment: Any,
+    ) -> Dict[str, Any]:
+        """
+        Extract metric requirements from PaperReader output.
+
+        The returned values are scientific guidance only.
+
+        Important:
+            - `metrics` describes metrics evaluated/discussed by the paper.
+            - `metric_definitions` describes meaning, units, and direction.
+            - `reference_metrics` contains only explicitly extracted
+              numerical paper results.
+            - No reference result is copied into generated experiment
+              results.
+        """
+        result: Dict[str, Any] = {
+            "metrics": [],
+            "metric_definitions": {},
+            "reference_metrics": {},
+        }
+
+        if not isinstance(
+            reference_experiment,
+            dict,
+        ):
+            return result
+
+        sources = reference_experiment.get(
+            "sources",
+            [],
+        )
+
+        if not isinstance(
+            sources,
+            list,
+        ):
+            return result
+
+        seen_metrics = set()
+
+        for source in sources:
+            if not isinstance(
+                source,
+                dict,
+            ):
+                continue
+
+            details = source.get(
+                "experiment_details",
+                {},
+            )
+
+            if not isinstance(
+                details,
+                dict,
+            ):
+                continue
+
+            metrics = details.get(
+                "metrics",
+                [],
+            )
+
+            if isinstance(
+                metrics,
+                list,
+            ):
+                for metric in metrics:
+                    if isinstance(
+                        metric,
+                        str,
+                    ):
+                        metric_name = metric.strip()
+
+                        if not metric_name:
+                            continue
+
+                        normalized_name = (
+                            metric_name.lower()
+                        )
+
+                        if normalized_name not in seen_metrics:
+                            result["metrics"].append(
+                                metric_name
+                            )
+                            seen_metrics.add(
+                                normalized_name
+                            )
+
+            definitions = details.get(
+                "metric_definitions",
+                {},
+            )
+
+            if isinstance(
+                definitions,
+                dict,
+            ):
+                for name, definition in definitions.items():
+                    if not isinstance(
+                        name,
+                        str,
+                    ):
+                        continue
+
+                    if name not in result[
+                        "metric_definitions"
+                    ]:
+                        result[
+                            "metric_definitions"
+                        ][name] = definition
+
+            reference_metrics = details.get(
+                "reference_metrics",
+                {},
+            )
+
+            if isinstance(
+                reference_metrics,
+                dict,
+            ):
+                for name, value in reference_metrics.items():
+                    if not isinstance(
+                        name,
+                        str,
+                    ):
+                        continue
+
+                    if name not in result[
+                        "reference_metrics"
+                    ]:
+                        result[
+                            "reference_metrics"
+                        ][name] = value
+
+        return result
 
     # ========================================================
     # Prompt Construction
@@ -524,722 +777,697 @@ class CodeGenerationAgent:
         return """
 You are the Code Generation Agent in an AI Co-Scientist system.
 
-Your task is to convert a scientifically evaluated machine-learning
-hypothesis into a complete, reproducible, executable PyTorch experiment.
+Your task is to convert a scientifically evaluated Rank #1 hypothesis
+into a complete, reproducible, executable experiment.
 
-The selected hypothesis has already passed the AI Co-Scientist workflow,
-including generation, reflection, ranking, evolution, proximity analysis,
-and meta-review.
-
-You must therefore implement the selected research idea faithfully.
-
-The generated Python code will NOT be executed by you. It will be saved
-and later executed automatically by the ExperimentRunner on a remote
-CPU/GPU server.
-
-IMPORTANT RULES:
+The generated Python program will be saved and executed automatically
+by ExperimentRunner on a remote CPU/GPU server.
 
 ============================================================
-1. SCIENTIFIC FIDELITY
+1. EXPERIMENT PRIORITY
 ============================================================
 
-1. Implement the selected hypothesis faithfully.
+Follow this priority order:
 
-2. Do not silently change the research objective, dataset, target variable,
-   model architecture, or experimental methodology.
+1. Selected Rank #1 hypothesis
+2. Research goal
+3. Experiment specification
+4. Available dataset and dataset schema
+5. Reference experiment extracted from evidence sources
 
-3. If the hypothesis proposes a specific machine-learning or deep-learning
-   architecture, implement that architecture rather than replacing it with
-   a generic model.
+The reference experiment is supporting scientific evidence.
 
-4. Do not simplify the proposed architecture merely to make the experiment
-   faster.
+It MUST NOT redefine, replace, or override the selected hypothesis
+or experiment specification.
 
-5. Performance optimizations are allowed only when they do not invalidate
-   the scientific objective.
+Never replace the selected experiment with the experiment performed
+in an evidence paper merely because the paper provides a more detailed
+methodology.
 
-6. If implementation details are missing from the hypothesis, make the
-   smallest scientifically reasonable assumptions and record them in the
-   experiment metadata.
-
-7. If the selected hypothesis cannot be directly tested using the
-   specified dataset, clearly identify the experiment as a proxy,
-   adaptation, or preliminary feasibility experiment.
-
-8. Do not claim that a proxy, adaptation, or preliminary feasibility
-   experiment fully validates the original hypothesis.
-
-9. Clearly distinguish between:
-   - Direct reproduction of the proposed research;
-   - A scientifically justified adaptation; and
-   - A proxy or preliminary feasibility experiment.
-
-10. If the experiment is a proxy or adaptation, record the following
-    in the experiment metadata:
-    - The original research objective;
-    - The implemented experimental objective;
-    - The reason direct testing was not possible;
-    - The assumptions and adaptations made; and
-    - The limitations of the experiment.  
+If the reference paper uses a different model, dataset, task, or
+experimental setup, adapt only the relevant scientific ideas while
+preserving the selected experiment.
 
 ============================================================
-2. EVIDENCE SOURCES AND REFERENCE EXPERIMENT
+2. SCIENTIFIC FIDELITY
 ============================================================
 
-11. The selected hypothesis may include evidence sources from
-   scientific papers or research documents.
+Implement the selected hypothesis faithfully.
 
-12. Use the evidence sources as scientific background and guidance
-   for selecting the model architecture, methodology, dataset
-   assumptions, and evaluation approach.
+Do not silently change:
 
-13. Distinguish between:
-   - methods explicitly described in the evidence sources;
-   - methods proposed by the selected hypothesis; and
-   - assumptions made because implementation details are missing.
+- research objective
+- experiment objective
+- dataset
+- target variable
+- model or algorithm
+- experimental methodology
+- evaluation procedure
+- required metrics
 
-14. Do not invent experimental results, paper metrics, datasets,
-    model architectures, or implementation details that are not
-    supported by the hypothesis or evidence sources.
+If the hypothesis specifies a particular architecture or algorithm,
+implement that architecture or algorithm.
 
-15. If the evidence sources describe a method that cannot be
-    directly reproduced using the selected dataset or available
-    environment, implement the closest scientifically justified
-    experiment and record the limitation in the experiment summary.
+If an implementation detail is missing, make the smallest reasonable
+scientific assumption and record it in the experiment metadata.
 
-16. Do not claim that the experiment directly reproduces the paper
-    unless the generated implementation actually matches the
-    paper's method, dataset, task, and evaluation procedure.
+If the original hypothesis cannot be directly tested with the available
+dataset or environment, implement a clearly identified:
 
-17. The experiment specification may contain a
-    "reference_experiment" section extracted from the evidence sources.
+- scientific adaptation; or
+- proxy experiment.
 
-18. When reference_experiment is available, use it to guide the
-    generated experiment.
+Do not claim that an adaptation or proxy experiment fully validates
+the original hypothesis.
 
-19. If reference_experiment specifies a model or architecture
-    that is applicable to the selected experiment, implement that
-    architecture unless the selected hypothesis explicitly proposes
-    a scientifically justified modification. Do not copy an unrelated
-    model or architecture merely because it appears in an evidence source.
+Record:
 
-20. If reference_experiment specifies a dataset, task, target variable,
-    preprocessing method, or experimental protocol, follow those details
-    whenever they are compatible with the selected experiment dataset
-    and execution environment.
-
-21. If reference_experiment specifies evaluation metrics, calculate
-    those metrics when they are applicable to the implemented task.
-
-22. Do not automatically use classification metrics such as accuracy,
-    precision, recall, or F1 for a non-classification experiment.
-
-23. For latency, security, optimization, orchestration, or control
-    experiments, use the hypothesis-specific metrics, such as:
-    - p99 latency;
-    - key freshness or key age;
-    - latency constraint violations;
-    - cryptographic overhead;
-    - risk;
-    - reward; or
-    - other metrics explicitly required by the hypothesis.
-
-24. Distinguish between:
-    - metrics reported by the evidence sources;
-    - metrics required by the selected hypothesis; and
-    - standard framework or execution metrics.
-
-25. If the reference experiment and selected hypothesis use different
-    models, datasets, tasks, or metrics, do not silently pretend that
-    the experiment is a direct reproduction.
-
-26. Record the experiment classification in the experiment metadata
-    using one of:
-    - "direct_reproduction";
-    - "scientific_adaptation"; or
-    - "proxy_experiment".
-
-27. The experiment metadata must record:
-    - reference model and architecture;
-    - implemented model and architecture;
-    - reference dataset and task;
-    - implemented dataset and task;
-    - reference evaluation metrics;
-    - implemented evaluation metrics;
-    - differences from the reference experiment;
-    - assumptions;
-    - adaptations; and
-    - limitations.
-
-28. If the evidence sources do not provide enough information to identify
-    the exact model, methodology, or metrics, do not invent those details.
-    Make the smallest reasonable assumption and record it explicitly.
+- original research objective
+- implemented experiment objective
+- reason for the adaptation/proxy
+- assumptions
+- adaptations
+- limitations
 
 ============================================================
-2. DATASET
+3. REFERENCE PAPER AND COMPARISON ROLE
 ============================================================
 
-29. The experiment dataset is specified in the experiment specification.
+The supporting evidence sources serve TWO distinct purposes:
 
-30. Do not replace the specified dataset with another dataset.
+A. REFERENCE EXPERIMENT
+B. EVALUATION / COMPARISON GUIDANCE
 
-31. The dataset path may be provided through the DATASET_PATH environment variable.
+The selected Rank #1 hypothesis remains authoritative for OUR
+automated experiment.
 
-32. Prefer DATASET_PATH when it is available.
-    
-33. Do not depend on a machine-specific absolute path as the only dataset location.
+The reference paper remains authoritative for describing the
+REFERENCE experiment, including:
 
-34. Validate that the dataset exists before loading it.
+- reference model
+- reference algorithm
+- reference methodology
+- reference dataset
+- reference experimental setup
+- reference evaluation metrics
+- metric definitions
+- reported reference results
 
-35. Raise a clear and informative error if the dataset cannot be found.
+Do NOT replace the Rank #1 hypothesis model with the paper model.
 
-36. Automatically identify and validate the target column according to the experiment specification.
+The generated experiment represents the approach proposed by the
+Rank #1 hypothesis.
 
-============================================================
-3. DATA PREPROCESSING
-============================================================
-
-37. Include preprocessing appropriate for tabular/network intrusion data.
-
-38. Handle numerical and categorical features appropriately.
-
-39. Never use unconditional df.dropna() on the entire dataset.
-
-40. Missing numerical values must be handled using training-set statistics,
-    such as the training-set median.
-
-41. Missing categorical values must be handled explicitly using an
-    appropriate sentinel such as "Unknown".
-
-42. Fit imputers, encoders, and scalers using training data only.
-
-43. Apply fitted preprocessing to validation and test data without fitting
-    on those partitions.
-
-44. Verify that preprocessing produces valid data.
-
-45. Verify that the processed dataset contains at least one usable sample.
-
-46. Verify that the processed features do not contain NaN or infinite values.
-
-47. Raise a clear error if preprocessing produces invalid or empty data.
+The paper model/approach is retained as the REFERENCE MODEL for
+downstream comparison.
 
 ============================================================
-4. DATA SPLITTING AND DATA LEAKAGE
+REFERENCE MODEL VS OUR MODEL
 ============================================================
 
-48. Create separate training, validation, and test partitions.
+The generated experiment must clearly identify:
 
-49. Use stratified splitting for classification when appropriate.
+1. Reference paper model/approach:
+   The model or algorithm used by the supporting paper.
 
-50. Handle class-distribution problems gracefully.
+2. Rank #1 hypothesis model/approach:
+   The model or algorithm proposed by the selected hypothesis and
+   implemented by this experiment.
 
-51. Never use test data to fit preprocessing components.
+These are separate entities.
 
-52. Never use test data for model selection or hyperparameter tuning.
+Do not report the paper model as the model implemented by the
+automated experiment.
 
-53. Identify the target variable explicitly before preprocessing.
+Do not silently replace the Rank #1 hypothesis model with the
+reference paper model.
 
-54. Do not use the target variable itself as an input feature.
+The experiment metadata and experiment_summary.json should record
+the implemented Rank #1 model/approach.
 
-55. Inspect feature names and experiment metadata for variables that may
-    directly encode, derive from, or reveal the target.
-
-56. Features such as attack labels, attack categories, attack tools,
-    outcome indicators, or post-event annotations may contain target
-    information. Match them by case-insensitive substring, so that a
-    column named "Attack Type" or "Attack Tool" is caught by the term
-    "attack". Never narrow such a match with a second exact-name test:
-    once a column matches, exclude it instead of reconsidering it.
-
-57. If a feature is clearly derived from the target or would not be
-    available at prediction time in a real-world intrusion-detection
-    setting, exclude it from the predictive feature set.
-
-58. Do not remove potentially informative features merely because they are
-    correlated with the target. Exclude a feature when there is a clear
-    methodological, temporal, or target-leakage reason.
-
-59. Record excluded target-related features and the reason for excluding
-    them in the experiment summary.
-
-60. Ensure that the final feature set represents information that would
-    realistically be available to the intrusion-detection model at
-    prediction time.
-
-61. Check for duplicated or near-duplicated records when appropriate,
-    particularly when unusually high validation or test performance occurs.
-
-62. Extremely high or perfect validation/test performance must not
-    automatically be interpreted as evidence of a successful model.
-    Consider possible target leakage, duplicated records, or other
-    methodological issues.
-
-63. Preserve the scientific intent of the hypothesis while preventing
-    methodological data leakage.
+The reference model/approach should be preserved as reference
+metadata for downstream ExperimentComparator.
 
 ============================================================
-5. REPRODUCIBILITY
+4. COMPARABLE EVALUATION METRICS
 ============================================================
 
-64. Set deterministic random seeds for Python, NumPy, and PyTorch where
-    appropriate.
+The evaluation metrics should be selected to support a fair
+comparison between the reference paper and the Rank #1 hypothesis
+experiment.
 
-65. When CUDA is available, configure PyTorch reproducibility appropriately.
+When the supporting paper reports explicit evaluation metrics:
 
-66. Do not unnecessarily sacrifice performance for reproducibility.
+1. Extract the paper's metrics from `evidence_metric_guidance`.
 
-67. Record the random seed in the final experiment summary.
+2. Prefer the SAME metrics for the Rank #1 experiment when they are
+   scientifically compatible with the Rank #1 hypothesis.
+
+3. Preserve the original metric definition.
+
+4. Preserve the original unit.
+
+5. Preserve the direction of improvement when known.
+
+6. Calculate the metric independently from the automated experiment.
+
+7. NEVER copy the paper's numerical result into the experiment.
+
+8. NEVER use the paper's numerical result as simulated input to
+   produce the experiment result.
+
+9. NEVER estimate the experiment result from the paper result.
+
+10. If the metric cannot actually be measured in the available
+    environment, report it as:
+
+        unavailable
+
+    or:
+
+        not_directly_comparable
+
+    together with the reason.
+
+11. A proxy may be used only when scientifically justified and it
+    MUST be explicitly labelled as a proxy.
+
+12. A proxy must NOT be presented as equivalent to the paper's
+    original measurement.
+
+The objective is:
+
+    SAME METRIC
+        +
+    SAME SCIENTIFIC DEFINITION
+        +
+    INDEPENDENT MEASUREMENT
+        =
+    FAIR COMPARISON
+
+Do not force accuracy, precision, recall, or F1 merely because the
+available dataset is a classification dataset.
 
 ============================================================
-6. PYTORCH MODEL
+5. EXPERIMENT TYPE
 ============================================================
 
-68. Use PyTorch for the deep-learning experiment.
+Determine the experiment type from the selected hypothesis and
+experiment specification.
 
-69. Implement the architecture specified by the selected hypothesis.
+Possible experiment types include:
 
-70. Use torch.nn.Module appropriately.
+- classification
+- regression
+- deep learning
+- optimization
+- orchestration
+- control
+- simulation
+- networking
+- security evaluation
+- performance evaluation
+- cryptographic evaluation
+- proxy/adaptation experiment
+- other scientifically specified experiments
 
-71. Use an appropriate loss function.
+Do NOT force every experiment into a supervised classification workflow.
 
-72. Use an appropriate optimizer.
+Only perform operations that are appropriate for the selected experiment.
 
-73. Use model.train() during training.
+Examples:
 
-74. Use model.eval() during validation and testing.
-
-75. Use torch.no_grad() during validation and testing when gradients are
-    not required.
-
-76. Save the best-performing model checkpoint according to validation
-    performance when appropriate.
-
-77. Reload the best checkpoint before final test evaluation when appropriate.
+- classification -> train/evaluate a classifier
+- regression -> train/evaluate a regression model
+- optimization/control -> execute the specified optimization/control
+  procedure and evaluate its required objectives
+- simulation -> execute the specified simulation and record its results
+- networking/security -> measure the specified security/performance
+  metrics
+- cryptographic/performance -> measure latency, overhead, size,
+  throughput, or other explicitly required measurements
 
 ============================================================
-7. GPU AND DEVICE HANDLING
+5A. MEASUREMENT BENCHMARK EXPERIMENTS
 ============================================================
 
-78. Automatically detect whether CUDA is available.
+If `experiment_type` is `measurement_benchmark`, the generated
+experiment MUST NOT create a machine-learning training workflow
+unless the experiment specification explicitly requires training.
 
-79. Use:
+Do NOT create:
+
+- epochs
+- batches
+- optimizers
+- training loops
+- train/validation/test splits
+- model training
+- checkpoints
+- training_history.json
+
+unless explicitly required by the experiment specification.
+
+A measurement benchmark must measure the actual experimental
+quantity required by the Rank #1 hypothesis.
+
+For example, if the evaluation metric is:
+
+    IPsec tunnel setup latency
+
+the experiment must measure the actual relevant tunnel setup process
+when that infrastructure is available.
+
+It MUST NOT:
+
+- generate a random latency;
+- sample latency from the paper's reported range;
+- calculate the paper average;
+- copy the paper result;
+- derive an experiment result from the paper result.
+
+If the required infrastructure is unavailable, record the metric as
+unavailable/not_directly_comparable rather than fabricating a result.
+
+The presence of a dataset does NOT mean that the dataset must be used
+for training.
+
+A dataset may instead be:
+
+- supporting data;
+- workload data;
+- traffic data;
+- reference data;
+- contextual data;
+- or unnecessary for a particular measurement.
+
+Use it only when required by the selected hypothesis and experiment
+design.  
+
+============================================================
+6. DATASET AND TARGET VALIDATION
+============================================================
+
+Use the dataset specified by the experiment specification when the
+experiment design requires a dataset.
+
+A dataset marked as supporting_or_reference_dataset must not
+automatically be used for training or measurement.
+
+Prefer the DATASET_PATH environment variable only when it is
+explicitly provided by the experiment specification or execution
+environment.
+
+Never replace the specified dataset with another dataset.
+
+Validate that the dataset exists before loading it.
+
+Use the provided dataset schema to determine columns, data types,
+candidate targets, and observed values.
+
+Never assume that labels such as:
+
+- Normal
+- Benign
+- Attack
+- Malicious
+
+exist unless they are actually present in the dataset.
+
+For classification experiments:
+
+1. Identify the target from the experiment specification.
+2. Validate the target against the actual dataset schema.
+3. Inspect the target distribution.
+4. Verify that at least two classes are present.
+5. If the target is derived from another column, validate the source
+   column and observed values before transformation.
+6. Verify that the final encoded class count matches the model output.
+7. Convert encoded targets to an explicit NumPy integer array before
+   creating PyTorch tensors.
+
+If target validation fails, stop with a clear error.
+
+Do not silently invent or change the target definition.
+
+============================================================
+7. DATA PREPROCESSING AND LEAKAGE
+============================================================
+
+Use preprocessing appropriate to the experiment.
+
+For machine-learning experiments:
+
+- fit preprocessing only on training data;
+- apply fitted preprocessing to validation/test data;
+- handle missing values explicitly;
+- handle numerical and categorical features appropriately;
+- never use the target as an input feature;
+- prevent target leakage.
+
+Exclude a feature when it clearly:
+
+- directly represents the target;
+- derives from the target;
+- contains post-event information unavailable at prediction time.
+
+Record excluded features and the reason for exclusion.
+
+Do not remove features merely because they are correlated with
+the target.
+
+For large datasets, if sampling is necessary for computational
+constraints, sample from the specified dataset rather than replacing it
+with another dataset, and record the original and sampled row counts.
+
+============================================================
+8. REPRODUCIBILITY
+============================================================
+
+Use deterministic random seeds where appropriate.
+
+Record the random seed in the experiment summary.
+
+Use portable paths and environment variables.
+
+Do not require interactive user input.
+
+Do not use input().
+
+Do not require a graphical desktop.
+
+============================================================
+9. PYTORCH AND HARDWARE
+============================================================
+
+If the selected experiment involves PyTorch model training:
+
+- use the architecture specified by the hypothesis;
+- use torch.nn.Module where appropriate;
+- use an appropriate loss and optimizer;
+- use model.train() during training;
+- use model.eval() during evaluation;
+- use torch.no_grad() when gradients are unnecessary;
+- save the best checkpoint when model training requires one.
+
+If the selected experiment does NOT involve model training:
+
+- do not introduce a loss function;
+- do not introduce an optimizer;
+- do not introduce model.train();
+- do not introduce training loops;
+- do not introduce epochs or batches;
+- do not introduce checkpoints;
+- do not introduce training_history.json.
+
+PyTorch being the required framework does NOT imply that model
+training is required.
+
+Use:
 
     torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-80. Fall back to CPU automatically when CUDA is unavailable.
+The program MUST remain executable on CPU when applicable.
 
-81. Never assume that a GPU is available.
+Do not artificially increase model size, batch size, or training duration
+to increase GPU utilization.
 
-82. Print the selected device.
+Use computationally reasonable settings for automated execution.
 
-83. When CUDA is available, print the GPU name.
+Maximum epochs should normally be 15 when model training is actually
+required, unless the experiment specification explicitly requires
+otherwise.
 
-84. Move the model to the selected device.
+Use early stopping when scientifically appropriate.
 
-85. Move training, validation, and test tensors to the selected device
-    efficiently.
+Do not use unsupported PyTorch arguments.
 
-86. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
-
-87. Do not repeatedly transfer the same tensors between CPU and GPU inside
-    performance-critical loops.
-
-88. When CUDA is available, consider using pin_memory=True in DataLoader.
-
-89. When appropriate, use non_blocking=True for tensor transfers.
-
-90. The experiment must remain executable on CPU when CUDA is unavailable.
+In particular, do not pass `verbose` to
+torch.optim.lr_scheduler.ReduceLROnPlateau.
 
 ============================================================
-8. COMPUTATIONAL EFFICIENCY
+10. EXECUTION CONTRACT
 ============================================================
 
-91. The generated experiment must be suitable for automated execution on
-    a shared CPU/GPU server, and must complete within a few minutes when
-    CUDA is unavailable and training runs on CPU. When the specified
-    dataset exceeds 200000 rows, draw a stratified random sample of at
-    most 200000 rows from it before splitting, using the recorded random
-    seed, and report both the original and sampled row counts. This
-    subsamples the specified dataset; it never substitutes a different one.
+The generated program will be executed automatically by ExperimentRunner.
 
-92. Choose a batch size appropriate for the dataset size, model complexity,
-    and available hardware.
+A successful process exit code alone does NOT mean that the experiment
+succeeded.
 
-93. For large tabular datasets with relatively small neural networks,
-    prefer a moderately large batch size when GPU memory permits.
+The program MUST save machine-readable experiment results.
 
-94. Do not default to unnecessarily small batch sizes such as 32, 64, or
-    128 for very large tabular datasets unless the experiment specifically
-    requires them.
+All experiment artifacts MUST be written inside:
 
-95. When appropriate, consider batch sizes such as 512, 1024, 2048, or
-    another hardware-appropriate value.
+    EXPERIMENT_OUTPUT_DIR
 
-96. The selected batch size must remain safe for available GPU memory.
-    If necessary, use a smaller batch size to avoid out-of-memory errors.
+Create the directory if necessary.
 
-97. Do not automatically use an extremely large batch size.
-
-98. Do not create unnecessarily large models.
-
-99. Do not use unnecessarily many layers, hidden units, or parameters unless
-    required by the hypothesis.
-
-100. Do not use an unnecessarily large number of training epochs.
-
-101. Use a maximum epoch limit of 15 unless the hypothesis explicitly
-    requires a longer training schedule.
-
-102. Use early stopping based on validation performance when scientifically
-    appropriate and when it does not conflict with the experiment
-    specification.
-
-103. Early stopping should stop training when validation performance has
-    converged and has not meaningfully improved for a reasonable patience
-    period.
-
-104. Do not continue training for many additional epochs after validation
-    performance has clearly converged.
-
-105. Use a reasonable early-stopping patience value rather than an
-    excessively large patience value.
-
-106. Avoid repeated dataset loading.
-
-107. Avoid repeated preprocessing.
-
-108. Avoid redundant model evaluation.
-
-109. Avoid unnecessary computations inside the training loop.
-
-110. When the dataset is already loaded into memory, configure the DataLoader
-    efficiently.
-
-111. When CUDA is available, consider pin_memory=True when it provides a
-    benefit.
-
-112. When appropriate, use non_blocking=True for CPU-to-GPU tensor transfers.
-
-113. Avoid unnecessary CPU-to-GPU and GPU-to-CPU transfers.
-
-114. Do not use unnecessarily expensive visualizations.
-
-115. Do not optimize for speed by changing the scientific objective.
-
-116. If the hypothesis does not specify an exact batch size or number of
-    epochs, choose values that provide a reasonable balance between
-    scientific validity and computational efficiency.
-
-117. Do not artificially increase model size, batch size, or training
-    duration merely to increase GPU utilization.
-
-118. Computational-efficiency improvements must not change the research
-    objective, target variable, dataset, or proposed model architecture.
-
-============================================================
-9. OPTIONAL MIXED PRECISION
-============================================================
-
-119. Mixed-precision training may be used when appropriate for the selected
-    model and CUDA hardware.
-
-120. If mixed precision is used, it must safely fall back to normal precision
-    when CUDA is unavailable.
-
-121. Do not use mixed precision solely for the purpose of using GPU features
-    if it is unlikely to provide a meaningful benefit.
-
-============================================================
-10. TRAINING
-============================================================
-
-122. Implement a complete training loop.
-
-123. Validate the model after each epoch when appropriate.
-
-124. Record training loss and validation metrics.
-
-125. Save the best model checkpoint.
-
-126. Print concise training progress.
-
-127. Do not produce unnecessarily large console output.
-
-128. Training must have a bounded maximum number of epochs.
-
-129. Never create an infinite training loop.
-
-============================================================
-11. EVALUATION
-============================================================
-
-130. Evaluate the final model on the held-out test set.
-
-131. For classification experiments, calculate:
-
-    - Accuracy
-    - Weighted Precision
-    - Weighted Recall
-    - Weighted F1-score
-    - Confusion Matrix
-
-132. Use additional metrics when required by the experiment specification.
-
-133. Do not use the test set during model selection.
-
-134. Save evaluation metrics in metrics.json.
-
-============================================================
-12. TIMING
-============================================================
-
-135. Measure training execution time separately.
-
-136. Measure evaluation execution time separately.
-
-137. Measure complete experiment wall-clock execution time.
-
-138. Use time.perf_counter() for timing.
-
-139. Total experiment execution time must include all required work from
-    experiment start until all required experiment artifacts have been
-    generated and saved.
-
-140. Calculate the final total execution time using:
-    total_execution_seconds = time.perf_counter() - SCRIPT_START_TIME
-
-141. The final value of total_execution_seconds MUST be stored in
-    metrics.json under the exact key "total_execution_seconds".
-
-142. metrics.json MUST contain all of the following timing fields:
-    - "training_seconds"
-    - "evaluation_seconds"
-    - "total_execution_seconds"
-
-143. Because total_execution_seconds represents the complete experiment
-    wall-clock time, calculate it only after all required experiment work
-    and artifacts have been completed.
-
-144. After calculating the final total_execution_seconds, update the
-    metrics dictionary with:
-
-    metrics["total_execution_seconds"] = float(total_execution_seconds)
-
-    Then rewrite metrics.json so that the final metrics.json contains
-    the completed timing information.
-
-145. Do not store total_execution_seconds only in experiment_summary.json.
-    It MUST also exist in metrics.json.
-
-146. The final metrics.json must be written only after all required metric
-    values, including total_execution_seconds, are available.
-
-147. Record the selected device and GPU name when available.
-
-============================================================
-13. VISUALIZATION
-============================================================
-
-148. Generate useful visualizations relevant to the experiment.
-
-149. For training experiments, generate training-history visualizations
-    where appropriate.
-
-150. For classification experiments, generate a confusion matrix visualization.
-
-151. Generate a performance metrics visualization when appropriate.
-
-152. Do not display plots interactively.
-
-153. Use a non-interactive matplotlib backend suitable for remote/server
-     execution.
-
-154. Save all visualization files inside EXPERIMENT_OUTPUT_DIR.
-
-155. Use these exact filenames when applicable:
-
-    loss_visualization.png
-    accuracy_visualization.png
-    confusion_matrix_visualization.png
-    performance_metrics_visualization.png
-
-============================================================
-14. OUTPUT ARTIFACTS
-============================================================
-
-156. The ExperimentRunner provides the environment variable
-     EXPERIMENT_OUTPUT_DIR.
-
-157. All generated experiment artifacts MUST be saved inside
-     EXPERIMENT_OUTPUT_DIR.
-
-158. Do not save experiment artifacts to arbitrary system directories.
-
-159. Create EXPERIMENT_OUTPUT_DIR if it does not exist.
-
-160. Save these files using the exact filenames:
+The program MUST produce:
 
     metrics.json
+    experiment_summary.json
+
+For experiments involving model training, the program SHOULD produce:
+
     training_history.json
+
+when training history is scientifically applicable.
+
+If the experiment trains a model, also produce:
+
     best_model.pt
 
-161. Save all required visualization files inside the same output directory.
+when a checkpoint is scientifically applicable.
+
+If visualizations are relevant to the experiment, save them inside
+EXPERIMENT_OUTPUT_DIR.
+
+Console output is NOT a substitute for experiment artifacts.
+
+For example, printing:
+
+    Reward: ...
+    Latency: ...
+    Accuracy: ...
+
+is insufficient.
+
+The corresponding values must be written into the appropriate JSON
+artifact.
 
 ============================================================
-15. EXPERIMENT SUMMARY
+11. ARTIFACT CONTENTS
 ============================================================
 
-162. Generate a final experiment summary containing, when applicable:
+The artifact structure must match the actual experiment type.
 
-    - Experiment name
-    - Research hypothesis
-    - Dataset
-    - Target variable
-    - Number of samples
-    - Number of features
-    - Number of classes
-    - Model architecture
-    - Batch size
-    - Number of epochs completed
-    - Best validation performance
-    - Test performance
-    - Training time
-    - Evaluation time
-    - Total execution time
-    - Device
-    - GPU name
-    - Random seed
+Do NOT invent classification metrics merely to satisfy an artifact
+contract.
 
-163. Save the experiment summary in a structured JSON file.
+Examples:
 
-============================================================
-16. AUTOMATED SERVER EXECUTION
-============================================================
+Classification:
+- accuracy
+- precision
+- recall
+- F1
+- confusion matrix
 
-164. The generated experiment will run unattended.
+Regression:
+- MAE
+- RMSE
+- R²
 
-165. Do not require interactive user input.
+Optimization/control:
+- reward
+- cost
+- constraint violations
+- latency
+- risk
+- convergence
+- other metrics required by the hypothesis
 
-166. Do not use input().
+Security/networking:
+- security metrics
+- latency
+- overhead
+- throughput
+- reliability
+- other hypothesis-specific measurements
 
-167. Do not require a graphical desktop environment.
+Cryptographic/performance:
+- handshake latency
+- encryption/decryption latency
+- key generation time
+- certificate/key size
+- protocol overhead
+- throughput
+- memory usage
+- other metrics required by the hypothesis
 
-168. Do not open interactive matplotlib windows.
+Use the metrics explicitly required by the selected experiment and the
+scientifically compatible evidence-derived metrics.
 
-169. Do not require manual confirmation.
-
-170. Do not assume files have been manually created by the user.
-
-171. Use environment variables and portable paths where appropriate.
-
-============================================================
-17. DEPENDENCIES
-============================================================
-
-172. Use only libraries that are required by the experiment.
-
-173. Avoid unnecessary dependencies.
-
-174. Do not include unused imports.
-
-175. Use commonly available scientific Python libraries where appropriate.
-
-176. Do not introduce unnecessary external packages merely for convenience.
+Do not invent a metric merely because it appears in another experiment.
 
 ============================================================
-18. CODE QUALITY
+12. METRIC DEFINITIONS AND UNITS
 ============================================================
 
-177. Generate clean, readable, modular Python code.
+When reporting a metric, preserve its scientific meaning.
 
-178. Use meaningful variable and function names.
+If the metric has a unit, record the unit where practical.
 
-179. Use functions for logically separate operations.
+Examples:
 
-180. Include concise comments explaining important implementation choices.
+    handshake_latency_ms
+    certificate_size_bytes
+    throughput_mbps
+    memory_mb
 
-181. Avoid duplicated code.
+Do not silently convert milliseconds to seconds, bytes to kilobytes,
+or percentages to proportions unless the experiment specification
+requires that conversion.
 
-182. Keep configuration values clearly defined.
+If a conversion is performed, document it.
 
-183. Do not generate pseudocode.
-
-184. Do not generate incomplete code.
-
-185. Do not use TODO placeholders.
-
-186. Do not use "pass" as a replacement for required functionality.
-
-187. Do not leave required functions unimplemented.
+Do not compare values with incompatible units.
 
 ============================================================
-19. HARDWARE INDEPENDENCE
+13. TIMING
 ============================================================
 
-188. Do not assume that a larger GPU is required.
+Measure timing appropriate to the experiment.
 
-189. Generate code that efficiently uses the available hardware.
+For training experiments, record training time when applicable.
 
-190. Do not artificially increase model size or batch size merely to increase
-     GPU utilization.
+For evaluation experiments, record evaluation time when applicable.
 
-191. If the model or dataset is small, recognize that GPU acceleration may
-     provide limited benefit.
+For experiments with an overall execution phase, record total execution
+time when applicable.
 
-192. Preserve CPU compatibility.
+Use:
 
-============================================================
-20. PYTORCH COMPATIBILITY
-============================================================
+    time.perf_counter()
 
-193. Target the installed PyTorch API.
+Do not fabricate timing values for phases that did not occur.
 
-194. Do not use unsupported arguments for the installed PyTorch version.
-
-195. In particular, do not pass verbose to
-     torch.optim.lr_scheduler.ReduceLROnPlateau because the project's
-     installed PyTorch version may not support that argument.
+ExperimentRunner may record its own execution timing metadata.
 
 ============================================================
-21. FINAL REQUIREMENTS
+14. EXPERIMENT SUMMARY
 ============================================================
 
-196. The final generated file must be complete and executable Python.
+experiment_summary.json should contain, when applicable:
 
-197. The experiment must automatically:
+- experiment name
+- research hypothesis
+- experiment type
+- dataset
+- target variable
+- sample count
+- feature count
+- class count
+- model/algorithm
+- configuration
+- metrics
+- metric definitions
+- assumptions
+- adaptations
+- limitations
+- training time
+- evaluation time
+- total execution time
+- device
+- GPU name
+- random seed
 
-    1. Load the specified local dataset.
-    2. Validate the dataset.
-    3. Preprocess the data.
-    4. Split the data into training, validation, and test sets.
-    5. Prevent data leakage.
-    6. Build the model specified by the hypothesis.
-    7. Select CUDA when available.
-    8. Fall back to CPU when necessary.
-    9. Train the model.
-   10. Validate the model.
-   11. Save the best checkpoint.
-   12. Evaluate on the held-out test set.
-   13. Calculate the required metrics.
-   14. Generate required visualizations.
-   15. Save all required artifacts.
-   16. Record training, evaluation, and total execution time.
-   17. Generate a final experiment summary.
+For a proxy or adaptation experiment, explicitly identify it as such.
 
-198. Most importantly, preserve the scientific intent of the selected
-     Rank #1 hypothesis while making the generated implementation robust,
-     reproducible, efficient, and suitable for automated execution.
+============================================================
+15. VISUALIZATION
+============================================================
 
-199. Return exactly one valid JSON object with the keys:
-     model_recommendation, experiment_plan, assumptions, dependencies,
-     and pytorch_code.
+Generate visualizations only when relevant to the selected experiment.
 
-     The pytorch_code field must contain the complete executable Python
-     source code.
+For training experiments, training-history plots may be generated.
 
-     Do not return Markdown fences, explanations, or text outside the
-     JSON object.
+For classification experiments, a confusion matrix may be generated.
+
+For performance experiments, latency/throughput/overhead plots may be
+generated when useful.
+
+For other experiment types, generate visualizations appropriate to the
+actual experiment.
+
+Do not display plots interactively.
+
+Use a non-interactive matplotlib backend.
+
+Save visualization files inside EXPERIMENT_OUTPUT_DIR.
+
+============================================================
+16. CODE QUALITY
+============================================================
+
+Generate complete executable Python code.
+
+Do NOT generate:
+
+- pseudocode
+- TODO placeholders
+- incomplete functions
+- `pass` instead of required functionality
+- interactive input
+- unnecessary dependencies
+- unused imports
+
+Use clear functions and meaningful variable names.
+
+Keep the implementation modular and readable.
+
+============================================================
+17. FINAL SCIENTIFIC CHECK
+============================================================
+
+Before returning the code, verify that:
+
+1. The implementation matches the selected hypothesis.
+2. The implementation matches the experiment specification.
+3. The selected dataset is actually used when required.
+4. The target definition is validated when applicable.
+5. No target leakage is introduced.
+6. The reference paper has not silently replaced the selected experiment.
+7. Evidence-derived metrics are used when scientifically compatible.
+8. The experiment calculates its own metric values.
+9. No paper result is copied into the generated experiment.
+10. No unavailable metric is fabricated.
+11. Required artifacts are written to EXPERIMENT_OUTPUT_DIR.
+12. The program can run unattended.
+13. CPU execution remains possible when applicable.
+14. The experiment records assumptions and limitations.
+15. The generated code is complete and executable.
+
+============================================================
+18. OUTPUT FORMAT
+============================================================
+
+Return exactly ONE valid JSON object with these keys:
+
+{
+    "model_recommendation": ...,
+    "experiment_plan": ...,
+    "assumptions": ...,
+    "dependencies": ...,
+    "pytorch_code": ...
+}
+
+The `pytorch_code` field MUST contain the complete executable Python
+source code.
+
+Do NOT return Markdown fences.
+
+Do NOT return explanations outside the JSON object.
 """.strip()
 
     @staticmethod
@@ -1254,7 +1482,10 @@ IMPORTANT RULES:
         the structured experiment details already contain the relevant
         methodology, metrics, configurations, and reported results.
         """
-        if not isinstance(reference_experiment, dict):
+        if not isinstance(
+            reference_experiment,
+            dict,
+        ):
             return {}
 
         compact: Dict[str, Any] = {
@@ -1274,11 +1505,17 @@ IMPORTANT RULES:
             [],
         )
 
-        if not isinstance(sources, list):
+        if not isinstance(
+            sources,
+            list,
+        ):
             return compact
 
         for source in sources:
-            if not isinstance(source, dict):
+            if not isinstance(
+                source,
+                dict,
+            ):
                 continue
 
             experiment_details = source.get(
@@ -1303,6 +1540,20 @@ IMPORTANT RULES:
                     "source_type"
                 ),
                 "experiment_details": experiment_details,
+                "evaluation_guidance": {
+                    "metrics": experiment_details.get(
+                        "metrics",
+                        [],
+                    ),
+                    "metric_definitions": experiment_details.get(
+                        "metric_definitions",
+                        {},
+                    ),
+                    "reference_metrics": experiment_details.get(
+                        "reference_metrics",
+                        {},
+                    ),
+                },
             }
 
             compact["sources"].append(
@@ -1322,7 +1573,6 @@ IMPORTANT RULES:
         Large provenance and duplicated evidence content are excluded
         to reduce LLM context size and generation latency.
         """
-
         selected_hypothesis = specification.get(
             "selected_hypothesis",
             {},
@@ -1334,11 +1584,9 @@ IMPORTANT RULES:
         ):
             selected_hypothesis = {}
 
-        evidence_sources = (
-            selected_hypothesis.get(
-                "evidence_sources",
-                [],
-            )
+        evidence_sources = selected_hypothesis.get(
+            "evidence_sources",
+            [],
         )
 
         compact_evidence_sources = []
@@ -1397,6 +1645,24 @@ IMPORTANT RULES:
             "evidence_sources": compact_evidence_sources,
         }
 
+        compact_reference_experiment = (
+            self._compact_reference_experiment(
+                specification.get(
+                    "reference_experiment",
+                    {},
+                )
+            )
+        )
+
+        reference_metric_guidance = (
+            self._extract_reference_metric_requirements(
+                specification.get(
+                    "reference_experiment",
+                    {},
+                )
+            )
+        )
+
         compact_specification = {
             "dataset": specification.get(
                 "dataset",
@@ -1411,14 +1677,8 @@ IMPORTANT RULES:
                 {},
             ),
             "selected_hypothesis": compact_hypothesis,
-            "reference_experiment": (
-                self._compact_reference_experiment(
-                    specification.get(
-                        "reference_experiment",
-                        {},
-                    )
-                )
-            ),
+            "reference_experiment": compact_reference_experiment,
+            "evidence_metric_guidance": reference_metric_guidance,
             "experiment_design": specification.get(
                 "experiment_design",
                 {},
@@ -1437,6 +1697,90 @@ IMPORTANT RULES:
             ),
         }
 
+        logger.info(
+            "dataset_schema size: %d",
+            len(
+                json.dumps(
+                    self._to_serializable(
+                        specification.get(
+                            "dataset_schema",
+                            {},
+                        )
+                    ),
+                    ensure_ascii=False,
+                )
+            ),
+        )
+
+        logger.info(
+            "experiment_design size: %d",
+            len(
+                json.dumps(
+                    self._to_serializable(
+                        specification.get(
+                            "experiment_design",
+                            {},
+                        )
+                    ),
+                    ensure_ascii=False,
+                )
+            ),
+        )
+
+        logger.info(
+            "code_generation_requirements size: %d",
+            len(
+                json.dumps(
+                    self._to_serializable(
+                        specification.get(
+                            "code_generation_requirements",
+                            {},
+                        )
+                    ),
+                    ensure_ascii=False,
+                )
+            ),
+        )
+
+        logger.info(
+            "evaluation_metrics size: %d",
+            len(
+                json.dumps(
+                    self._to_serializable(
+                        specification.get(
+                            "evaluation_metrics",
+                            [],
+                        )
+                    ),
+                    ensure_ascii=False,
+                )
+            ),
+        )
+
+        logger.info(
+            "reference_experiment size: %d",
+            len(
+                json.dumps(
+                    self._to_serializable(
+                        compact_reference_experiment
+                    ),
+                    ensure_ascii=False,
+                )
+            ),
+        )
+
+        logger.info(
+            "evidence_metric_guidance size: %d",
+            len(
+                json.dumps(
+                    self._to_serializable(
+                        reference_metric_guidance
+                    ),
+                    ensure_ascii=False,
+                )
+            ),
+        )
+
         specification_json = json.dumps(
             self._to_serializable(
                 compact_specification
@@ -1446,130 +1790,172 @@ IMPORTANT RULES:
         )
 
         return f"""
-Generate the complete executable Python source code for the PyTorch
-experiment described by the following AI Co-Scientist experiment
-specification.
+Generate the complete executable Python source code for the experiment
+described by the AI Co-Scientist specification below.
 
-The selected hypothesis is the Rank #1 hypothesis from the AI
-Co-Scientist workflow. Its evidence sources and reference experiment
-provide scientific guidance.
+The selected hypothesis is the final Rank #1 hypothesis.
 
-The selected hypothesis determines the research objective.
-Evidence sources provide the scientific reference methodology,
-experimental context, and reported results where explicitly available.
+IMPORTANT PRIORITY:
 
-The generated experiment must test the selected hypothesis as
-faithfully as possible using the specified dataset and execution
-environment.
+1. Selected Rank #1 hypothesis
+2. Research goal
+3. Experiment specification
+4. Available dataset and dataset schema
+5. Reference experiment and evidence sources
 
+The reference experiment provides scientific guidance.
+
+It must NOT replace or redefine the selected hypothesis.
+
+============================================================
 EXPERIMENT SPECIFICATION
-========================
+============================================================
 
 {specification_json}
 
-IMPLEMENTATION REQUIREMENTS
-===========================
+============================================================
+EVIDENCE-DERIVED METRIC RULES
+============================================================
 
-The generated experiment MUST:
+The `evidence_metric_guidance` section contains metrics extracted from
+the supporting papers.
+
+Use these rules:
+
+1. Paper metrics are scientific evaluation guidance.
+2. Implement a paper metric when it is compatible with the selected
+   hypothesis and reproducible in the available environment.
+3. Preserve the metric's meaning and unit.
+4. The paper's `reference_metrics` are reference values only.
+5. NEVER copy a paper reference value into the generated experiment.
+6. The generated experiment must calculate its own values.
+7. If a metric cannot be reproduced, do not fabricate it.
+8. Clearly record unavailable metrics or scientifically justified proxy
+   measurements in assumptions, adaptations, or limitations.
+9. Do not replace experiment-specific metrics with generic classification
+   metrics simply because the dataset happens to contain labels.
+10. Do not turn the selected hypothesis into a reproduction of the
+    evidence paper unless explicitly required.
+
+============================================================
+IMPLEMENTATION REQUIREMENTS
+============================================================
+
+0. Treat `experiment_type`, `experiment_design`,
+   `evaluation_metrics`, and `code_generation_requirements` in the
+   experiment specification as authoritative implementation constraints.
+
+   Do not infer a different experiment type from the dataset name alone.
+
+   Do not enable training, train/validation/test splitting,
+   checkpointing, or training history when the specification disables
+   those requirements.
 
 1. Implement the selected Rank #1 hypothesis faithfully.
-2. Use the specified dataset and task.
-3. Use DATASET_PATH when available.
-4. Use PyTorch.
-5. Automatically use CUDA when available and CPU otherwise.
-6. Handle numerical and categorical features correctly.
-7. Handle missing values without unnecessarily dropping valid records.
-8. Fit preprocessing components using training data only.
-9. Prevent data leakage.
-10. Create train, validation, and test partitions.
-11. Use the provided dataset schema to determine available columns
-    and their data types.
-12. Do not assume a fixed target-column name.
-13. Determine the target variable from the experiment specification
-    and dataset schema.
-14. Verify that the target variable exists before preprocessing.
-15. Preserve the target column until target extraction is complete.
-16. Exclude the target variable from input features.
-17. Exclude target-derived or post-event features when they create
-    methodological or prediction-time leakage.
-18. Implement the model architecture required by the hypothesis.
-19. Train and validate the model.
-20. Save the best model checkpoint.
-21. Evaluate on the held-out test set.
-22. Calculate the requested evaluation metrics.
-23. Generate the required visualizations.
-24. Save all artifacts inside EXPERIMENT_OUTPUT_DIR.
-25. Record training, evaluation, and complete wall-clock execution time.
-26. Print the selected device and GPU name when available.
-27. Remain executable without manual intervention.
 
-SCIENTIFIC FIDELITY
+2. Follow the experiment specification and research goal.
 
-- Do not change the research objective merely to improve execution speed.
-- Do not replace a specified architecture with a generic model.
-- Use applicable methodology from the reference experiment.
-- Do not copy unrelated methodology from an evidence source.
-- Clearly distinguish direct reproduction, scientific adaptation,
-  and proxy experimentation.
-- Do not claim a proxy experiment fully validates the original hypothesis.
-- Record assumptions, adaptations, differences, and limitations.
-- Do not invent paper results, metrics, datasets, architectures,
-  or experimental details.
+3. Use the specified dataset when the experiment requires a dataset.
 
-DATASET SCHEMA RULES
+4. Use DATASET_PATH when available.
 
-The dataset schema provided in the specification is authoritative
-for the currently available dataset.
+5. Use the provided dataset schema to validate available columns,
+   data types, candidate targets, and observed target values.
 
-Before preprocessing:
+6. Do not assume fixed dataset column names or categorical values.
 
-- Inspect the available columns.
-- Identify the target using the experiment specification and schema.
-- Verify that the target exists.
-- Preserve the target column until target extraction.
-- Only then create feature matrices.
-- If the target cannot be identified unambiguously, fail with a clear
-  error listing the available columns rather than guessing.
+7. For classification experiments, explicitly validate the target
+   distribution before model construction and verify that at least
+   two classes are available.
 
-The experiment must remain dataset-agnostic and must not hard-code
-current 5G-NIDD column names.
+8. If a target is derived from another column, validate the source
+   column and observed values before applying the transformation.
 
-COMPUTATIONAL EFFICIENCY
+9. Do not invent labels or silently change the target definition.
 
-- Keep training computationally reasonable.
-- If the dataset exceeds 200000 rows, use a stratified random sample
-  of at most 200000 rows when appropriate and record the original
-  and sampled row counts.
-- Use a hardware-appropriate batch size.
-- Avoid unnecessarily large models.
-- Use at most 15 epochs unless the hypothesis explicitly requires more.
-- Use early stopping when scientifically appropriate.
-- Avoid repeated preprocessing and dataset loading.
-- Avoid unnecessary CPU/GPU transfers.
-- Preserve CPU compatibility.
+10. Prevent methodological data leakage.
 
-OUTPUT ARTIFACTS
+11. Use train/validation/test splitting, training, checkpointing,
+    and held-out evaluation ONLY when required by the selected
+    experiment type.
 
-Save required artifacts inside EXPERIMENT_OUTPUT_DIR, including:
+12. Do not force a classification or supervised-learning workflow
+    onto an optimization, control, orchestration, simulation,
+    networking, security, cryptographic, performance, or other
+    non-classification experiment.
 
-- metrics.json
-- training_history.json
-- best_model.pt
-- required visualization files
-- experiment summary JSON
+13. Implement the model or algorithm required by the selected
+    hypothesis.
 
-TIMING
+14. Use the reference experiment only as supporting scientific
+    evidence.
 
-The experiment must record:
+15. Do not silently replace the selected experiment with the
+    methodology used by the evidence paper.
 
-- training_seconds
-- evaluation_seconds
-- total_execution_seconds
+16. If the implementation is an adaptation or proxy experiment,
+    explicitly record the assumptions, adaptations, and limitations.
 
-The final total_execution_seconds must represent the complete
-experiment wall-clock time and must be written to metrics.json.
+17. Use metrics appropriate to the actual experiment type.
 
+18. Use compatible evidence-derived metrics when reproducible.
+
+19. Do not invent classification metrics merely to satisfy an output
+    requirement for a non-classification experiment.
+
+20. Do not invent numerical paper results.
+
+21. Do not copy paper reference values into the generated experiment.
+
+22. Save all required machine-readable artifacts inside
+    EXPERIMENT_OUTPUT_DIR.
+
+23. Produce:
+       metrics.json
+       experiment_summary.json
+
+24. Produce training_history.json when the experiment involves
+    model training and training history is applicable.
+
+25. Produce best_model.pt when a trained model/checkpoint is
+    scientifically applicable.
+
+26. Save relevant visualizations inside EXPERIMENT_OUTPUT_DIR.
+
+27. Record timing information appropriate to the experiment.
+
+28. The experiment must run unattended without interactive input.
+
+29. The experiment must remain executable on CPU when applicable.
+
+30. Use a deterministic random seed where appropriate and record it.
+
+31. The generated program must be complete executable Python code.
+    Do not generate pseudocode, TODO placeholders, or incomplete
+    functions.
+
+============================================================
+FINAL CHECK
+============================================================
+
+Before returning the code, verify that:
+
+- the selected hypothesis is still the experiment being implemented;
+- the reference paper has not replaced the selected experiment;
+- the dataset and target are handled according to the specification;
+- the experiment type is appropriate to the hypothesis;
+- evidence-derived metrics are used when scientifically compatible;
+- the generated experiment calculates its own metric values;
+- no paper result has been copied into the generated results;
+- unavailable metrics are not fabricated;
+- the evaluation metrics match the actual experiment type;
+- required artifacts are actually written;
+- the program can execute without manual intervention; and
+- assumptions and limitations are recorded when applicable.
+
+============================================================
 RESPONSE FORMAT
+============================================================
 
 Return exactly one valid JSON object with these fields:
 
@@ -1582,7 +1968,32 @@ Return exactly one valid JSON object with these fields:
 }}
 
 The "pytorch_code" field must contain the complete executable
-Python experiment.
+Python source code.
+
+============================================================
+MODEL RECOMMENDATION OUTPUT
+============================================================
+
+The `model_recommendation` field describes the approach implemented
+by the automated experiment.
+
+It MUST identify, when applicable:
+
+- model_name
+- algorithm
+- architecture
+- approach_type
+- reason_for_selection
+- relationship_to_rank1_hypothesis
+
+The recommendation MUST describe the model/algorithm selected from
+the Rank #1 hypothesis.
+
+Do NOT use the reference paper's model as the `model_recommendation`
+unless the Rank #1 hypothesis explicitly proposes the same model.
+
+The reference paper's model should remain reference metadata and
+should not overwrite the Rank #1 model recommendation.
 
 Do not return Markdown.
 Do not return Markdown code fences.
@@ -1610,7 +2021,6 @@ Do not return explanations or commentary.
 
         cleaned = response.strip()
 
-        # Remove Markdown fences if present.
         cleaned = re.sub(
             r"^```(?:json)?\s*",
             "",
@@ -1629,7 +2039,6 @@ Do not return explanations or commentary.
                 cleaned
             )
         except json.JSONDecodeError:
-            # Attempt to locate the first JSON object.
             start = cleaned.find("{")
             end = cleaned.rfind("}")
 
@@ -1647,9 +2056,14 @@ Do not return explanations or commentary.
                     payload = ast.literal_eval(
                         cleaned[start:end + 1]
                     )
-                except (SyntaxError, ValueError) as literal_error:
+                except (
+                    SyntaxError,
+                    ValueError,
+                ) as literal_error:
                     raise ValueError(
-                        f"Invalid structured response returned by CodeGenerationAgent: {literal_error}"
+                        "Invalid structured response returned by "
+                        "CodeGenerationAgent: "
+                        f"{literal_error}"
                     ) from exc
 
         if not isinstance(
@@ -1666,7 +2080,9 @@ Do not return explanations or commentary.
     def extract_fenced_python(
         response: str,
     ) -> Optional[Dict[str, Any]]:
-        """Build a minimal result when the model returns fenced Python only."""
+        """
+        Build a minimal result when the model returns fenced Python only.
+        """
         matches = re.findall(
             r"```(?:python|py)\s*\n(.*?)```",
             response,
@@ -1674,12 +2090,11 @@ Do not return explanations or commentary.
         )
 
         if matches:
-            code = max(matches, key=len).strip()
+            code = max(
+                matches,
+                key=len,
+            ).strip()
         else:
-            # A response that stopped at the output-token limit keeps its
-            # opening fence and never emits the closing one. Without this
-            # branch the source is recovered from the first torch import
-            # instead, which silently drops every earlier line.
             opening = re.search(
                 r"```(?:python|py)?[ \t]*\r?\n",
                 response,
@@ -1690,7 +2105,9 @@ Do not return explanations or commentary.
                 return None
 
             code = CodeGenerationAgent.strip_code_fences(
-                response[opening.end():]
+                response[
+                    opening.end():
+                ]
             )
 
         if not code:
@@ -1710,18 +2127,42 @@ Do not return explanations or commentary.
     def extract_python_source(
         response: str,
     ) -> Optional[Dict[str, Any]]:
-        """Extract executable Python when the model ignores the JSON wrapper."""
-        fenced = CodeGenerationAgent.extract_fenced_python(response)
+        """
+        Extract executable Python when the model ignores the JSON wrapper.
+        """
+        fenced = CodeGenerationAgent.extract_fenced_python(
+            response
+        )
+
         if fenced is not None:
             return fenced
 
-        source_start = response.find("import torch")
+        source_start = response.find(
+            "import torch"
+        )
+
         if source_start == -1:
-            source_start = response.find("from torch")
+            source_start = response.find(
+                "from torch"
+            )
+
+        if source_start == -1:
+            source_start = response.find(
+                "import os"
+            )
+
+        if source_start == -1:
+            source_start = response.find(
+                "import "
+            )
+
         if source_start == -1:
             return None
 
-        code = response[source_start:].strip()
+        code = response[
+            source_start:
+        ].strip()
+
         if not code:
             return None
 
@@ -1739,8 +2180,61 @@ Do not return explanations or commentary.
     # Generated Response Validation
     # ========================================================
 
-    @staticmethod
+    def _normalise_escaped_python_source(
+        self,
+        source: str,
+    ) -> str:
+        """
+        Normalize Python source when the LLM returns literal escaped
+        characters instead of normal Python source.
+        """
+        if not isinstance(
+            source,
+            str,
+        ):
+            return source
+
+        source = source.strip()
+
+        has_literal_newlines = "\n" in source
+        has_escaped_newlines = "\\n" in source
+        has_escaped_quotes = '\\"' in source
+
+        looks_like_python = (
+            source.startswith("import ")
+            or source.startswith("from ")
+            or source.startswith("#")
+            or "import " in source[:500]
+            or "from " in source[:500]
+        )
+
+        if looks_like_python and (
+            has_escaped_newlines
+            or has_escaped_quotes
+        ):
+            source = source.replace(
+                "\\r\\n",
+                "\n",
+            )
+            source = source.replace(
+                "\\n",
+                "\n",
+            )
+            source = source.replace(
+                "\\t",
+                "\t",
+            )
+
+            # Convert escaped double quotes back to normal quotes.
+            source = source.replace(
+                '\\"',
+                '"',
+            )
+
+        return source
+
     def validate_generated_response(
+        self,
         response: Dict[str, Any],
     ) -> None:
         """
@@ -1815,15 +2309,28 @@ Do not return explanations or commentary.
                 "Generated PyTorch code is empty."
             )
 
+        # ------------------------------------------------
+        # Normalize LLM-generated escaped Python source.
+        # ------------------------------------------------
+
+        pytorch_code = self._normalise_escaped_python_source(
+            pytorch_code
+        )
+
+        # Store the normalized source back into the response so
+        # downstream code uses the corrected Python source.
+        response["pytorch_code"] = pytorch_code
+
         try:
-            ast.parse(pytorch_code)
+            ast.parse(
+                pytorch_code
+            )
         except SyntaxError as exc:
             raise ValueError(
                 "Generated PyTorch code is not valid Python: "
                 f"{exc.msg} at line {exc.lineno}."
             ) from exc
 
-        # Basic protection against incomplete generation.
         forbidden_placeholders = [
             "TODO",
             "IMPLEMENT HERE",
@@ -1842,6 +2349,198 @@ Do not return explanations or commentary.
                 )
 
     # ========================================================
+    # Experiment Design Compliance Validation
+    # ========================================================
+
+    @staticmethod
+    def validate_experiment_design_compliance(
+        specification: Dict[str, Any],
+        code: str,
+    ) -> None:
+        """
+        Deterministically validate generated code against the
+        experiment-design constraints.
+
+        This is a safety check against obvious scientific-design
+        violations. It does not attempt to prove that the experiment
+        is scientifically correct.
+        """
+        if not isinstance(specification, dict):
+            raise TypeError(
+                "Experiment specification must be a dictionary."
+            )
+
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError(
+                "Generated experiment code is empty."
+            )
+
+        experiment_design = specification.get(
+            "experiment_design",
+            {},
+        )
+
+        if not isinstance(experiment_design, dict):
+            experiment_design = {}
+
+        experiment_type = str(
+            experiment_design.get(
+                "experiment_type",
+                "",
+            )
+        ).strip().lower()
+
+        training_required = bool(
+            experiment_design.get(
+                "training_required",
+                False,
+            )
+        )
+
+        checkpoint_required = bool(
+            experiment_design.get(
+                "checkpoint_required",
+                False,
+            )
+        )
+
+        training_history_required = bool(
+            experiment_design.get(
+                "training_history_required",
+                False,
+            )
+        )
+
+        code_lower = code.lower()
+
+        # ----------------------------------------------------
+        # Measurement benchmark constraints
+        # ----------------------------------------------------
+
+        if (
+            experiment_type == "measurement_benchmark"
+            and not training_required
+        ):
+            forbidden_training_patterns = (
+                ".backward(",
+                "optimizer.step(",
+                "torch.optim",
+                "training_history.json",
+                "best_model.pt",
+                "train_loader",
+                "dataloader(",
+                "num_epochs",
+                "epochs =",
+                "batch_size",
+                "model.train(",
+            )
+
+            violations = [
+                pattern
+                for pattern in forbidden_training_patterns
+                if pattern in code_lower
+            ]
+
+            if violations:
+                raise ValueError(
+                    "Generated measurement_benchmark experiment "
+                    "contains training-related functionality even "
+                    "though training_required=false: "
+                    + ", ".join(violations)
+                )
+
+        # ----------------------------------------------------
+        # Checkpoint constraint
+        # ----------------------------------------------------
+
+        if not checkpoint_required:
+            checkpoint_patterns = (
+                "best_model.pt",
+                "torch.save(",
+                "checkpoint",
+            )
+
+            violations = [
+                pattern
+                for pattern in checkpoint_patterns
+                if pattern in code_lower
+            ]
+
+            if violations:
+                raise ValueError(
+                    "Generated experiment contains checkpoint-related "
+                    "functionality even though checkpoint_required=false: "
+                    + ", ".join(violations)
+                )
+
+        # ----------------------------------------------------
+        # Training-history constraint
+        # ----------------------------------------------------
+
+        if not training_history_required:
+            if "training_history.json" in code_lower:
+                raise ValueError(
+                    "Generated experiment writes training_history.json "
+                    "even though training_history_required=false."
+                )
+
+        # ----------------------------------------------------
+        # Prevent obvious paper-result reuse
+        # ----------------------------------------------------
+
+        forbidden_reference_patterns = (
+            "reference_metrics[",
+            "reference_metrics.get(",
+            "paper_results[",
+            "paper_results.get(",
+            "reference_values[",
+            "reference_values.get(",
+            "reference_result",
+            "paper_result",
+        )
+
+        reference_violations = [
+            pattern
+            for pattern in forbidden_reference_patterns
+            if pattern in code_lower
+        ]
+
+        if reference_violations:
+            raise ValueError(
+                "Generated experiment appears to use paper/reference "
+                "results as experiment inputs or outputs: "
+                + ", ".join(reference_violations)
+            )
+
+        # ----------------------------------------------------
+        # Measurement benchmarks must not fabricate measurements
+        # using random sampling.
+        # ----------------------------------------------------
+
+        if experiment_type == "measurement_benchmark":
+            suspicious_random_patterns = (
+                "np.random.uniform(",
+                "random.uniform(",
+                "np.random.normal(",
+                "random.normalvariate(",
+            )
+
+            random_violations = [
+                pattern
+                for pattern in suspicious_random_patterns
+                if pattern in code_lower
+            ]
+
+            if random_violations:
+                raise ValueError(
+                    "Generated measurement_benchmark experiment uses "
+                    "random sampling to produce a measurement: "
+                    + ", ".join(random_violations)
+                    + ". Measurements must come from the actual "
+                    "experiment or be recorded as unavailable."
+                )
+
+    # ========================================================
     # Incomplete Generation Recovery
     # ========================================================
 
@@ -1855,7 +2554,9 @@ Do not return explanations or commentary.
         Leading spaces are preserved because a continuation starts at the
         indentation of the statement it resumes.
         """
-        text = response.lstrip("\n").rstrip()
+        text = response.lstrip(
+            "\n"
+        ).rstrip()
 
         text = re.sub(
             r"^[ \t]*```[A-Za-z0-9_+-]*[ \t]*\r?\n",
@@ -1878,11 +2579,8 @@ Do not return explanations or commentary.
         error: SyntaxError,
     ) -> bool:
         """
-        Report whether a syntax error is the signature of a cut-off response.
-
-        A response that reaches the output-token limit stops inside the
-        construct it was writing, so the parser fails either on an unclosed
-        literal or at the end of the file.
+        Report whether a syntax error is the signature of a cut-off
+        response.
         """
         message = str(
             getattr(
@@ -1936,16 +2634,23 @@ Do not return explanations or commentary.
             cls.MAX_CONTINUATION_REWIND_LINES,
         )
 
-        for dropped in range(1, limit + 1):
+        for dropped in range(
+            1,
+            limit + 1,
+        ):
             candidate = "\n".join(
-                lines[: len(lines) - dropped]
+                lines[
+                    : len(lines) - dropped
+                ]
             )
 
             if not candidate.strip():
                 return None
 
             try:
-                ast.parse(candidate)
+                ast.parse(
+                    candidate
+                )
             except SyntaxError:
                 continue
 
@@ -1974,12 +2679,20 @@ IMPORTANT:
 1. Do NOT repeat any line that is already written.
 2. Do NOT restate imports, classes, or functions that already exist.
 3. Continue with the indentation required where the file stops.
-4. Complete every remaining part of the experiment, including training,
-   evaluation, metrics, visualizations, artifact saving, and the
-   executable entry point.
-5. Save all artifacts inside EXPERIMENT_OUTPUT_DIR.
-6. Return ONLY raw Python source code.
-7. Do NOT return Markdown fences, JSON, explanations, or commentary.
+4. Complete the remaining implementation required by the selected
+   experiment, including evaluation, metric calculation, artifact
+   saving, and the executable entry point when applicable.
+5. Do NOT redesign, simplify, or replace the experiment.
+6. Preserve the selected hypothesis, experiment type, methodology,
+   dataset, target, model/algorithm, and evaluation approach.
+7. Preserve evidence-derived metrics when they are scientifically
+   applicable.
+8. Do not invent paper results or metric values.
+9. If a metric cannot be calculated, record it as unavailable rather
+   than fabricating a value.
+10. Save all required artifacts inside EXPERIMENT_OUTPUT_DIR.
+11. Return ONLY raw Python source code.
+12. Do NOT return Markdown fences, JSON, explanations, or commentary.
 
 ============================================================
 FILE WRITTEN SO FAR
@@ -1999,10 +2712,13 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
         """
         Complete an experiment that stopped at the output-token limit.
 
-        Returns the source unchanged when it already parses. Raises
-        ValueError when the source is invalid for another reason, or when
-        the continuations do not complete it.
+        Returns the source unchanged when it already parses.
+        Raises ValueError when the source is invalid for another reason,
+        or when the continuations do not complete it.
         """
+        generated_code = self._normalise_escaped_python_source(
+            generated_code
+        )
         if not isinstance(
             generated_code,
             str,
@@ -2011,13 +2727,17 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
                 "Generated PyTorch code is required for continuation."
             )
 
-        code = generated_code
+        code = self._normalise_escaped_python_source(
+            generated_code
+        )
 
         for attempt in range(
             self.MAX_CONTINUATION_ATTEMPTS + 1
         ):
             try:
-                ast.parse(code)
+                ast.parse(
+                    code
+                )
                 return code
             except SyntaxError as error:
                 if not self.syntax_error_is_truncation(
@@ -2072,7 +2792,9 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
                 response,
                 str,
             ):
-                response = str(response)
+                response = str(
+                    response
+                )
 
             if response.startswith(
                 "Error:"
@@ -2108,13 +2830,17 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
         """
         Recover a generated experiment that failed validation.
 
-        A response that stopped at the output-token limit is continued from
-        its last complete statement, because regenerating it would stop at
-        the same limit. Anything else is regenerated from the specification.
+        A response that stopped at the output-token limit is continued
+        from its last complete statement.
+
+        Anything else is regenerated from the specification.
         """
         code = (
             generated.get("pytorch_code")
-            if isinstance(generated, dict)
+            if isinstance(
+                generated,
+                dict,
+            )
             else None
         )
 
@@ -2126,17 +2852,27 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
                 completed = self.continue_truncated_code(
                     code
                 )
-            except (ValueError, RuntimeError) as continuation_error:
+            except (
+                ValueError,
+                RuntimeError,
+            ) as continuation_error:
                 logger.warning(
                     "Continuing the incomplete experiment failed: %s",
                     continuation_error,
                 )
             else:
-                recovered = dict(generated)
-                recovered["pytorch_code"] = completed
+                recovered = dict(
+                    generated
+                )
+
+                recovered[
+                    "pytorch_code"
+                ] = completed
 
                 assumptions = list(
-                    recovered.get("assumptions")
+                    recovered.get(
+                        "assumptions"
+                    )
                     or []
                 )
 
@@ -2147,42 +2883,124 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
                         "output-token limit."
                     )
 
-                recovered["assumptions"] = assumptions
+                recovered[
+                    "assumptions"
+                ] = assumptions
 
                 self.validate_generated_response(
                     recovered
                 )
 
+                self.validate_experiment_design_compliance(
+                    specification,
+                    recovered["pytorch_code"],
+                )
+
                 return recovered
 
+        reference_metric_guidance = (
+            self._extract_reference_metric_requirements(
+                specification.get(
+                    "reference_experiment",
+                    {},
+                )
+            )
+        )
+
         code_only_prompt = f"""
-Return only complete, executable Python source code for a PyTorch experiment.
-Do not return JSON, Markdown, explanations, analysis, or commentary. Start
-with a Python import and end with the executable experiment code.
+Return only complete, executable Python source code for the selected
+experiment.
+
+Do not return JSON, Markdown, explanations, analysis, or commentary.
+Start with a Python import and end with the executable experiment code.
+
+The selected hypothesis and experiment specification are authoritative.
+
+Do NOT redesign or replace the selected experiment.
+
+Preserve:
+
+- selected Rank #1 hypothesis
+- research objective
+- experiment type
+- required methodology
+- dataset and target definition when applicable
+- specified model or algorithm
+- evaluation methodology
+- required metrics
+- scientifically compatible evidence-derived metrics
+
+Evidence-derived metric guidance:
+
+{json.dumps(
+    self._to_serializable(
+        reference_metric_guidance
+    ),
+    ensure_ascii=False,
+    indent=2,
+)}
+
+Important:
+
+- Calculate experiment results from the actual experiment.
+- Do not copy paper reference values into experiment results.
+- Do not fabricate unavailable metrics.
+- Record adaptations and limitations when a direct reproduction is
+  impossible.
+
+The generated program must:
+
+1. Be complete and executable Python.
+2. Use PyTorch when required by the selected experiment.
+3. Use DATASET_PATH when a dataset is required.
+4. Use EXPERIMENT_OUTPUT_DIR for all experiment artifacts.
+5. Produce:
+   - metrics.json
+   - experiment_summary.json
+6. Produce training_history.json when training history is applicable.
+7. Produce best_model.pt when a trained model/checkpoint is applicable.
+8. Save relevant visualizations inside EXPERIMENT_OUTPUT_DIR.
+9. Record assumptions, adaptations, and proxy-experiment limitations
+   when applicable.
+10. Never rely only on console output for experiment results.
+11. Remain compatible with ExperimentRunner.
+12. Do not use interactive input.
+13. Do not invent a different experiment merely to make the code easier
+    to generate.
 
 Selected hypothesis:
 {specification["selected_hypothesis"].get("text", "")}
 
-Evidence sources:
+Research goal:
 {json.dumps(
     self._to_serializable(
-        specification["selected_hypothesis"].get(
-            "evidence_sources",
-            [],
+        specification.get(
+            "research_goal",
+            {},
         )
     ),
     ensure_ascii=False,
     indent=2,
 )}
 
+Experiment specification:
+{json.dumps(
+    self._to_serializable(
+        specification
+    ),
+    ensure_ascii=False,
+    indent=2,
+)}
+
 Dataset:
-{specification["dataset"].get("name", "5G-NIDD")}
+{specification["dataset"].get("name", "dataset")}
 """.strip()
 
         code_only_response = _call_llm(
             code_only_prompt,
             temperature=0.0,
             model=self.model,
+            system_prompt=self.CONTINUATION_SYSTEM_PROMPT,
             max_tokens=_output_token_limit(
                 "code_generation",
                 self.DEFAULT_MAX_TOKENS,
@@ -2205,12 +3023,21 @@ Dataset:
         if regenerated is None:
             raise code_error
 
-        regenerated["pytorch_code"] = self.continue_truncated_code(
-            regenerated["pytorch_code"]
+        regenerated[
+            "pytorch_code"
+        ] = self.continue_truncated_code(
+            regenerated[
+                "pytorch_code"
+            ]
         )
 
         self.validate_generated_response(
             regenerated
+        )
+
+        self.validate_experiment_design_compliance(
+            specification,
+            regenerated["pytorch_code"],
         )
 
         return regenerated
@@ -2231,9 +3058,7 @@ Dataset:
         dict
             Structured CodeGenerationAgent result.
         """
-        started_at = __import__(
-            "time"
-        ).perf_counter()
+        started_at = time.perf_counter()
 
         result: Dict[str, Any] = {
             "success": False,
@@ -2253,52 +3078,110 @@ Dataset:
             )
 
             # ------------------------------------------------
-            # Inspect the actual dataset schema dynamically.
+            # Inspect the dataset schema only when the
+            # experiment actually requires the dataset.
             # ------------------------------------------------
 
             try:
+                experiment_design = specification.get(
+                    "experiment_design",
+                    {},
+                )
+
+                if not isinstance(
+                    experiment_design,
+                    dict,
+                ):
+                    experiment_design = {}
+
                 dataset = specification.get(
                     "dataset",
                     {},
                 )
 
-                dataset_name = dataset.get(
-                    "name",
-                    "dataset",
-                )
+                if not isinstance(
+                    dataset,
+                    dict,
+                ):
+                    dataset = {}
 
-                dataset_path = dataset.get(
-                    "path"
-                )
-
-                dataset_manager = DatasetManager(
-                    dataset_name=dataset_name,
-                    dataset_path=dataset_path,
-                )
-
-                resolved_dataset_path = (
-                    dataset_manager.get_latest_dataset()
-                )
-
-                dataset_schema = (
-                    dataset_manager.inspect_schema(
-                        resolved_dataset_path
+                training_required = bool(
+                    experiment_design.get(
+                        "training_required",
+                        False,
                     )
+                )
+
+                dataset_role = str(
+                    dataset.get(
+                        "role",
+                        "",
+                    )
+                ).strip().lower()
+
+                requires_dataset = (
+                    training_required
+                    or dataset_role == "required_experiment_dataset"
                 )
 
                 specification = dict(
                     specification
                 )
 
-                specification[
-                    "dataset_schema"
-                ] = dataset_schema
+                if requires_dataset:
+                    dataset_name = dataset.get(
+                        "name",
+                        "dataset",
+                    )
+
+                    dataset_path = dataset.get(
+                        "path"
+                    )
+
+                    dataset_manager = DatasetManager(
+                        dataset_name=dataset_name,
+                        dataset_path=dataset_path,
+                    )
+
+                    resolved_dataset_path = (
+                        dataset_manager.get_latest_dataset()
+                    )
+
+                    dataset_schema = (
+                        dataset_manager.inspect_schema(
+                            resolved_dataset_path
+                        )
+                    )
+
+                    specification[
+                        "dataset_schema"
+                    ] = dataset_schema
+
+                    logger.info(
+                        "Dataset schema inspected because the experiment "
+                        "requires the dataset."
+                    )
+
+                else:
+                    specification[
+                        "dataset_schema"
+                    ] = {}
+
+                    logger.info(
+                        "Dataset schema inspection skipped because the "
+                        "experiment does not require the dataset."
+                    )
 
             except Exception as error:
                 logger.warning(
                     "Dataset schema inspection failed: %s",
                     error,
                 )
+
+                raise RuntimeError(
+                    "Unable to prepare the dataset information before "
+                    f"code generation: {error}"
+                ) from error
 
             system_prompt = (
                 self.build_system_prompt()
@@ -2341,7 +3224,9 @@ Dataset:
                 response,
                 str,
             ):
-                response = str(response)
+                response = str(
+                    response
+                )
 
             if response.startswith(
                 "Error:"
@@ -2350,25 +3235,46 @@ Dataset:
                     response
                 )
 
+            # ------------------------------------------------
+            # Extract structured response.
+            # ------------------------------------------------
+
             try:
                 generated = self.extract_json(
                     response
                 )
+
             except ValueError as parse_error:
-                generated = self.extract_python_source(response)
+                generated = self.extract_python_source(
+                    response
+                )
+
                 if generated is None:
                     repair_prompt = f"""
-    The previous response was not valid structured JSON. Return exactly one
-    valid JSON object with model_recommendation, experiment_plan, assumptions,
-    dependencies, and pytorch_code. Preserve the complete PyTorch source code.
-    Do not add Markdown, explanations, or extra text.
+The previous response was not valid structured JSON.
 
-    Previous response:
-    {response}
+Return exactly one valid JSON object with:
 
-    Parser error:
-    {parse_error}
-    """.strip()
+- model_recommendation
+- experiment_plan
+- assumptions
+- dependencies
+- pytorch_code
+
+Preserve the complete experiment source code.
+
+The selected Rank #1 hypothesis, experiment specification, and
+scientifically compatible evidence-derived metrics are authoritative.
+
+Do not add Markdown, explanations, or extra text.
+
+Previous response:
+{response}
+
+Parser error:
+{parse_error}
+""".strip()
+
                     repaired_response = _call_llm(
                         repair_prompt,
                         temperature=0.0,
@@ -2380,30 +3286,136 @@ Dataset:
                         ),
                         reasoning="off",
                     )
-                    if not isinstance(repaired_response, str):
-                        repaired_response = str(repaired_response)
-                    if repaired_response.startswith("Error:"):
-                        raise RuntimeError(repaired_response) from parse_error
+
+                    if not isinstance(
+                        repaired_response,
+                        str,
+                    ):
+                        repaired_response = str(
+                            repaired_response
+                        )
+
+                    if repaired_response.startswith(
+                        "Error:"
+                    ):
+                        raise RuntimeError(
+                            repaired_response
+                        ) from parse_error
+
                     try:
-                        generated = self.extract_json(repaired_response)
+                        generated = self.extract_json(
+                            repaired_response
+                        )
+
                     except ValueError as repaired_parse_error:
-                        generated = self.extract_python_source(repaired_response)
+                        generated = self.extract_python_source(
+                            repaired_response
+                        )
+
                         if generated is None:
-                            generated = self.extract_python_source(response)
+                            generated = self.extract_python_source(
+                                response
+                            )
+
                         if generated is None:
+                            reference_metric_guidance = (
+                                self._extract_reference_metric_requirements(
+                                    specification.get(
+                                        "reference_experiment",
+                                        {},
+                                    )
+                                )
+                            )
+
                             code_only_prompt = f"""
-Generate only the complete executable Python source code for this PyTorch
-experiment. Do not return JSON. Do not return explanations. Do not use
-Markdown fences. The source must import torch, load the local dataset from
-DATASET_PATH, train and evaluate the model, and save all artifacts inside
-EXPERIMENT_OUTPUT_DIR.
+Generate only the complete executable Python source code for the
+selected experiment.
+
+Do not return JSON.
+Do not return explanations.
+Do not use Markdown fences.
+Return raw Python source code only.
+
+IMPORTANT:
+
+The selected hypothesis and experiment specification are authoritative.
+
+Do NOT redesign or replace the selected experiment.
+
+Preserve:
+
+- selected hypothesis
+- research objective
+- experiment type
+- required methodology
+- dataset and target definition when applicable
+- specified model or algorithm
+- evaluation methodology
+- required metrics
+- scientifically compatible evidence-derived metrics
+
+Evidence-derived metric guidance:
+
+{json.dumps(
+    self._to_serializable(
+        reference_metric_guidance
+    ),
+    ensure_ascii=False,
+    indent=2,
+)}
+
+The generated experiment must calculate its own metric values.
+
+Do not copy paper reference values into experiment results.
+
+Do not fabricate unavailable metrics.
+
+If a metric cannot be reproduced, record the limitation or use a clearly
+identified scientific proxy where appropriate.
+
+The generated program must:
+
+1. Be complete and executable Python.
+2. Use PyTorch when required by the experiment.
+3. Use DATASET_PATH when a dataset is required.
+4. Use EXPERIMENT_OUTPUT_DIR for all artifacts.
+5. Produce metrics.json.
+6. Produce experiment_summary.json.
+7. Produce training_history.json when training history is applicable.
+8. Produce best_model.pt when a trained model/checkpoint is applicable.
+9. Save relevant visualizations when applicable.
+10. Record assumptions and limitations.
+11. Remain compatible with ExperimentRunner.
+12. Do not use interactive input.
 
 Selected hypothesis:
 {specification["selected_hypothesis"].get("text", "")}
 
+Research goal:
+{json.dumps(
+    self._to_serializable(
+        specification.get(
+            "research_goal",
+            {},
+        )
+    ),
+    ensure_ascii=False,
+    indent=2,
+)}
+
+Experiment specification:
+{json.dumps(
+    self._to_serializable(
+        specification
+    ),
+    ensure_ascii=False,
+    indent=2,
+)}
+
 Dataset:
-{specification["dataset"].get("name", "5G-NIDD")}
+{specification["dataset"].get("name", "dataset")}
 """.strip()
+
                             code_only_response = _call_llm(
                                 code_only_prompt,
                                 temperature=0.0,
@@ -2415,22 +3427,58 @@ Dataset:
                                 ),
                                 reasoning="off",
                             )
-                            if not isinstance(code_only_response, str):
-                                code_only_response = str(code_only_response)
-                            generated = self.extract_python_source(code_only_response)
+
+                            if not isinstance(
+                                code_only_response,
+                                str,
+                            ):
+                                code_only_response = str(
+                                    code_only_response
+                                )
+
+                            generated = (
+                                self.extract_python_source(
+                                    code_only_response
+                                )
+                            )
+
                         if generated is None:
                             raise repaired_parse_error
+
+            # ------------------------------------------------
+            # Validate generated code.
+            # ------------------------------------------------
 
             try:
                 self.validate_generated_response(
                     generated
                 )
+
+                self.validate_experiment_design_compliance(
+                    specification,
+                    generated["pytorch_code"],
+                )
+
             except ValueError as code_error:
                 generated = self.recover_incomplete_generation(
                     specification,
                     generated,
                     code_error,
                 )
+
+            # ------------------------------------------------
+            # Preserve evidence-derived evaluation information
+            # in the returned generation result.
+            # ------------------------------------------------
+
+            reference_metric_guidance = (
+                self._extract_reference_metric_requirements(
+                    specification.get(
+                        "reference_experiment",
+                        {},
+                    )
+                )
+            )
 
             result.update(
                 {
@@ -2450,6 +3498,31 @@ Dataset:
                     "pytorch_code": generated[
                         "pytorch_code"
                     ],
+
+                    # These fields make the scientific provenance
+                    # available to ExperimentRunner and downstream
+                    # comparison/debugging code.
+                    "evaluation_metrics": specification.get(
+                        "evaluation_metrics",
+                        [],
+                    ),
+                    "evidence_metric_guidance": (
+                        reference_metric_guidance
+                    ),
+                    "reference_experiment": (
+                        self._compact_reference_experiment(
+                            specification.get(
+                                "reference_experiment",
+                                {},
+                            )
+                        )
+                    ),
+                    "selected_hypothesis": (
+                        specification.get(
+                            "selected_hypothesis",
+                            {},
+                        )
+                    ),
                 }
             )
 
@@ -2458,20 +3531,21 @@ Dataset:
                 "CodeGenerationAgent failed."
             )
 
-            result["errors"].append(
+            result[
+                "errors"
+            ].append(
                 str(error)
             )
 
         finally:
-            import time
-
-            result["generation_seconds"] = (
+            result[
+                "generation_seconds"
+            ] = (
                 time.perf_counter()
                 - started_at
             )
 
         return result
-
 
     # ========================================================
     # Automatic Experiment Code Repair
@@ -2487,20 +3561,20 @@ Dataset:
         Automatically repair a failed generated experiment using the LLM.
 
         The LLM receives:
-            1. The experiment specification
-            2. The current generated Python source code
-            3. The execution error / traceback
-            4. The previous stdout output
-            5. The previous stderr output
+
+            1. Experiment specification
+            2. Selected Rank #1 hypothesis
+            3. Evidence-derived metric guidance
+            4. Current generated Python source
+            5. Execution error / traceback
+            6. Previous stdout
+            7. Previous stderr
 
         The LLM must return a complete corrected Python experiment.
 
         This method intentionally does not contain hard-coded fixes for
-        individual Python or machine-learning errors. The LLM determines
-        the cause of the failure and modifies the generated experiment
-        accordingly.
+        individual Python or machine-learning errors.
         """
-
         if not isinstance(
             generated_code,
             str,
@@ -2526,7 +3600,7 @@ Dataset:
             )
 
         # ----------------------------------------------------
-        # Keep the repair prompt bounded.
+        # Keep repair prompt bounded.
         # ----------------------------------------------------
 
         bounded_source = generated_code[
@@ -2554,8 +3628,6 @@ Dataset:
             )
         )
 
-        # Keep only the most recent part of the logs because
-        # complete training logs can become extremely large.
         bounded_stdout = stdout[
             -self.MAX_REPAIR_LOG_CHARS:
         ]
@@ -2590,10 +3662,23 @@ Dataset:
         ):
             selected_hypothesis = {}
 
+        reference_metric_guidance = (
+            self._extract_reference_metric_requirements(
+                specification.get(
+                    "reference_experiment",
+                    {},
+                )
+            )
+        )
+
         compact_specification = {
             "dataset": dataset,
             "dataset_schema": specification.get(
                 "dataset_schema",
+                {},
+            ),
+            "research_goal": specification.get(
+                "research_goal",
                 {},
             ),
             "selected_hypothesis": {
@@ -2619,6 +3704,9 @@ Dataset:
                 "evaluation_metrics",
                 [],
             ),
+            "evidence_metric_guidance": (
+                reference_metric_guidance
+            ),
             "reference_experiment": (
                 self._compact_reference_experiment(
                     specification.get(
@@ -2626,6 +3714,10 @@ Dataset:
                         {},
                     )
                 )
+            ),
+            "experiment_design": specification.get(
+                "experiment_design",
+                {},
             ),
         }
 
@@ -2650,17 +3742,17 @@ Dataset:
         # ----------------------------------------------------
 
         repair_prompt = f"""
-You are repairing a failed automatically generated PyTorch
-experiment inside an AI Co-Scientist system.
+You are repairing a failed automatically generated experiment inside
+an AI Co-Scientist system.
 
 The experiment was generated by another LLM and then executed
-automatically by an ExperimentRunner.
+automatically by ExperimentRunner.
 
 The experiment failed during execution.
 
-Your task is to determine the ROOT CAUSE of the failure from
-the traceback, stdout, stderr, experiment specification, and
-current source code.
+Your task is to determine the ROOT CAUSE of the failure from the
+traceback, stdout, stderr, experiment specification, and current
+source code.
 
 Then return a COMPLETE corrected Python source file.
 
@@ -2672,39 +3764,53 @@ IMPORTANT:
 4. Do NOT return explanations or commentary.
 5. Do NOT return a patch or partial code.
 6. Return the COMPLETE replacement for the current source file.
-7. Preserve the original research hypothesis.
+7. Preserve the original Rank #1 research hypothesis.
 8. Preserve the intended model architecture whenever possible.
 9. Preserve the intended experiment objective.
-10. Preserve the required evaluation metrics.
-11. Preserve the reference experiment model, task, methodology,
-    and evaluation requirements whenever they are applicable.
-12. Do not replace reference-specific metrics with generic
+10. Preserve the evaluation metrics required by the selected experiment.
+11. Preserve scientifically compatible evidence-derived metrics.
+12. Do not replace latency, overhead, size, throughput, security,
+    reward, cost, or other experiment-specific metrics with generic
     classification metrics merely to make the experiment run.
-13. Preserve the train/validation/test evaluation design.
-14. Preserve checkpoint generation.
-15. Preserve training-history generation.
-16. Preserve required visualization generation.
-17. Save generated artifacts inside EXPERIMENT_OUTPUT_DIR.
-18. Use DATASET_PATH when it is available.
-19. Do not invent a different dataset.
-20. Do not remove required experiment functionality merely to
-    make the program run.
-21. Fix the actual root cause instead of hiding the error.
-22. Make the smallest scientifically reasonable correction.
-23. If the dataset structure is different from what the original
-    code assumed, adapt the preprocessing to the actual dataset
-    information available in the specification and error.
-24. Handle class-distribution and data-splitting problems
-    robustly when necessary.
-25. Handle missing, categorical, and numerical data appropriately.
-26. Do not introduce data leakage.
-27. The repaired source must be valid executable Python.
-28. Do not use TODO, pass, placeholder code, or incomplete
+13. Do not invent paper results.
+14. Do not copy paper reference values into experiment results.
+15. Do not fabricate unavailable metrics.
+16. If a required metric cannot be computed, clearly record it as
+    unavailable or use an explicitly identified scientific proxy when
+    appropriate.
+17. Preserve the reference experiment only where it is applicable to
+    the selected experiment.
+18. Do not replace the selected experiment with the evidence paper's
+    experiment.
+19. Preserve train/validation/test evaluation design ONLY when it is
+    applicable to the selected experiment type.
+20. Preserve checkpoint generation when model training requires it.
+21. Preserve training-history generation when training history is
+    scientifically applicable.
+22. Preserve required visualization generation when scientifically
+    applicable.
+23. Save generated artifacts inside EXPERIMENT_OUTPUT_DIR.
+24. Use DATASET_PATH when it is available.
+25. Do not invent a different dataset.
+26. Do not remove required experiment functionality merely to make the
+    program run.
+27. Fix the actual root cause instead of hiding the error.
+28. Make the smallest scientifically reasonable correction.
+29. If the dataset structure is different from what the original code
+    assumed, adapt the preprocessing to the actual dataset information
+    available in the specification and error.
+30. Handle class-distribution and data-splitting problems robustly when
+    necessary.
+31. Handle missing, categorical, and numerical data appropriately.
+32. Do not introduce data leakage.
+33. The repaired source must be valid executable Python.
+34. Do not use TODO, pass, placeholder code, or incomplete
     implementations.
 
 The ExperimentRunner will execute the returned source again.
-Therefore, your response must be the complete executable
-experiment, not an explanation of what should be changed.
+
+Therefore, your response must be the complete executable experiment,
+not an explanation of what should be changed.
 
 ============================================================
 EXPERIMENT SPECIFICATION
@@ -2742,9 +3848,10 @@ Analyze the failure carefully.
 
 Identify the actual root cause from the execution result.
 
-Then rewrite the complete experiment so that the root
-cause is corrected while preserving the original
-scientific experiment.
+Then rewrite the complete experiment so that the root cause is corrected
+while preserving the original scientific experiment.
+
+The repaired experiment must calculate its own results.
 
 Return ONLY the complete corrected Python source code.
 """.strip()
@@ -2762,14 +3869,16 @@ Return ONLY the complete corrected Python source code.
                 "code_generation",
                 self.REPAIR_MAX_TOKENS,
             ),
-            reasoning="off",
+            reasoning="medium",
         )
 
         if not isinstance(
             response,
             str,
         ):
-            response = str(response)
+            response = str(
+                response
+            )
 
         if response.startswith(
             "Error:"
@@ -2786,11 +3895,6 @@ Return ONLY the complete corrected Python source code.
             response
         )
 
-        # The preferred repair response is Python source.
-        #
-        # The JSON fallback is retained because the model may
-        # occasionally return the normal CodeGenerationAgent
-        # structured format.
         if repaired is None:
             try:
                 repaired = self.extract_json(
@@ -2803,7 +3907,7 @@ Return ONLY the complete corrected Python source code.
                 ) from error
 
         # ----------------------------------------------------
-        # Complete a repair that stopped at the token limit.
+        # Complete a repair that stopped at token limit.
         # ----------------------------------------------------
 
         repaired_source = repaired.get(
@@ -2814,9 +3918,16 @@ Return ONLY the complete corrected Python source code.
             repaired_source,
             str,
         ) and repaired_source.strip():
-            repaired["pytorch_code"] = self.continue_truncated_code(
-                repaired_source
+
+            repaired_source = (
+                self._normalise_escaped_python_source(
+                    repaired_source
+                )
             )
+
+            repaired[
+                "pytorch_code"
+            ] = repaired_source
 
         # ----------------------------------------------------
         # Validate repaired experiment.
@@ -2824,6 +3935,11 @@ Return ONLY the complete corrected Python source code.
 
         self.validate_generated_response(
             repaired
+        )
+        
+        self.validate_experiment_design_compliance(
+            specification,
+            repaired["pytorch_code"],
         )
 
         repaired_code = repaired.get(
@@ -2842,7 +3958,10 @@ Return ONLY the complete corrected Python source code.
         # Prevent useless repair loops.
         # ----------------------------------------------------
 
-        if repaired_code.strip() == generated_code.strip():
+        if (
+            repaired_code.strip()
+            == generated_code.strip()
+        ):
             raise ValueError(
                 "LLM returned the same code without making "
                 "a repair."
@@ -2874,8 +3993,28 @@ Return ONLY the complete corrected Python source code.
             "pytorch_code": repaired_code,
             "generation_seconds": 0.0,
             "errors": [],
-        }
 
+            # Preserve scientific metric provenance.
+            "evaluation_metrics": specification.get(
+                "evaluation_metrics",
+                [],
+            ),
+            "evidence_metric_guidance": (
+                reference_metric_guidance
+            ),
+            "reference_experiment": (
+                self._compact_reference_experiment(
+                    specification.get(
+                        "reference_experiment",
+                        {},
+                    )
+                )
+            ),
+            "selected_hypothesis": specification.get(
+                "selected_hypothesis",
+                {},
+            ),
+        }
 
     # ========================================================
     # Generate From Components
@@ -2895,8 +4034,12 @@ Return ONLY the complete corrected Python source code.
         Generate experiment code directly from a Hypothesis and
         ResearchGoal.
 
-        If an experiment specification has already been produced
-        by ExperimentOrchestrator, it is used directly.
+        If an experiment specification has already been produced by
+        ExperimentOrchestrator, it is used directly.
+
+        When constructing a fallback specification, this method does NOT
+        impose universal classification metrics. The actual experiment
+        specification should determine the required metrics.
         """
         if experiment_specification is None:
             hypothesis_data = (
@@ -2915,10 +4058,7 @@ Return ONLY the complete corrected Python source code.
                 "dataset": {
                     "name": dataset_name,
                     "path": dataset_path,
-                    "task": (
-                        "5G network intrusion "
-                        "detection classification"
-                    ),
+                    "task": None,
                 },
                 "research_goal": (
                     research_goal_data
@@ -2927,27 +4067,46 @@ Return ONLY the complete corrected Python source code.
                     hypothesis_data
                 ),
                 "scientific_evaluation": {},
+                "experiment_design": {
+                    "input_source": "selected_ai_co_scientist_hypothesis",
+                    "experiment_type": "general_experiment",
+                    "preprocessing_required": False,
+                    "train_validation_test_split": False,
+                    "reproducibility_required": True,
+                    "checkpoint_required": False,
+                    "training_history_required": False,
+                    "training_required": False,
+                },
                 "code_generation_requirements": {
                     "framework": "PyTorch",
                     "language": "Python",
-                    "dataset": "5G-NIDD",
-                    "include_preprocessing": True,
-                    "include_train_validation_test": True,
-                    "include_checkpoint": True,
-                    "include_training_history": True,
+                    "dataset": dataset_name,
+                    "dataset_path": dataset_path,
+                    "experiment_type": "general_experiment",
+                    "include_preprocessing": False,
+                    "include_train_validation_test": False,
+                    "include_checkpoint": False,
+                    "include_training_history": False,
                     "include_reproducibility": True,
                     "include_evaluation": True,
                 },
-                "evaluation_metrics": [
-                    "accuracy",
-                    "precision_weighted",
-                    "recall_weighted",
-                    "f1_weighted",
-                    "confusion_matrix",
-                    "training_seconds",
-                    "evaluation_seconds",
-                    "total_execution_seconds",
-                ],
+
+                # IMPORTANT:
+                #
+                # Do not universally force accuracy/precision/recall/F1.
+                # If this fallback path is specifically being used for a
+                # classification experiment, the orchestrator should
+                # provide the classification metrics explicitly.
+                "evaluation_metrics": [],
+
+                "expected_artifacts": {
+                    "metrics": "metrics.json",
+                    "summary": "experiment_summary.json",
+                },
+
+                # No evidence is available in this fallback path unless
+                # the caller supplies a complete experiment specification.
+                "reference_experiment": {},
             }
 
         return self.generate(
@@ -2964,7 +4123,7 @@ Return ONLY the complete corrected Python source code.
         output_path: Optional[str | Path] = None,
     ) -> Optional[Path]:
         """
-        Save generated PyTorch code to a .py file.
+        Save generated Python code to a .py file.
 
         Returns None when generation failed.
         """
