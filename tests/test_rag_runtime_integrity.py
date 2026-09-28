@@ -207,8 +207,9 @@ def test_corrective_full_text_path_reaches_complete_coverage_with_failover(tmp_p
         patch.object(
             agent,
             "_grade_candidate_evidence",
+            # The planned queries (first retrieval, empty) run before grading,
+            # so the first grade already leads to the corrective round.
             side_effect=[
-                (["arXiv:scope"], None, incomplete, None),
                 (["arXiv:scope"], None, incomplete, None),
                 (["arXiv:scope", "arXiv:spike-working"], None, complete, None),
             ],

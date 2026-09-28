@@ -282,6 +282,69 @@ def test_planner_repair_prompt_names_why_each_hypothesis_was_rejected():
     assert "primary_hypothesis (goal_quote is not copied from the research goal)" in llm.call_args_list[1].args[0]
 
 
+_COMPOSITE_GOAL = (
+    "Develop an AI-driven self-optimizing 5G network architecture capable of dynamically adjusting "
+    "radio resources, network slices, handover policies, and energy-saving mechanisms according to "
+    "changing network conditions."
+)
+
+
+def _query_payload_with_requirements(requirements: list[dict[str, str]]) -> str:
+    payload = json.loads(_query_payload(_COMPOSITE_GOAL, with_hypothesis_ids=True))
+    payload["explicit_requirements"] = requirements
+    for query in payload["queries"]:
+        query["evidence_requirement_id"] = requirements[0]["id"]
+    return json.dumps(payload)
+
+
+def _composite_rewrite_responses(repair_requirements: list[dict[str, str]]) -> list[str]:
+    # Captured shape: every per-domain requirement quoted the same 19-word
+    # clause, so all of them were dropped while the plan still looked valid.
+    clause = (
+        "capable of dynamically adjusting radio resources, network slices, handover policies, "
+        "and energy-saving mechanisms according to changing network conditions."
+    )
+    first = _query_payload_with_requirements(
+        [
+            {"id": "architecture", "goal_quote": "AI-driven self-optimizing 5G network architecture"},
+            {"id": "handover", "goal_quote": clause, "evidence_need": "Handover policy optimization"},
+            {"id": "energy", "goal_quote": clause, "evidence_need": "Base-station energy saving"},
+        ]
+    )
+    return [
+        _planner_payload("hypothesis_testing", _COMPOSITE_GOAL, hypotheses=_hypotheses(_COMPOSITE_GOAL)),
+        first,
+        _query_payload_with_requirements(repair_requirements),
+    ]
+
+
+def test_query_plan_that_dropped_requirements_asks_once_for_atomic_quotes():
+    responses = _composite_rewrite_responses(
+        [
+            {"id": "architecture", "goal_quote": "AI-driven self-optimizing 5G network architecture"},
+            {"id": "handover", "goal_quote": "handover policies", "evidence_need": "Handover policy optimization"},
+            {"id": "energy", "goal_quote": "energy-saving mechanisms", "evidence_need": "Base-station energy saving"},
+        ]
+    )
+    with patch("app.agents.call_llm", side_effect=responses) as llm:
+        plan, error = call_llm_for_search_queries(_COMPOSITE_GOAL, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None and plan is not None
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["architecture", "handover", "energy"]
+    assert llm.call_count == 3
+    assert "2 explicit requirement(s) were dropped" in llm.call_args_list[2].args[0]
+
+
+def test_query_plan_repair_that_comes_back_worse_keeps_the_first_plan():
+    # The repair invents its only quote, so it has no valid requirement at all.
+    responses = _composite_rewrite_responses([{"id": "handover", "goal_quote": "improves handover success"}])
+    with patch("app.agents.call_llm", side_effect=responses):
+        plan, error = call_llm_for_search_queries(_COMPOSITE_GOAL, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None and plan is not None
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["architecture"]
+
+
 def test_exploratory_plan_without_missing_evidence_uses_its_listed_gaps():
     goal = "Assess target evidence"
     payload = json.loads(_planner_payload("exploratory", goal, hypotheses=_hypotheses(goal)))

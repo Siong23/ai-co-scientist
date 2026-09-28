@@ -1424,6 +1424,47 @@ def test_query_rewriting_failure_stops_when_original_retrieval_is_empty():
     mock_retrieve.assert_not_called()
 
 
+def test_llm_planned_queries_run_even_when_the_goal_search_suffices():
+    # A run whose goal-sentence search passed coverage never executed its five
+    # rewritten and hypothesis-guided queries, so generation saw two papers.
+    agent = GenerationAgent(
+        minimum_relevant_sources=1,
+        debate_rounds=0,
+        audit_enabled=False,
+        agentic_research_enabled=False,
+    )
+    plan = SearchQueryPlan(
+        queries=(SearchQuery("handover policy reinforcement learning", evidence_requirement_id="scope"),),
+        required_terms=(),
+        explicit_requirements=(EvidenceAspect("scope", "5G handover policies"),),
+    )
+    original = Document(page_content="Abstract", metadata={"source_id": "arXiv:goal"})
+    planned = Document(page_content="Abstract", metadata={"source_id": "arXiv:planned"})
+    covered = EvidenceCoverage(
+        aspect_source_ids={"scope": ("arXiv:goal",)},
+        missing_aspect_ids=(),
+        gap_queries=(),
+        reason="Covered",
+    )
+    graded_sets = []
+
+    def grade(_goal, _plan, _context, source_ids, *_args, **_kwargs):
+        graded_sets.append(set(source_ids))
+        return (["arXiv:goal"], None, covered, None)
+
+    with (
+        patch.object(agent, "_plan_and_retrieve_initial", return_value=(plan, None, [original])),
+        patch.object(agent, "_retrieve_scientific_sources", return_value=[planned]) as mock_planned,
+        patch.object(agent, "_prepare_candidate_documents", side_effect=lambda documents, *a, **k: documents),
+        patch.object(agent, "_grade_candidate_evidence", side_effect=grade),
+        patch("app.agents.call_llm", return_value="Error: stop after the evidence gate"),
+    ):
+        agent.generate_new_hypotheses(ResearchGoal("5G handover policies", num_hypotheses=1), ContextMemory())
+
+    mock_planned.assert_called_once()
+    assert graded_sets[0] == {"arXiv:goal", "arXiv:planned"}
+
+
 def test_query_rewriting_failure_uses_original_candidates():
     agent = GenerationAgent(
         minimum_relevant_sources=1,

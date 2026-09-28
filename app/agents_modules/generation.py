@@ -1889,6 +1889,7 @@ Your refined contribution:
         # Planning and original-goal retrieval are independent. Overlap their
         # latency while retaining the original goal as the retrieval anchor.
         query_plan, rewrite_error, candidate_documents = self._plan_and_retrieve_initial(research_goal)
+        planned_by_llm = not rewrite_error and query_plan is not None
         if execution_cancelled():
             return [], ["Cycle cancelled during search planning."]
 
@@ -1967,30 +1968,40 @@ Your refined contribution:
 
         expanded_retrieval_attempted = False
 
-        # If original goal returned no documents, execute the planned search queries.
+        # Always execute an LLM-planned query set once. Running it only when the
+        # original-goal search looked insufficient let a lenient coverage grade
+        # skip every rewritten and hypothesis-guided query, leaving generation
+        # with whatever the goal sentence alone found. The minimal fallback
+        # plan only rephrases the goal sentence, so it still runs on demand.
         # The planner already routes each query to academic or web sources, so web
         # search is left to the queries that asked for it; corrective retrieval
         # below still forces it when the routed evidence falls short.
-        if not candidate_documents:
+        if query_plan.queries and (planned_by_llm or not candidate_documents):
             try:
-                candidate_documents = self._retrieve_scientific_sources(
+                expanded_documents = self._retrieve_scientific_sources(
                     research_goal,
                     query_plan,
                 )
-                expanded_retrieval_attempted = True
             except Exception as exc:
                 logger.error(
                     "Expanded RAG retrieval failed: %s",
                     exc,
                     exc_info=True,
                 )
-                error = f"Expanded RAG retrieval failed: {exc}"
-                context.last_generation_diagnostics["evidence_retrieval"] = {
-                    "status": "failed",
-                    "source_count": 0,
-                    "detail": redact_secrets(error),
-                }
-                return [], [error]
+                if not candidate_documents:
+                    error = f"Expanded RAG retrieval failed: {exc}"
+                    context.last_generation_diagnostics["evidence_retrieval"] = {
+                        "status": "failed",
+                        "source_count": 0,
+                        "detail": redact_secrets(error),
+                    }
+                    return [], [error]
+            else:
+                candidate_documents = self._merge_retrieved_documents(
+                    candidate_documents,
+                    expanded_documents,
+                )
+                expanded_retrieval_attempted = True
 
         retrieved_documents = []
         coverage = None

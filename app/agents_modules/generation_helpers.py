@@ -728,7 +728,10 @@ def call_llm_for_search_queries(
             missing_evidence=missing_evidence,
         )
 
+    last_repairable_quotes: list[str] = []
+
     def parse_response(response: str, allow_goal_scope_requirement: bool = False) -> SearchQueryPlan:
+        last_repairable_quotes.clear()
         payload = parse_json_object(response)
         queries = payload.get("queries")
         required_terms = payload.get("required_terms")
@@ -773,6 +776,11 @@ def call_llm_for_search_queries(
                 or (normalized_evidence_need and normalized_evidence_need in seen_evidence_needs)
             ):
                 rejected_quotes.append(goal_quote)
+                if goal_quote_is_faithful(goal_quote, research_goal):
+                    # Real goal content that failed only on form (too long,
+                    # duplicated); a repair can atomize it. An invented quote
+                    # is dropped for good.
+                    last_repairable_quotes.append(goal_quote)
                 if aspect_id:
                     rejected_requirement_ids.add(aspect_id)
                 continue
@@ -1236,7 +1244,22 @@ STRUCTURED RESEARCH PLAN
         base_prompt = planner_prompt
         rewriter_system_prompt = query_rewriter_prompt
 
+    def correction_for(reason: object, previous_response: str) -> str:
+        return (
+            "\n\nYour previous response was invalid because: "
+            f"{reason}. Return a corrected JSON object. Atomize long or "
+            "composite goal quotes into separate verbatim spans of at "
+            "most 16 words; do not add anything absent from the goal."
+            "\nCopy goal_quote only from this ORIGINAL USER REQUEST, not the research plan: "
+            + research_goal
+            + "\nPREVIOUS INVALID RESPONSE (repair its fields, not the user's goal):\n"
+            + previous_response
+        )
+
     correction = ""
+    # A first plan that is valid but dropped requirements; kept in case the
+    # repair comes back worse.
+    partial_plan: SearchQueryPlan | None = None
     for attempt in range(2):
         if attempt == 0 and legacy_query_response is not None:
             response = legacy_query_response
@@ -1250,14 +1273,18 @@ STRUCTURED RESEARCH PLAN
                 reasoning="off",
             )
         if response.startswith("Error:"):
+            if partial_plan is not None:
+                return partial_plan, None
             return None, f"Query rewriting failed: {response}"
         try:
-            query_plan = parse_response(response, allow_goal_scope_requirement=attempt == 1)
+            query_plan = parse_response(
+                response,
+                allow_goal_scope_requirement=attempt == 1 and partial_plan is None,
+            )
             if query_fidelity_validator is not None:
                 fidelity_valid, fidelity_reason = query_fidelity_validator(query_plan)
                 if not fidelity_valid:
                     raise ValueError("Query fidelity validation failed: " + fidelity_reason)
-            return query_plan, None
         except (json.JSONDecodeError, AttributeError, ValueError) as exc:
             logger.warning(
                 "Query plan attempt %d was invalid: %s",
@@ -1265,22 +1292,41 @@ STRUCTURED RESEARCH PLAN
                 exc,
             )
             if attempt == 1:
+                if partial_plan is not None:
+                    logger.warning(
+                        "Query plan repair was invalid; keeping the first plan's %d requirement(s).",
+                        len(partial_plan.explicit_requirements),
+                    )
+                    return partial_plan, None
                 logger.error(
                     "Could not parse query-rewriting response: %s",
                     response,
                     exc_info=True,
                 )
                 return None, f"Query rewriting failed: {exc}"
-            correction = (
-                "\n\nYour previous response was invalid because: "
-                f"{exc}. Return a corrected JSON object. Atomize long or "
-                "composite goal quotes into separate verbatim spans of at "
-                "most 16 words; do not add anything absent from the goal."
-                "\nCopy goal_quote only from this ORIGINAL USER REQUEST, not the research plan: "
-                + research_goal
-                + "\nPREVIOUS INVALID RESPONSE (repair its fields, not the user's goal):\n"
-                + response
+            correction = correction_for(exc, response)
+            continue
+
+        if attempt == 0 and last_repairable_quotes:
+            # Dropped goal content is no longer checked by the evidence gate:
+            # four per-domain requirements that all quoted one 19-word clause
+            # left handover evidence ungated. Ask once for atomized quotes
+            # before accepting the reduced plan.
+            partial_plan = query_plan
+            correction = correction_for(
+                f"{len(last_repairable_quotes)} explicit requirement(s) were dropped for oversized or "
+                "duplicate goal quotes: " + json.dumps(last_repairable_quotes, ensure_ascii=False),
+                response,
             )
+            continue
+        if partial_plan is not None and len(query_plan.explicit_requirements) < len(partial_plan.explicit_requirements):
+            logger.warning(
+                "Query plan repair kept fewer requirements (%d) than the first plan (%d); keeping the first plan.",
+                len(query_plan.explicit_requirements),
+                len(partial_plan.explicit_requirements),
+            )
+            return partial_plan, None
+        return query_plan, None
 
     return None, "Query rewriting failed."
 
