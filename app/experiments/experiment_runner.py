@@ -80,7 +80,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -105,7 +105,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-import inspect
+# import inspect
 
 # ============================================================================
 # Constants
@@ -215,7 +215,7 @@ class ExperimentRunner:
     @staticmethod
     def _timestamp() -> str:
         """Return a UTC timestamp suitable for metadata."""
-        return datetime.utcnow().isoformat() + "Z"
+        return datetime.now(timezone.utc).isoformat()
 
     @staticmethod
     def _read_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -314,7 +314,7 @@ class ExperimentRunner:
         """
         self.output_directory.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
 
         if experiment_id:
             safe_id = self._safe_filename(experiment_id)
@@ -592,12 +592,28 @@ class ExperimentRunner:
                 ),
             )
 
+        package_mapping = {
+            "sklearn": "scikit-learn",
+            "cv2": "opencv-python",
+            "PIL": "Pillow",
+            "yaml": "PyYAML",
+            "bs4": "beautifulsoup4",
+            "dotenv": "python-dotenv",
+            "dateutil": "python-dateutil",
+            "imblearn": "imbalanced-learn",
+        }
+
+        pypi_package_name = package_mapping.get(
+            package_name,
+            package_name,
+        )
+
         command = [
             self.python_executable,
             "-m",
             "pip",
             "install",
-            package_name,
+            pypi_package_name,
         ]
 
         logger.info(
@@ -620,6 +636,7 @@ class ExperimentRunner:
             return {
                 "success": process.returncode == 0,
                 "package": package_name,
+                "pypi_package": pypi_package_name,
                 "return_code": process.returncode,
                 "stdout": process.stdout,
                 "stderr": process.stderr,
@@ -882,10 +899,10 @@ class ExperimentRunner:
     # Execution
     # ========================================================================
 
-    print(
-        "execution_remaining_seconds signature:",
-        inspect.signature(execution_remaining_seconds),
-    )
+    # print(
+    #     "execution_remaining_seconds signature:",
+    #     inspect.signature(execution_remaining_seconds),
+    # )
 
     def execute(
         self,
@@ -1078,7 +1095,43 @@ class ExperimentRunner:
 
                 repair_duration = time.monotonic() - repair_started
 
-                if repaired_code:
+                # Support both the current repair API:
+                #
+                #     repaired_code -> str | None
+                #
+                # and older/test-compatible APIs:
+                #
+                #     (success, repaired_code, error_message)
+                #
+                # This prevents a failure tuple from being interpreted as
+                # successfully repaired code merely because the tuple is truthy.
+                repair_error = None
+
+                if isinstance(repaired_code, tuple):
+                    repair_success = bool(
+                        repaired_code[0]
+                        if len(repaired_code) > 0
+                        else False
+                    )
+
+                    repaired_code_text = (
+                        repaired_code[1]
+                        if len(repaired_code) > 1
+                        else ""
+                    )
+
+                    repair_error = (
+                        repaired_code[2]
+                        if len(repaired_code) > 2
+                        else None
+                    )
+
+                    if not repair_success:
+                        repaired_code_text = ""
+
+                    repaired_code = repaired_code_text
+
+                if repaired_code and isinstance(repaired_code, str):
                     repaired_path = (
                         run_dir / "generated_experiment_repaired.py"
                     )
@@ -1096,13 +1149,16 @@ class ExperimentRunner:
 
                     continue
 
-                repairs.append(
-                    {
-                        "attempt": attempt_number,
-                        "status": "repair_unavailable",
-                        "duration_seconds": repair_duration,
-                    }
-                )
+                repair_record = {
+                    "attempt": attempt_number,
+                    "status": "repair_unavailable",
+                    "duration_seconds": repair_duration,
+                }
+
+                if repair_error:
+                    repair_record["error"] = str(repair_error)
+
+                repairs.append(repair_record)
 
             except subprocess.TimeoutExpired as exc:
                 attempt_duration = time.monotonic() - attempt_started
@@ -1138,9 +1194,49 @@ class ExperimentRunner:
 
                 attempts.append(attempt_record)
 
-                # A subprocess timeout normally means the global budget is
-                # effectively exhausted, so do not blindly continue retrying.
-                break
+                stdout_path = run_dir / "stdout.txt"
+                stderr_path = run_dir / "stderr.txt"
+
+                stdout_path.write_text(
+                    stdout,
+                    encoding="utf-8",
+                )
+
+                stderr_path.write_text(
+                    stderr,
+                    encoding="utf-8",
+                )
+
+                total_execution_seconds = time.monotonic() - started_at
+
+                result = {
+                    "success": False,
+                    "status": "timeout",
+                    "return_code": None,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                    "timeout_seconds": self.timeout_seconds,
+                    "error": (
+                        f"Experiment execution timeout after "
+                        f"{self.timeout_seconds} seconds."
+                    ),
+                    "execution_seconds": total_execution_seconds,
+                    "total_execution_seconds": total_execution_seconds,
+                    "attempts": attempts,
+                    "installations": installations,
+                    "repairs": repairs,
+                    "code_path": str(current_code_path),
+                    "cancelled": False,
+                }
+
+                self._write_json(
+                    run_dir / "execution_result.json",
+                    result,
+                )
+
+                return result
 
             except Exception as exc:
                 attempt_duration = time.monotonic() - attempt_started
@@ -1306,8 +1402,9 @@ class ExperimentRunner:
         """
         Collect experiment outputs.
 
-        Scientific metrics are preserved as-is. Runner-generated execution
-        timings are added separately.
+        Scientific metrics are preserved from metrics.json without requiring
+        specific metric names. Optional experiment artifacts are collected
+        separately.
         """
         execution_result = execution_result or {}
 
@@ -1327,30 +1424,28 @@ class ExperimentRunner:
             else None
         )
 
-        # Do not overwrite scientific metrics with runner metrics. Add
-        # standardized execution timing fields only when they do not already
-        # exist.
-        if metrics is None:
-            metrics = {}
-
-        if not isinstance(metrics, dict):
-            metrics = {}
-
-        execution_seconds = execution_result.get(
-            "execution_seconds"
-        )
-
-        if self._is_finite_number(execution_seconds):
-            metrics.setdefault(
-                "total_execution_seconds",
-                execution_seconds,
+        # Preserve the absence of metrics.json.
+        # Do not create a synthetic scientific metric from runner execution time.
+        # Otherwise an experiment that produced no metrics.json could incorrectly
+        # pass validation just because the runner itself measured execution time.
+        if isinstance(metrics, dict):
+            execution_seconds = execution_result.get(
+                "execution_seconds"
             )
+
+            if self._is_finite_number(execution_seconds):
+                metrics.setdefault(
+                    "total_execution_seconds",
+                    execution_seconds,
+                )
 
         outputs = {
             "metrics": metrics,
             "training_history": training_history,
             "summary": summary,
+            "experiment_summary": summary,
             "checkpoint": str(checkpoint) if checkpoint else None,
+            "checkpoint_path": str(checkpoint) if checkpoint else None,
             "visualizations": visualizations,
         }
 
@@ -1466,7 +1561,9 @@ class ExperimentRunner:
                     "Checkpoint path was reported but the file does not exist."
                 )
 
-        # Visualizations are optional.
+        # Visualizations are optional and do not invalidate the experiment.
+        # When visualization output is collected, report missing standard
+        # visualization artifacts as warnings for diagnostics.
         visualizations = outputs.get(
             "visualizations",
             [],
@@ -1479,6 +1576,24 @@ class ExperimentRunner:
             warnings.append(
                 "Visualization output must be a list."
             )
+            visualizations = []
+
+        else:
+            visualization_stems = {
+                Path(str(path)).stem
+                for path in visualizations
+            }
+
+            missing_visualizations = (
+                REQUIRED_VISUALIZATION_STEMS
+                - visualization_stems
+            )
+
+            if missing_visualizations:
+                warnings.append(
+                    "Missing required visualizations: "
+                    + ", ".join(sorted(missing_visualizations))
+                )
 
         # Do not make warnings automatically invalidate a scientifically
         # usable experiment. Only execution failure or absence of usable
@@ -1833,53 +1948,94 @@ class ExperimentRunner:
             and validation.get("valid")
         )
 
+        if success:
+            status = "success"
+        elif execution_result.get("status") == "cancelled":
+            status = "cancelled"
+        elif execution_result.get("status") == "timeout":
+            status = "timeout"
+        elif execution_result.get("success") and not validation.get("valid"):
+            status = "invalid_outputs"
+        else:
+            status = execution_result.get("status", "failed")
+
         # --------------------------------------------------------------
         # Final result
         # --------------------------------------------------------------
 
         result = {
             "success": success,
-            "status": (
-                "success"
-                if success
-                else (
-                    execution_result.get(
-                        "status",
-                        "failed",
-                    )
-                )
-            ),
+            "status": status,
+
+            # Standardized paths
+            "run_directory": str(run_dir),
+            "generated_code_path": str(code_path),
+            "dataset_path": dataset_path,
+
+            # Backward-compatible names
             "run_dir": str(run_dir),
+            "code_path": str(code_path),
+
             "metadata_path": (
                 str(metadata_path)
                 if metadata_path
                 else None
             ),
-            "code_path": str(code_path),
+
             "execution": execution_result,
             "outputs": outputs,
+
+            # Standardized validation name
+            "output_validation": validation,
+
+            # Backward-compatible name
             "validation": validation,
 
-            # Scientific context is returned explicitly so the next pipeline
-            # stage does not have to reconstruct it from files.
+            "total_execution_seconds": execution_result.get(
+                "total_execution_seconds",
+                execution_result.get("execution_seconds", 0.0),
+            ),
+
+            "errors": [],
+
             "selected_hypothesis": hypothesis,
             "hypothesis": hypothesis,
             "evidence_sources": evidence_sources,
+
             "evaluation_metrics": outputs.get(
                 "evaluation_metrics",
                 evaluation_metrics or [],
             ),
+
             "metric_definitions": outputs.get(
                 "metric_definitions",
                 metric_definitions or {},
             ),
 
-            # Convenience access to the actual produced metrics.
             "metrics": outputs.get(
                 "metrics",
                 {},
             ),
         }
+
+        errors = []
+
+        if not execution_result.get("success"):
+            error_message = execution_result.get("error")
+
+            if error_message:
+                errors.append(str(error_message))
+
+            stderr = execution_result.get("stderr")
+            if stderr:
+                errors.append(str(stderr))
+
+        if not validation.get("valid"):
+            errors.extend(
+                validation.get("warnings", [])
+            )
+
+        result["errors"] = errors
 
         # --------------------------------------------------------------
         # Save complete runner result
@@ -1887,14 +2043,13 @@ class ExperimentRunner:
 
         result_path = run_dir / "runner_result.json"
 
+        result["result_path"] = str(result_path)
+
         try:
             self._write_json(
                 result_path,
                 result,
             )
-
-            result["result_path"] = str(result_path)
-
         except Exception as exc:
             logger.warning(
                 "Could not save runner_result.json: %s",

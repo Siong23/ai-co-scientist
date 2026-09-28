@@ -119,6 +119,13 @@ class ExperimentComparator:
         ],
     }
 
+    NON_SCIENTIFIC_TIMING_METRICS = {
+        "training_seconds",
+        "evaluation_seconds",
+        "total_execution_seconds",
+        "execution_seconds",
+    }
+
     def __init__(
         self,
         llm_model: Optional[str] = None,
@@ -227,6 +234,7 @@ class ExperimentComparator:
         value: Any,
         unit: Optional[str] = None,
         value_type: Optional[str] = None,
+        metric_name: Optional[str] = None,
     ) -> Optional[float]:
         """
         Normalize a numerical metric without assuming that every
@@ -277,12 +285,47 @@ class ExperimentComparator:
             "proportion",
         }
 
-        if (
+        # if (
+        #     normalized_unit in percentage_units
+        #     or normalized_value_type in percentage_types
+        # ):
+        #     if number > 1.0 and number <= 100.0:
+        #         return number / 100.0
+
+        normalized_metric_name = (
+            ExperimentComparator._normalise_metric_name(
+                metric_name
+            )
+        )
+
+        percentage_metric_names = {
+            "accuracy",
+            "acc",
+            "precision",
+            "precision_weighted",
+            "weighted_precision",
+            "weighted precision",
+            "recall",
+            "recall_weighted",
+            "weighted_recall",
+            "weighted recall",
+            "f1",
+            "f1_score",
+            "f1_weighted",
+            "weighted_f1",
+            "weighted f1",
+            "f1-score",
+            "f1 score",
+        }
+
+        is_percentage = (
             normalized_unit in percentage_units
             or normalized_value_type in percentage_types
-        ):
-            if number > 1.0 and number <= 100.0:
-                return number / 100.0
+            or normalized_metric_name in percentage_metric_names
+        )
+
+        if is_percentage and number > 1.0 and number <= 100.0:
+            return number / 100.0
 
         return number
 
@@ -389,6 +432,26 @@ class ExperimentComparator:
         raise ValueError(
             "The LLM response did not contain a valid JSON object."
         )
+    
+    @staticmethod
+    def _clamp_metric(
+        value: Any,
+    ) -> Optional[float]:
+        """
+        Convert a metric to a finite value and clamp percentage-style
+        proportions to the valid [0, 1] range.
+        """
+
+        number = ExperimentComparator._safe_float(value)
+
+        if number is None:
+            return None
+
+        # Convert percentage-style values such as 95.2 -> 0.952
+        if 1.0 < number <= 100.0:
+            number /= 100.0
+
+        return max(0.0, min(1.0, number))
 
     # ============================================================
     # Evidence Handling
@@ -1150,6 +1213,7 @@ Do not calculate, estimate, infer, or fabricate missing values.
                             value_type=metric_definition.get(
                                 "value_type"
                             ),
+                            metric_name=raw_name,
                         )
                     )
 
@@ -1499,6 +1563,7 @@ Do not calculate, estimate, infer, or fabricate missing values.
                         value_type=definition.get(
                             "value_type"
                         ),
+                        metric_name=metric_name,
                     )
                 )
 
@@ -1930,6 +1995,7 @@ Do not calculate, estimate, infer, or fabricate missing values.
                         value_type=definition.get(
                             "value_type"
                         ),
+                        metric_name=raw_name,
                     )
                 )
 
@@ -2147,7 +2213,7 @@ Do not calculate, estimate, infer, or fabricate missing values.
                 )
             )
 
-            if not normalized_name:
+            if normalized_name in self.NON_SCIENTIFIC_TIMING_METRICS:
                 continue
 
             definition = metric_definitions.get(
@@ -2173,6 +2239,7 @@ Do not calculate, estimate, infer, or fabricate missing values.
                     value_type=definition.get(
                         "value_type"
                     ),
+                    metric_name=raw_name,
                 )
             )
 
@@ -2212,11 +2279,16 @@ Do not calculate, estimate, infer, or fabricate missing values.
             "metrics_path": outputs.get(
                 "metrics_path"
             ),
-            "experiment_summary": outputs.get(
-                "experiment_summary"
+            "experiment_summary": (
+                outputs.get("experiment_summary")
+                or outputs.get("summary")
             ),
             "training_history": outputs.get(
                 "training_history"
+            ),
+            "checkpoint": (
+                outputs.get("checkpoint")
+                or outputs.get("checkpoint_path")
             ),
         }
 
@@ -2743,6 +2815,61 @@ Do not calculate, estimate, infer, or fabricate missing values.
                     / paper_value
                 )
 
+            difference_percentage_points = None
+
+            definition = (
+                paper_result.get(
+                    "metric_definitions",
+                    {},
+                ).get(
+                    metric_name,
+                    {},
+                )
+            )
+
+            if not isinstance(definition, dict):
+                definition = {}
+
+            unit = str(
+                definition.get("unit", "")
+                or ""
+            ).strip().lower()
+
+            value_type = str(
+                definition.get("value_type", "")
+                or ""
+            ).strip().lower()
+
+            is_percentage = (
+                unit in {
+                    "%",
+                    "percent",
+                    "percentage",
+                    "percentage_point",
+                    "percentage_points",
+                }
+                or value_type in {
+                    "percentage",
+                    "percent",
+                    "proportion",
+                }
+                or metric_name in {
+                    "accuracy",
+                    "precision",
+                    "precision_weighted",
+                    "recall",
+                    "recall_weighted",
+                    "f1",
+                    "f1_score",
+                    "f1_weighted",
+                }
+            )
+
+            if is_percentage:
+                difference_percentage_points = (
+                    difference * 100.0
+                )
+
             comparisons[
                 metric_name
             ] = {
@@ -2766,6 +2893,7 @@ Do not calculate, estimate, infer, or fabricate missing values.
                 "same_as_paper": (
                     abs(difference) < 1e-9
                 ),
+                "difference_percentage_points": difference_percentage_points,
             }
 
         if not comparisons:
@@ -3476,26 +3604,85 @@ Do not invent missing experimental details.
                 else ""
             )
 
-            if paper_value is not None:
+            is_percentage = (
+                metric_name in {
+                    "accuracy",
+                    "precision",
+                    "precision_weighted",
+                    "recall",
+                    "recall_weighted",
+                    "f1",
+                    "f1_score",
+                    "f1_weighted",
+                }
+                or str(
+                    definition.get("unit", "")
+                    or ""
+                ).lower() in {
+                    "%",
+                    "percent",
+                    "percentage",
+                    "percentage_point",
+                    "percentage_points",
+                }
+                or str(
+                    definition.get("value_type", "")
+                    or ""
+                ).lower() in {
+                    "percentage",
+                    "percent",
+                    "proportion",
+                }
+            )
+
+            if is_percentage:
+                paper_text = (
+                    f"{paper_value * 100:.2f}%"
+                    if paper_value is not None
+                    else "N/A"
+                )
+
+                experiment_text = (
+                    f"{experiment_value * 100:.2f}%"
+                    if experiment_value is not None
+                    else "N/A"
+                )
+
+                difference_percentage_points = values.get(
+                    "difference_percentage_points"
+                )
+
+                if difference_percentage_points is not None:
+                    difference_text = (
+                        f"{difference_percentage_points:.2f} pp"
+                    )
+                elif difference is not None:
+                    difference_text = (
+                        f"{difference * 100:.2f} pp"
+                    )
+                else:
+                    difference_text = "N/A"
+
+                unit_text = ""
+
+            else:
                 paper_text = (
                     f"{paper_value:.4f}"
+                    if paper_value is not None
+                    else "N/A"
                 )
-            else:
-                paper_text = "N/A"
 
-            if experiment_value is not None:
                 experiment_text = (
                     f"{experiment_value:.4f}"
+                    if experiment_value is not None
+                    else "N/A"
                 )
-            else:
-                experiment_text = "N/A"
 
-            if difference is not None:
                 difference_text = (
                     f"{difference:+.4f}"
+                    if difference is not None
+                    else "N/A"
                 )
-            else:
-                difference_text = "N/A"
 
             if relative_difference is not None:
                 relative_text = (
