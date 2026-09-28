@@ -181,13 +181,15 @@ def format_research_trace_html(
             '<li class="trace-empty">The agent workflow will appear here after the cycle starts.</li>'
         )
 
+    # source_count covers every de-duplicated search candidate; only the
+    # listed sources reached the evidence used for generation.
+    source_label = f"Sources {source_count}, used {len(sources)}"
     source_trigger = ""
     if source_count:
-        noun = "source" if source_count == 1 else "sources"
         source_trigger = (
             '<label class="source-trigger" for="research-activity-drawer-toggle" role="button" tabindex="0">'
             '<span class="source-globe">◎</span>'
-            f"Searched {source_count} {noun}"
+            f"{source_label}"
             '<span class="source-arrow">›</span>'
             "</label>"
         )
@@ -284,11 +286,11 @@ def format_research_trace_html(
       <div class="drawer-body">
         <h3>Thinking</h3>
         <div class="drawer-search">
-          <div class="drawer-search-title"><span>◎</span><strong>Searched {source_count} sources</strong></div>
+          <div class="drawer-search-title"><span>◎</span><strong>{source_label}</strong></div>
           <div class="source-chips">{source_chips}</div>
         </div>
         <ol class="trace-list drawer-timeline">{"".join(timeline_items)}</ol>
-        <h3 class="sources-heading">Sources · {source_count}</h3>
+        <h3 class="sources-heading">{source_label}</h3>
         <div class="source-cards">{source_cards}</div>
       </div>
     </aside>

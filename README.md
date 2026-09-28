@@ -85,6 +85,8 @@ In accordance with LLNL policy on Generative Artificial Intelligence, this proje
 
 - Default settings can be adjusted in `config.yaml`.
 - `LMSTUDIO_BASE_URL` overrides the local API address.
+- `LMSTUDIO_EMBEDDING_BASE_URL` (or `lmstudio_embedding_base_url` in `config.yaml`)
+  serves the embedding model from a separate LM Studio server; it defaults to the chat server.
 - `LMSTUDIO_MODEL` overrides the configured default model.
 - `LMSTUDIO_API_KEY` is optional and only needed when LM Studio authentication is enabled.
 - Many settings can be overridden in the Gradio UI under "Advanced Settings".
@@ -121,6 +123,11 @@ queue.
   pypdf fallback. The fallback conservatively recovers sections, subsections,
   paragraphs, tables, captions, equations, and code blocks, then chunks at
   section, paragraph, and sentence boundaries before using a hard size limit.
+  It drops running headers and footers repeated at page edges, and accepts
+  only known section names or headings numbered in sequence, so figure labels
+  and formulas do not open sections. Sections shorter than
+  `chunk_combine_under_chars` share a chunk, short equations and captions stay
+  with their text, and the References section is not indexed.
 - Stores source-faithful `raw_text` separately from document-intrinsic
   `retrieval_text`. Embeddings include paper/section/publication context but
   never research-goal conclusions or hypothesis judgments; prompt/citation

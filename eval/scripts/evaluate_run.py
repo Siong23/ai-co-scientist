@@ -31,7 +31,7 @@ from rubrics.suites import (  # noqa: E402
     SUITE_RAG,
 )
 
-DEFAULT_GOAL_PATH = PROJECT_ROOT / "goals" / "goal_001_perovskite_humidity.txt"
+DEFAULT_GOAL_PATH = PROJECT_ROOT / "goals" / "Goal1.txt"
 RANKING_STEP_PATTERN = re.compile(r"ranking(?:_?(\d+)|_final)?")
 
 #: Where an --llm-metrics run files its audit report when --report is omitted.

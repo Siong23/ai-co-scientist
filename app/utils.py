@@ -100,6 +100,12 @@ if not any(getattr(handler, "_co_scientist_console", False) for handler in logge
 # --- LM Studio Integration ---
 DEFAULT_LMSTUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_LMSTUDIO_API_KEY = "lm-studio"
+# Reasoning is the model's scratch work, not its answer. A response carrying only
+# reasoning means the output budget ran out before the answer began; returning
+# that text would hand callers prose where they expect JSON or code.
+REASONING_ONLY_ERROR = (
+    "Error: LM Studio returned reasoning but no answer; the output-token limit was likely reached during reasoning."
+)
 _execution_budget_lock = threading.RLock()
 _execution_deadline: float | None = None
 _execution_cancel_event: threading.Event | None = None
@@ -180,12 +186,27 @@ def get_lmstudio_base_url() -> str:
     return str(value).rstrip("/")
 
 
+def get_lmstudio_embedding_base_url() -> str:
+    """Return the LM Studio API base URL that serves the embedding model.
+
+    The embedding model may run on its own server when one machine cannot hold
+    both models; without an override it shares the chat model's server.
+    """
+    value = os.getenv("LMSTUDIO_EMBEDDING_BASE_URL") or config.get("lmstudio_embedding_base_url")
+    return str(value).rstrip("/") if value else get_lmstudio_base_url()
+
+
+def _lmstudio_server_url(base_url: str) -> str:
+    """Return the LM Studio server root that serves an OpenAI-compatible /v1 API."""
+
+    base_url = str(base_url).rstrip("/")
+    return base_url[:-3] if base_url.endswith("/v1") else base_url
+
+
 def get_lmstudio_native_chat_url() -> str:
     """Return LM Studio's native chat endpoint beside the configured /v1 API."""
 
-    base_url = get_lmstudio_base_url()
-    server_url = base_url[:-3] if base_url.endswith("/v1") else base_url
-    return f"{server_url}/api/v1/chat"
+    return f"{_lmstudio_server_url(get_lmstudio_base_url())}/api/v1/chat"
 
 
 def get_lmstudio_api_key() -> str:
@@ -245,6 +266,147 @@ def fetch_lmstudio_models() -> List[str]:
     except Exception as exc:
         logger.warning("Could not fetch LM Studio models: %s", redact_secrets(str(exc)))
         return []
+
+
+# --- One Model Per LM Studio Server ---
+# A server with memory for only one model cannot load a second beside it: LM
+# Studio fails that load with out-of-memory. With lmstudio_single_model_per_server
+# a request for another model waits until this process has no request running on
+# that server, every other loaded model is unloaded, and LM Studio then loads the
+# requested model on demand. Requests for the model in use still run together,
+# but not once a request for another model is waiting, so that one cannot starve.
+_LMSTUDIO_MODEL_LOAD_FAILURES = ("failed to load model", "model unloaded")
+
+
+class _ModelSwitchCancelled(RuntimeError):
+    """The cycle ended while a request waited for its model to be switched in."""
+
+
+class _LMStudioServerSlot:
+    """The model one LM Studio server is serving to this process."""
+
+    def __init__(self) -> None:
+        self.condition = threading.Condition()
+        self.model: Optional[str] = None
+        self.running = 0
+        self.switching = False
+        self.waiting: Dict[str, int] = {}
+
+
+_lmstudio_server_slots: Dict[str, _LMStudioServerSlot] = {}
+_lmstudio_server_slots_lock = threading.Lock()
+
+
+def lmstudio_single_model_per_server() -> bool:
+    """Return whether each LM Studio server is kept to one loaded model."""
+
+    return bool(config.get("lmstudio_single_model_per_server", False))
+
+
+def _lmstudio_model_load_failed(error_text: str) -> bool:
+    """Return whether an error says the requested model could not stay loaded."""
+
+    lowered = str(error_text).lower()
+    return any(marker in lowered for marker in _LMSTUDIO_MODEL_LOAD_FAILURES)
+
+
+def _unload_other_lmstudio_models(server_url: str, model: str) -> None:
+    """Unload every model instance on the server that is not the requested model."""
+
+    try:
+        response = requests.get(
+            f"{server_url}/api/v1/models",
+            headers=_lmstudio_headers(),
+            timeout=config.get("lmstudio_model_list_timeout_seconds", 10),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        logger.warning(
+            "Could not list the models loaded on LM Studio %s: %s",
+            server_url,
+            redact_secrets(str(exc)),
+        )
+        return
+    entries = payload.get("models", []) if isinstance(payload, dict) else []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for instance in entry.get("loaded_instances") or []:
+            instance_id = instance.get("id") if isinstance(instance, dict) else None
+            if not instance_id or model in (instance_id, entry.get("key")):
+                continue
+            try:
+                response = requests.post(
+                    f"{server_url}/api/v1/models/unload",
+                    headers=_lmstudio_headers(),
+                    json={"instance_id": instance_id},
+                    timeout=_native_request_timeout(),
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                logger.warning(
+                    "Could not unload %s from LM Studio %s: %s",
+                    instance_id,
+                    server_url,
+                    redact_secrets(str(exc)),
+                )
+                continue
+            logger.info("Unloaded %s from LM Studio %s to make room for %s.", instance_id, server_url, model)
+
+
+@contextmanager
+def _lmstudio_model_slot(base_url: str, model: str, refresh: bool = False):
+    """Run one request once its model is the only one loaded on the server.
+
+    refresh unloads other models again even when this model is already in use,
+    for a request that failed because something else took the server's memory.
+    """
+
+    if not model or not lmstudio_single_model_per_server():
+        yield
+        return
+    server_url = _lmstudio_server_url(base_url)
+    with _lmstudio_server_slots_lock:
+        slot = _lmstudio_server_slots.setdefault(server_url, _LMStudioServerSlot())
+    with slot.condition:
+        slot.waiting[model] = slot.waiting.get(model, 0) + 1
+        try:
+            while True:
+                if not slot.switching:
+                    if slot.model == model and refresh:
+                        break
+                    if slot.model == model:
+                        if not any(count for name, count in slot.waiting.items() if name != model):
+                            break
+                    elif slot.running == 0:
+                        break
+                if execution_cancelled():
+                    raise _ModelSwitchCancelled("Cycle execution cancelled while waiting to switch LM Studio models.")
+                slot.condition.wait(timeout=0.5)
+        finally:
+            slot.waiting[model] -= 1
+            if not slot.waiting[model]:
+                del slot.waiting[model]
+        switch = refresh or slot.model != model
+        slot.switching = switch
+        slot.running += 1
+    try:
+        if switch:
+            try:
+                if slot.model is not None and slot.model != model:
+                    logger.info("Switching LM Studio %s from %s to %s.", server_url, slot.model, model)
+                _unload_other_lmstudio_models(server_url, model)
+            finally:
+                with slot.condition:
+                    slot.model = model
+                    slot.switching = False
+                    slot.condition.notify_all()
+        yield
+    finally:
+        with slot.condition:
+            slot.running -= 1
+            slot.condition.notify_all()
 
 
 # --- Error Classification ---
@@ -327,7 +489,45 @@ def _format_lmstudio_error(exc: Exception, model: str) -> str:
     return f"Error: LM Studio call failed: {error}"
 
 
+def _warn_output_token_limit(model: str, prompt_chars: int, output_token_limit: int) -> None:
+    # A structured answer that stops at the limit is usually unparsable, so say
+    # so here instead of leaving callers to report a malformed response.
+    logger.warning(
+        "LLM output stopped at max_output_tokens=%d; the response may be truncated. model=%s prompt_chars=%d",
+        output_token_limit,
+        model,
+        prompt_chars,
+    )
+
+
 def call_llm(
+    prompt: str,
+    temperature: float = 0.7,
+    model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    reasoning: Optional[str] = None,
+) -> str:
+    """Call LM Studio once its model is the one loaded on the server, if so configured."""
+    selected_model = get_lmstudio_model(model)
+    for attempt in range(2):
+        try:
+            with _lmstudio_model_slot(get_lmstudio_base_url(), selected_model, refresh=attempt > 0):
+                result = _call_llm_once(prompt, temperature, model, system_prompt, max_tokens, reasoning)
+        except _ModelSwitchCancelled:
+            return "Error: Cycle execution cancelled after reaching its time limit."
+        if (
+            attempt
+            or not lmstudio_single_model_per_server()
+            or not result.startswith("Error:")
+            or not _lmstudio_model_load_failed(result)
+        ):
+            break
+        logger.warning("LM Studio could not load %s; unloading other models and retrying once.", selected_model)
+    return result
+
+
+def _call_llm_once(
     prompt: str,
     temperature: float = 0.7,
     model: Optional[str] = None,
@@ -393,6 +593,11 @@ def call_llm(
                     response.raise_for_status()
                     response_payload = response.json()
                     output = response_payload.get("output", []) if isinstance(response_payload, dict) else []
+                    # The native API reports no stop reason, only token counts.
+                    stats = response_payload.get("stats") if isinstance(response_payload, dict) else None
+                    output_tokens = stats.get("total_output_tokens") if isinstance(stats, dict) else None
+                    if isinstance(output_tokens, int) and output_tokens >= output_token_limit:
+                        _warn_output_token_limit(selected_model, len(prompt), output_token_limit)
                     content = "\n".join(
                         str(item.get("content", ""))
                         for item in output
@@ -402,9 +607,13 @@ def call_llm(
                         content = "\n".join(
                             str(item.get("content") or item.get("text") or "")
                             for item in output
-                            if isinstance(item, dict) and (item.get("content") or item.get("text"))
+                            if isinstance(item, dict)
+                            and item.get("type") != "reasoning"
+                            and (item.get("content") or item.get("text"))
                         ).strip()
                     if not content:
+                        if any(isinstance(item, dict) and item.get("type") == "reasoning" for item in output):
+                            return REASONING_ONLY_ERROR
                         return "Error: LM Studio returned an empty response."
                     return content
                 except Exception as exc:
@@ -467,16 +676,15 @@ def call_llm(
         )
         if not completion.choices:
             return "Error: LM Studio returned no completion choices."
+        if getattr(completion.choices[0], "finish_reason", None) == "length":
+            _warn_output_token_limit(selected_model, len(prompt), output_token_limit)
         message = completion.choices[0].message
         content = getattr(message, "content", "")
-        if not isinstance(content, str) or not content.strip():
+        content = content.strip() if isinstance(content, str) else ""
+        if not content:
             reasoning_content = getattr(message, "reasoning_content", None)
             if isinstance(reasoning_content, str) and reasoning_content.strip():
-                content = reasoning_content
-            else:
-                content = ""
-        content = content.strip()
-        if not content:
+                return REASONING_ONLY_ERROR
             return "Error: LM Studio returned an empty response."
         return content
     except Exception as exc:
@@ -556,16 +764,29 @@ class LMStudioSentenceTransformer:
         is_single = isinstance(sentences, str)
         input_texts = [sentences] if is_single else list(sentences)
 
+        base_url = get_lmstudio_embedding_base_url()
         client = OpenAI(
-            base_url=get_lmstudio_base_url(),
+            # base_url=get_lmstudio_base_url(),
+            base_url=base_url,
             api_key=get_lmstudio_api_key(),
             max_retries=0,
             timeout=_openai_timeout(),
         )
-        response = client.embeddings.create(
-            model=self.model_name,
-            input=input_texts,
-        )
+        for attempt in range(2):
+            try:
+                with _lmstudio_model_slot(base_url, self.model_name, refresh=attempt > 0):
+                    response = client.embeddings.create(
+                        model=self.model_name,
+                        input=input_texts,
+                    )
+                break
+            except Exception as exc:
+                if attempt or not lmstudio_single_model_per_server() or not _lmstudio_model_load_failed(str(exc)):
+                    raise
+                logger.warning(
+                    "LM Studio could not load %s; unloading other models and retrying once.",
+                    self.model_name,
+                )
         embeddings = [data.embedding for data in response.data]
         np_embeddings = np.array(embeddings, dtype=np.float32)
 

@@ -34,6 +34,8 @@ def _library(tmp_path: Path, embeddings: RecordingEmbeddings) -> ChromaPaperLibr
     )
     library.chunk_size = 500
     library.chunk_overlap = 0
+    # These tests track chunk reuse per section, so keep one chunk per section.
+    library.chunk_combine_under = 0
     return library
 
 
@@ -236,7 +238,7 @@ def test_parser_change_reparses_but_reuses_pdf_and_embeddings(tmp_path, monkeypa
 
     changed_embeddings = RecordingEmbeddings()
     changed = _library(tmp_path, changed_embeddings)
-    changed.parser_version = "pypdf-structured-3"
+    changed.parser_version = "pypdf-structured-changed"
     extract_calls = 0
 
     def extract(_path: Path) -> ExtractedPaper:

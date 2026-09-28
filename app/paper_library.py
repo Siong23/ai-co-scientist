@@ -121,6 +121,12 @@ class IndexIntegrityReport:
     def ok(self) -> bool:
         return self.status == "COMMITTED" and not self.truncated and self.records_valid
 
+    @property
+    def usable_partial(self) -> bool:
+        """A truncated index whose stored chunks exactly match its manifest."""
+
+        return self.status == "PARTIAL" and self.records_valid
+
 
 @dataclass(frozen=True)
 class IncrementalIndexReport:
@@ -159,8 +165,8 @@ class ChromaPaperLibrary:
         self.pdf_directory = Path(pdf_directory or library_config.get("pdf_directory", ".cache/papers"))
         self.collection_prefix = str(library_config.get("collection_name", "research_papers"))
         self.index_schema_version = str(library_config.get("index_schema_version", "4"))
-        self.parser_version = str(library_config.get("parser_version", "pypdf-structured-2"))
-        self.chunking_version = str(library_config.get("chunking_version", "section-paragraph-sentence-3"))
+        self.parser_version = str(library_config.get("parser_version", "pypdf-structured-3"))
+        self.chunking_version = str(library_config.get("chunking_version", "section-paragraph-sentence-4"))
         self.retrieval_template_version = str(library_config.get("retrieval_template_version", "intrinsic-context-1"))
         self.parser_backend = str(library_config.get("parser_backend", "pypdf")).strip().casefold()
         self.incremental_indexing_enabled = bool(library_config.get("incremental_indexing_enabled", True))
@@ -185,6 +191,12 @@ class ChromaPaperLibrary:
         self.chunk_size = max(500, int(library_config.get("chunk_size_chars", 2400)))
         self.chunk_overlap = max(0, int(library_config.get("chunk_overlap_chars", 300)))
         self.chunk_overlap = min(self.chunk_overlap, self.chunk_size - 1)
+        self.chunk_combine_under = max(0, int(library_config.get("chunk_combine_under_chars", 1200)))
+        self.chunk_standalone_min = max(0, int(library_config.get("chunk_standalone_min_chars", 300)))
+        excluded_sections = library_config.get("index_excluded_sections", ("References",)) or ()
+        self.index_excluded_sections = tuple(
+            str(section).strip() for section in excluded_sections if str(section).strip()
+        )
         self.top_k_chunks = max(1, int(library_config.get("top_k_chunks", 6)))
         self.max_prompt_chars = max(1000, int(library_config.get("max_prompt_chars", 12000)))
         self.hybrid_retrieval_enabled = bool(library_config.get("hybrid_retrieval_enabled", True))
@@ -363,6 +375,9 @@ class ChromaPaperLibrary:
             "max_chunks_per_paper": self.max_chunks_per_paper,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
+            "chunk_combine_under": self.chunk_combine_under,
+            "chunk_standalone_min": self.chunk_standalone_min,
+            "index_excluded_sections": list(self.index_excluded_sections),
         }
 
     @staticmethod
@@ -467,6 +482,9 @@ class ChromaPaperLibrary:
             "max_chunks_per_paper": self.max_chunks_per_paper,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
+            "chunk_combine_under": self.chunk_combine_under,
+            "chunk_standalone_min": self.chunk_standalone_min,
+            "index_excluded_sections": list(self.index_excluded_sections),
         }
         return self._content_hash(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
@@ -825,8 +843,19 @@ class ChromaPaperLibrary:
 
         indexed_source_ids: set[str] = set()
         partial_source_ids: set[str] = set()
+        # A truncated source still holds verified chunks from its leading pages;
+        # those passages are searchable and labelled full_text_partial.
+        usable_partial_source_ids: set[str] = set()
         failed_source_ids: set[str] = set()
         acquisition_results: dict[str, str] = {}
+
+        def mark_partial(source_id: str) -> None:
+            partial_source_ids.add(source_id)
+            if source_id not in usable_partial_source_ids and self.verify_indexed_source(source_id).usable_partial:
+                usable_partial_source_ids.add(source_id)
+
+        def searchable_source_ids() -> set[str]:
+            return indexed_source_ids | usable_partial_source_ids
 
         # Every already COMMITTED source is eligible without consuming an
         # acquisition attempt, regardless of its position in the accumulated list.
@@ -837,7 +866,7 @@ class ChromaPaperLibrary:
             manifest = self._manifest_source(source_id) if source_id else None
             version_is_current = bool(manifest and manifest.get("remote_revision") == identity.remote_revision)
             if status == "PARTIAL" and version_is_current:
-                partial_source_ids.add(source_id)
+                mark_partial(source_id)
                 acquisition_results[source_id] = "partial"
             elif status == "FAILED" and version_is_current:
                 failed_source_ids.add(source_id)
@@ -898,7 +927,7 @@ class ChromaPaperLibrary:
                 identity = self._source_identity(document)
                 version_is_current = bool(manifest and manifest.get("remote_revision") == identity.remote_revision)
                 if status == "PARTIAL" and version_is_current:
-                    partial_source_ids.add(source_id)
+                    mark_partial(source_id)
                     acquisition_results[source_id] = "partial"
                     continue
                 if source_id in self._attempted_source_ids:
@@ -922,7 +951,7 @@ class ChromaPaperLibrary:
                         )
                         return True
                     if self.get_index_status(source_id) == "PARTIAL":
-                        partial_source_ids.add(source_id)
+                        mark_partial(source_id)
                         result = "partial"
                     else:
                         failed_source_ids.add(source_id)
@@ -968,23 +997,26 @@ class ChromaPaperLibrary:
             if lane_positions["__unscoped__"] == previous_position:
                 break
 
-        source_ids_by_requirement = {
-            requirement_id: [
-                str(document.metadata.get("source_id", ""))
-                for document in lanes.get(requirement_id, ())
-                if str(document.metadata.get("source_id", "")) in indexed_source_ids
-            ]
-            for requirement_id in requirement_order
-        }
+        def lane_source_ids() -> dict[str, list[str]]:
+            searchable = searchable_source_ids()
+            return {
+                requirement_id: [
+                    str(document.metadata.get("source_id", ""))
+                    for document in lanes.get(requirement_id, ())
+                    if str(document.metadata.get("source_id", "")) in searchable
+                ]
+                for requirement_id in requirement_order
+            }
 
+        searched_source_ids = searchable_source_ids()
         chunks: list[PaperChunk] = []
-        if indexed_source_ids:
+        if searched_source_ids:
             try:
                 chunks = self.search_many(
                     queries,
-                    sorted(indexed_source_ids),
+                    sorted(searched_source_ids),
                     self.top_k_chunks,
-                    source_ids_by_requirement=source_ids_by_requirement,
+                    source_ids_by_requirement=lane_source_ids(),
                 )
             except Exception as exc:
                 logger.warning("Chroma full-text retrieval failed; using abstracts only: %s", exc)
@@ -997,20 +1029,12 @@ class ChromaPaperLibrary:
         for requirement_id in requirement_order:
             if requirement_id not in covered_requirement_ids and attempt_one(requirement_id):
                 failover_attempted = True
-        if failover_attempted:
-            source_ids_by_requirement = {
-                requirement_id: [
-                    str(document.metadata.get("source_id", ""))
-                    for document in lanes.get(requirement_id, ())
-                    if str(document.metadata.get("source_id", "")) in indexed_source_ids
-                ]
-                for requirement_id in requirement_order
-            }
+        if failover_attempted or searchable_source_ids() != searched_source_ids:
             chunks = self.search_many(
                 queries,
-                sorted(indexed_source_ids),
+                sorted(searchable_source_ids()),
                 self.top_k_chunks,
-                source_ids_by_requirement=source_ids_by_requirement,
+                source_ids_by_requirement=lane_source_ids(),
             )
 
         context_chunks = self.expand_context(chunks)
@@ -1047,7 +1071,11 @@ class ChromaPaperLibrary:
             source_chunks = chunks_by_source.get(source_id, [])
             metadata = dict(document.metadata)
             metadata["full_text_indexed"] = source_id in indexed_source_ids
-            metadata["full_text_available"] = bool(metadata.get("content_extracted") or metadata["full_text_indexed"])
+            metadata["full_text_available"] = bool(
+                metadata.get("content_extracted")
+                or metadata["full_text_indexed"]
+                or source_id in usable_partial_source_ids
+            )
             metadata["full_text_chunks_used"] = len(source_chunks)
             metadata["index_status"] = self.get_index_status(source_id)
             metadata["index_truncated"] = source_id in partial_source_ids
@@ -2396,6 +2424,9 @@ class ChromaPaperLibrary:
             recovered_elements,
             max_chars=self.chunk_size,
             overlap_chars=self.chunk_overlap,
+            combine_under_chars=self.chunk_combine_under,
+            standalone_min_chars=self.chunk_standalone_min,
+            excluded_sections=self.index_excluded_sections,
         )
         all_chunks: list[Document] = []
         for chunk in element_chunks:

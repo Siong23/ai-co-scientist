@@ -1,0 +1,1 @@
+Investigate whether machine-learning-based mobility prediction can reduce handover failures and service interruption in high-mobility 5G networks.

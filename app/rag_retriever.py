@@ -33,6 +33,7 @@ from .research_modes import (
 from .search_backoff import guarded_search
 from .tools.arxiv_search import ArxivSearchTool
 from .tools.elsevier_search import ElsevierSearchTool
+from .tools.openalex_search import OpenAlexSearchTool
 from .tools.pdf_urls import find_pdf_url
 from .tools.semantic_scholar_search import SemanticScholarSearchTool
 from .tools.springer_search import SpringerSearchTool
@@ -40,6 +41,8 @@ from .tools.tavily_search import TavilySearchTool
 from .utils import get_sentence_transformer_model, logger, redact_secrets
 
 _TAVILY_CHUNK_MARKER = re.compile(r"<chunk\s+\d+>\s*", re.IGNORECASE)
+# arXiv asks API clients to wait three seconds between requests.
+_ARXIV_RETRY_DELAY_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -503,6 +506,12 @@ class ResearchRetriever:
         self._selected_source_ids: set[str] = set()
 
         self.arxiv = ArxivSearchTool(max_results=self.results_per_query)
+        openalex_config = config.get("openalex", {})
+        self.openalex = (
+            OpenAlexSearchTool(max_results=int(openalex_config.get("results_per_query", self.results_per_query)))
+            if openalex_config.get("enabled", True)
+            else None
+        )
         semantic_scholar_config = config.get("semantic_scholar", {})
         semantic_scholar_results = int(semantic_scholar_config.get("results_per_query", self.results_per_query))
         self.semantic_scholar = (
@@ -534,6 +543,10 @@ class ResearchRetriever:
             200,
             int(tavily_config.get("max_chunk_chars", 1600)),
         )
+        self.max_web_chunks_per_document = max(
+            1,
+            int(tavily_config.get("max_chunks_per_document", 2)),
+        )
         # Web search is the only billed retrieval provider here, so repeats are
         # served from a local cache and each cycle gets a hard call budget.
         tavily_cache_directory = (
@@ -553,6 +566,7 @@ class ResearchRetriever:
                 cache_ttl_seconds=tavily_cache_ttl_seconds,
                 max_searches_per_cycle=int(tavily_config.get("max_searches_per_cycle", 20)),
                 max_extracts_per_cycle=int(tavily_config.get("max_extracts_per_cycle", 10)),
+                exclude_domains=tuple(tavily_config.get("exclude_domains", ())),
             )
             if tavily_config.get("enabled", True)
             else None
@@ -704,6 +718,7 @@ class ResearchRetriever:
 
     def _academic_sources(self):
         return (
+            ("OpenAlex", "openalex", self.openalex),
             ("Semantic Scholar", "semantic_scholar", self.semantic_scholar),
             (
                 "Springer Nature",
@@ -1018,7 +1033,11 @@ class ResearchRetriever:
         )
 
     def _arxiv_results(self, queries: Sequence[SearchQuery]) -> list[list[EvidenceSource]]:
-        """Search arXiv, stopping the batch when the service rate-limits us."""
+        """Search arXiv, retrying a timed-out query once.
+
+        The batch stops when the service rate-limits us or when a query still
+        times out after its retry, because arXiv is then unavailable.
+        """
 
         ranked_results: list[list[EvidenceSource]] = []
         for search_query in queries:
@@ -1027,6 +1046,17 @@ class ResearchRetriever:
                 max_results=self.results_per_query,
                 sort_by="relevance",
             )
+            timed_out = getattr(self.arxiv, "last_error_kind", "") == "timeout"
+            if timed_out:
+                # export.arxiv.org often answers a repeated query after a single
+                # slow response, so one retry keeps the query's evidence.
+                time.sleep(_ARXIV_RETRY_DELAY_SECONDS)
+                raw_results = self.arxiv.search_papers(
+                    query=search_query.query,
+                    max_results=self.results_per_query,
+                    sort_by="relevance",
+                )
+                timed_out = getattr(self.arxiv, "last_error_kind", "") == "timeout"
             query_context = {
                 "query": search_query.query,
                 "sub_question": search_query.sub_question,
@@ -1071,6 +1101,11 @@ class ResearchRetriever:
                 logger.warning(
                     "arXiv returned HTTP %s; skipping its remaining queries in this retrieval round.",
                     self.arxiv.last_error_status,
+                )
+                break
+            if timed_out:
+                logger.warning(
+                    "arXiv timed out again on retry; skipping its remaining queries in this retrieval round.",
                 )
                 break
         return ranked_results
@@ -1546,7 +1581,21 @@ class ResearchRetriever:
             ),
             reverse=True,
         )
-        return ranked_chunks[: self.max_web_evidence_chunks]
+        # A page's chunks score alike against its own sub-question, and one
+        # survey took five of eight web-evidence slots in a run. Up to the
+        # per-page cap, chunks go in rank order; leftover slots then take the
+        # capped chunks, so a lone relevant page still fills the budget.
+        per_document: dict[str, int] = {}
+        diverse_chunks: list[Document] = []
+        overflow_chunks: list[Document] = []
+        for chunk in ranked_chunks:
+            parent = str(chunk.metadata.get("parent_source_id") or chunk.metadata.get("source_id") or "")
+            if per_document.get(parent, 0) < self.max_web_chunks_per_document:
+                per_document[parent] = per_document.get(parent, 0) + 1
+                diverse_chunks.append(chunk)
+            else:
+                overflow_chunks.append(chunk)
+        return (diverse_chunks + overflow_chunks)[: self.max_web_evidence_chunks]
 
     def _with_extracted_web_content(
         self,
@@ -1916,7 +1965,10 @@ def format_documents_for_grading(
             for ref in document.metadata.get("evidence_refs", [])
             if isinstance(ref, dict) and ref.get("evidence_type") == "full_text" and ref.get("text")
         ]
-        if document.metadata.get("full_text_indexed") and full_text_passages:
+        if full_text_passages and (
+            document.metadata.get("full_text_indexed")
+            or document.metadata.get("evidence_status") == "full_text_partial"
+        ):
             summary = "\n".join(full_text_passages)
         elif document.metadata.get("content_extracted") is True:
             summary = document.page_content

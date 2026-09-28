@@ -20,7 +20,7 @@ def isolated_cooldowns(monkeypatch):
     monkeypatch.setattr(search_backoff, "_states", {})
 
 
-@pytest.mark.parametrize("status,delay", [(429, 60), (503, 60), (432, 300), (401, 300)])
+@pytest.mark.parametrize("status,delay", [(429, 60), (503, 60), (432, 300), (401, 300), (406, 1800)])
 def test_cooldown_shared_across_instances_and_expires(monkeypatch, status, delay):
     now = [100.0]
     monkeypatch.setattr(search_backoff.time, "monotonic", lambda: now[0])
@@ -66,17 +66,58 @@ def test_changed_credentials_can_retry_immediately():
     assert search_backoff.guarded_search(replacement, lambda: [["evidence"]]) == ([["evidence"]], False)
 
 
-def test_arxiv_timeout_is_classified_and_cooled_down():
-    import requests
+def test_arxiv_timeout_is_classified_and_cooled_down(monkeypatch):
+    import socket
+    import urllib.error
 
+    from app.tools import arxiv_search
     from app.tools.arxiv_search import ArxivSearchTool
 
     source = ArxivSearchTool()
-    source.client.results = Mock(side_effect=requests.ReadTimeout("read timed out"))
+    fetch = Mock(side_effect=urllib.error.URLError(socket.timeout("read timed out")))
+    monkeypatch.setattr(arxiv_search, "_fetch_feed", fetch)
     assert search_backoff.guarded_search(source, lambda: source.search_papers("5G slicing")) == ([], False)
     assert source.last_error_kind == "timeout"
     assert search_backoff.guarded_search(source, lambda: source.search_papers("5G slicing")) == ([], True)
-    assert source.client.results.call_count == 1
+    assert fetch.call_count == 1
+
+
+def test_arxiv_rejected_client_gets_the_long_cooldown(monkeypatch):
+    """A 406 is a rejected client, so arXiv must not be probed every 30 seconds."""
+
+    import urllib.error
+
+    from app.tools import arxiv_search
+    from app.tools.arxiv_search import ArxivSearchTool
+
+    source = ArxivSearchTool()
+    fetch = Mock(side_effect=urllib.error.HTTPError("https://export.arxiv.org", 406, "Not Acceptable", {}, None))
+    monkeypatch.setattr(arxiv_search, "_fetch_feed", fetch)
+    assert search_backoff.guarded_search(source, lambda: source.search_papers("5G slicing")) == ([], False)
+    assert source.last_error_status == 406
+    assert search_backoff.guarded_search(source, lambda: source.search_papers("5G slicing")) == ([], True)
+    assert fetch.call_count == 1
+
+
+def test_cycle_warning_names_the_status_and_share_of_lost_queries():
+    """A bare "some searches failed" hid that a run lost every arXiv query to HTTP 406."""
+
+    from app.agents import SupervisorAgent
+    from app.models import ContextMemory, ResearchGoal
+
+    supervisor = SupervisorAgent()
+    supervisor.generation_agent.generate_new_hypotheses = Mock(return_value=([], []))
+    supervisor.generation_agent.rag_retriever.last_search_stats = [
+        {"source": "arXiv", "status": "provider_error", "error_status": 406, "queries_requested": 1},
+        {"source": "arXiv", "status": "cooldown", "error_status": 406, "queries_requested": 13},
+        {"source": "OpenAlex", "status": "ok", "error_status": None, "queries_requested": 14},
+    ]
+    details = {}
+
+    supervisor.step_generation(ResearchGoal(description="5G slicing"), ContextMemory(), Mock(), details)
+
+    assert "arXiv (HTTP 406; 14 of 14 queries failed or skipped)" in details["warnings"][0]
+    assert "OpenAlex" not in details["warnings"][0]
 
 
 def test_provider_failures_reach_cycle_warnings():

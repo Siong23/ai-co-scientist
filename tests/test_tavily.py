@@ -121,6 +121,16 @@ def test_search_applies_planner_domain_freshness_and_news_filters(monkeypatch):
     }
 
 
+def test_search_excludes_configured_upload_sites(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    tool = TavilySearchTool(exclude_domains=("Scribd.com", "scribd.com", "eureka.patsnap.com"))
+
+    with patch("app.tools.tavily_search.requests.post", return_value=_response([])) as mock_post:
+        tool.search("5G handover optimisation")
+
+    assert mock_post.call_args.kwargs["json"]["exclude_domains"] == ["scribd.com", "eureka.patsnap.com"]
+
+
 def test_search_records_rate_limit(monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     tool = TavilySearchTool()

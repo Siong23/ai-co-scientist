@@ -11,8 +11,7 @@ matplotlib>=3.8.0
 seaborn>=0.13.2
 torch==2.12.1  # Required by sentence-transformers; CI installs the CPU-only wheel
 numpy==2.2.6
-arxiv==4.0.0  # arXiv API integration
-feedparser==6.0.12  # For arXiv RSS feeds
+feedparser==6.0.12  # Parses the arXiv Atom API feed
 python-dateutil==2.9.0.post0  # Date handling for literature search
 langchain-core==1.4.9
 chromadb==1.5.9  # Persistent local vector database for downloaded paper chunks

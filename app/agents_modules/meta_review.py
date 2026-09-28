@@ -497,7 +497,17 @@ class MetaReviewAgent:
         # ----------------------------------------------------------------
         # Top-ranked hypotheses
         # ----------------------------------------------------------------
-        best_hypotheses = sorted(active_hypotheses, key=lambda h: h.elo_score, reverse=True)[:3]
+        # Only hypotheses that have played a tournament match carry a real
+        # Elo. Sorting every active one let two unranked REVISE hypotheses,
+        # still at the default 1200, outrank the ranked runner-up at 1199.97.
+        # Before any match is decided, the reviewed ACCEPTs are the best there is.
+        ranked_ids = context.ranked_hypothesis_ids()
+        top_candidates = [h for h in active_hypotheses if h.hypothesis_id in ranked_ids] or [
+            h
+            for h in active_hypotheses
+            if str(getattr(h.reflection_report, "recommendation", "")).strip().upper() == "ACCEPT"
+        ]
+        best_hypotheses = sorted(top_candidates, key=lambda h: h.elo_score, reverse=True)[:3]
         logger.debug(
             "Top hypotheses for meta-review: %s",
             [h.hypothesis_id for h in best_hypotheses],

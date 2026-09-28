@@ -863,6 +863,88 @@ def test_execute_cycle_skips_experiment_without_enough_cycle_budget(gradio_app_m
     assert "timed out" not in result["status"]
 
 
+def test_execute_cycle_skips_experiment_when_auto_run_is_off(gradio_app_module, monkeypatch, tmp_path):
+    from app.config import config
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(config, "experiment_auto_run", False)
+
+    run_experiment = Mock()
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", run_experiment)
+
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment switch test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    run_experiment.assert_not_called()
+    experiment_result = result["cycle_details"]["experiment_result"]
+    assert experiment_result["status"] == "skipped_auto_run_disabled"
+    assert "turned off for this cycle" in experiment_result["reason"]
+    assert result["cycle_details"]["comparison_result"]["status"] == "skipped_auto_run_disabled"
+    assert "Automated Experiment Skipped" in result["results_html"]
+
+
+def test_execute_cycle_checkbox_choice_overrides_the_config_default(gradio_app_module, monkeypatch, tmp_path):
+    from app.config import config
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(
+        DatasetManager,
+        "get_latest_dataset",
+        lambda self: "data/5g_nidd/5g_nidd.csv",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(config, "experiment_auto_run", True)
+
+    run_experiment = Mock()
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", run_experiment)
+
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {"generation": {"hypotheses": [{"id": "H1"}]}},
+        "finalization": {"ready": True, "reasons": []},
+    }
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment checkbox test"),
+        ContextMemory(),
+        cycle_supervisor,
+        run_experiment=False,
+    )
+
+    run_experiment.assert_not_called()
+    assert result["cycle_details"]["experiment_result"]["status"] == "skipped_auto_run_disabled"
+
+
+def test_interface_offers_the_experiment_checkbox(gradio_app_module):
+    with patch.object(gradio_app_module, "fetch_lmstudio_models", return_value=[]):
+        demo = gradio_app_module.create_gradio_interface()
+
+    checkboxes = [
+        component
+        for component in demo.config["components"]
+        if component["type"] == "checkbox"
+        and component["props"].get("label") == "Run automated experiment after the cycle"
+    ]
+    assert len(checkboxes) == 1
+
+
 def test_execute_cycle_caps_experiment_timeout_to_remaining_budget(gradio_app_module, monkeypatch, tmp_path):
     import threading
 
@@ -903,6 +985,94 @@ def test_execute_cycle_caps_experiment_timeout_to_remaining_budget(gradio_app_mo
     assert captured["timeout_seconds"] < gradio_app_module.EXPERIMENT_TIMEOUT_SECONDS
 
 
+def _supervisor_with_ranked_hypothesis():
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.return_value = {
+        "iteration": 1,
+        "steps": {
+            "ranking_1": {
+                "hypotheses": [{"id": "H1", "title": "Kept hypothesis", "text": "Ranked text.", "elo_score": 1210.0}]
+            }
+        },
+        "finalization": {"ready": True, "reasons": []},
+    }
+    return cycle_supervisor
+
+
+def test_execute_cycle_keeps_hypotheses_when_the_experiment_report_fails(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(DatasetManager, "get_latest_dataset", lambda self: "data/5g_nidd/5g_nidd.csv")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        gradio_app_module.ExperimentOrchestrator,
+        "run_experiment",
+        lambda self, **kwargs: {"success": True, "status": "completed", "execution": {}},
+    )
+    monkeypatch.setattr(
+        gradio_app_module.experiment_comparator,
+        "compare",
+        lambda *args, **kwargs: {"status": "experiment_result_unavailable", "paper_result": None},
+    )
+
+    def broken_report(experiment_result, comparison_result):
+        raise AttributeError("'NoneType' object has no attribute 'get'")
+
+    monkeypatch.setattr(gradio_app_module, "format_experiment_results_html", broken_report)
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment report failure test"),
+        ContextMemory(),
+        _supervisor_with_ranked_hypothesis(),
+    )
+
+    assert result["status"].startswith("⚠️ Cycle 1 kept its hypotheses, but a later step failed")
+    assert "Kept hypothesis" in result["results_html"]
+    assert "A later step failed" in result["results_html"]
+    assert result["cycle_details"]["steps"]["ranking_1"]["hypotheses"][0]["id"] == "H1"
+    assert any("NoneType" in error for error in result["cycle_details"]["errors"])
+
+
+def test_execute_cycle_keeps_hypotheses_when_the_experiment_raises(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.setattr(DatasetManager, "get_latest_dataset", lambda self: "data/5g_nidd/5g_nidd.csv")
+    monkeypatch.chdir(tmp_path)
+
+    def crashing_experiment(self, **kwargs):
+        raise RuntimeError("experiment pipeline crashed")
+
+    monkeypatch.setattr(gradio_app_module.ExperimentOrchestrator, "run_experiment", crashing_experiment)
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Experiment crash test"),
+        ContextMemory(),
+        _supervisor_with_ranked_hypothesis(),
+    )
+
+    assert "experiment pipeline crashed" in result["status"]
+    assert result["status"].startswith("⚠️")
+    assert "Kept hypothesis" in result["results_html"]
+
+
+def test_execute_cycle_reports_a_failure_before_any_hypothesis(gradio_app_module, monkeypatch, tmp_path):
+    from app.models import ContextMemory, ResearchGoal
+
+    monkeypatch.chdir(tmp_path)
+    cycle_supervisor = Mock()
+    cycle_supervisor.run.side_effect = RuntimeError("workflow crashed")
+
+    result = gradio_app_module.execute_cycle(
+        ResearchGoal(description="Early failure test"),
+        ContextMemory(),
+        cycle_supervisor,
+    )
+
+    assert result["status"] == "❌ Error during cycle execution: workflow crashed"
+    assert result["results_html"] == ""
+    assert result["cycle_details"]["steps"] == {}
+
+
 def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkeypatch, tmp_path):
     from app.models import ContextMemory, ResearchGoal
     from app.run_store import RUNS_DIR_ENV
@@ -910,8 +1080,10 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
     monkeypatch.setenv(RUNS_DIR_ENV, str(tmp_path))
     gradio_app_module.current_research_goal = ResearchGoal(description="status test")
     gradio_app_module.global_context = ContextMemory()
+    experiment_choices = []
 
-    def slow_cycle(research_goal, context, cycle_supervisor, progress_callback=None):
+    def slow_cycle(research_goal, context, cycle_supervisor, progress_callback=None, run_experiment=None):
+        experiment_choices.append(run_experiment)
         running_event = {
             "step": "generation",
             "status": "running",
@@ -948,8 +1120,11 @@ def test_run_cycle_with_progress_streams_active_status(gradio_app_module, monkey
     monkeypatch.setattr(gradio_app_module, "write_report", lambda run: "report.html")
     monkeypatch.setattr(gradio_app_module, "report_file_url", lambda path: "/report.html")
 
-    updates = list(gradio_app_module.run_cycle_with_progress(timeout_seconds=1, poll_seconds=0.001))
+    updates = list(
+        gradio_app_module.run_cycle_with_progress(timeout_seconds=1, poll_seconds=0.001, run_experiment=False)
+    )
 
+    assert experiment_choices == [False]
     assert any("Active work: Discovering evidence." in update[0] for update in updates)
     assert all("Streamed hypothesis" not in update[1] for update in updates[:-1])
     assert any("Elapsed:" in update[0] for update in updates)
@@ -969,7 +1144,7 @@ def test_run_cycle_with_progress_times_out(gradio_app_module, monkeypatch, tmp_p
     gradio_app_module.current_research_goal = ResearchGoal(description="timeout test")
     gradio_app_module.global_context = ContextMemory()
 
-    def stuck_cycle(research_goal, context, cycle_supervisor, progress_callback=None):
+    def stuck_cycle(research_goal, context, cycle_supervisor, progress_callback=None, run_experiment=None):
         if progress_callback:
             progress_callback(
                 {

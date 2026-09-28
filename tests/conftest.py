@@ -9,8 +9,10 @@ from app.config import config
 _PROVIDER_CREDENTIALS = (
     "LMSTUDIO_API_KEY",
     "LMSTUDIO_BASE_URL",
+    "LMSTUDIO_EMBEDDING_BASE_URL",
     "LMSTUDIO_MODEL",
     "SEMANTIC_SCHOLAR_API_KEY",
+    "OPENALEX_API_KEY",
     "SPRINGER_API_KEY",
     "SPRINGER_OPEN_ACCESS_API_KEY",
     "SPRINGER_META_API_KEY",
@@ -28,6 +30,18 @@ def disable_external_provider_credentials(monkeypatch, request):
         return
     for variable in _PROVIDER_CREDENTIALS:
         monkeypatch.delenv(variable, raising=False)
+    # Offline tests assume one LM Studio server, so chat and embedding calls keep
+    # their serialized order; tests of a separate embedding server opt in.
+    monkeypatch.setitem(config, "lmstudio_embedding_base_url", None)
+
+
+@pytest.fixture(autouse=True)
+def disable_lmstudio_model_switching(monkeypatch, request):
+    """Switching models queries the LM Studio server; tests of it opt back in."""
+
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setitem(config, "lmstudio_single_model_per_server", False)
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +50,15 @@ def disable_automatic_paper_downloads(monkeypatch):
 
     paper_library_config = config.setdefault("paper_library", {})
     monkeypatch.setitem(paper_library_config, "enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def disable_keyless_openalex(monkeypatch, request):
+    """OpenAlex needs no credential, so retrievers built in offline tests must not include it."""
+
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setitem(config.setdefault("openalex", {}), "enabled", False)
 
 
 @pytest.fixture(autouse=True)

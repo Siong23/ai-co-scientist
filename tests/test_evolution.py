@@ -276,8 +276,9 @@ def test_evolution_creates_new_children_with_lineage_and_selected_evidence():
         '{"title": "Divergent child", "hypothesis": "Transient membrane tension independently drives resistance.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
     ]
 
+    goal = _goal()
     with patch("app.agents.call_llm", side_effect=responses) as call_llm:
-        evolved = agent.evolve_hypotheses(context, _goal())
+        evolved = agent.evolve_hypotheses(context, goal)
 
     assert [child.evolution_strategy for child in evolved] == ["combination", "feasibility", "out_of_box"]
     assert evolved[0].parent_ids == ["H1", "H2"]
@@ -290,7 +291,7 @@ def test_evolution_creates_new_children_with_lineage_and_selected_evidence():
     assert second.to_dict() == original_second
     assert call_llm.call_count == 3
     assert call_llm.call_args_list[0].kwargs == {
-        "temperature": 0.7,
+        "temperature": goal.generation_temperature,
         "model": "offline-model",
         "max_tokens": 2048,
         "reasoning": "off",
@@ -331,19 +332,21 @@ def test_strategy_library_rotates_across_iterations():
     context, _, _ = _context()
     context.iteration_number = 1
     agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
-    responses = [
-        '{"title": "Simpler", "hypothesis": "A single intervention tests X.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
-        '{"title": "Grounded", "hypothesis": "Existing evidence supports testing X first.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}',
-    ]
+    simpler = '{"title": "Simpler", "hypothesis": "A single intervention tests X.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:1"]}'
+    grounded = '{"title": "Grounded", "hypothesis": "Existing evidence supports testing Y first.", "rationale": "The selected evidence supports the change.", "feasibility": "Run the stated test against the named baseline; an unchanged outcome rejects it.", "evidence_source_ids": ["paper:3"]}'
 
-    with patch("app.agents.call_llm", side_effect=responses) as call_llm:
+    def respond(prompt, **kwargs):
+        return grounded if "Evolution strategy: grounding" in prompt else simpler
+
+    with patch("app.agents.call_llm", side_effect=respond) as call_llm:
         evolved = agent.evolve_hypotheses(context, _goal())
 
     assert [child.evolution_strategy for child in evolved] == ["simplification", "grounding"]
+    # Each single-parent refinement works on its own parent.
+    assert [child.parent_ids for child in evolved] == [["H1"], ["H2"]]
     prompts = [call.args[0] for call in call_llm.call_args_list]
-    assert "Evolution strategy: simplification" in prompts[0]
-    assert "Evolution strategy: grounding" in prompts[1]
-    assert "Transport study" in prompts[1]
+    grounding_prompt = next(prompt for prompt in prompts if "Evolution strategy: grounding" in prompt)
+    assert "Stress study" in grounding_prompt
 
 
 def test_failed_evolution_calls_keep_parents_without_stitched_fallback():
@@ -571,6 +574,16 @@ def test_evolution_prompt_requires_rationale_and_feasibility_sections():
     assert "A candidate without a rationale and a feasibility plan is rejected." in prompt
 
 
+def test_evolution_prompt_requires_every_explicit_goal_requirement():
+    """An evolved child that keeps only a subset of the goal fails goal alignment."""
+
+    _, first, _ = _context()
+    prompt = build_evolution_prompt("simplification", [first], _goal())
+
+    assert "must address every explicit requirement the goal states, not a subset" in prompt
+    assert "names every explicit requirement of the\n  research goal" in prompt
+
+
 def test_evolution_child_without_sections_is_repaired_once():
     context, parent, _ = _context()
     agent = EvolutionAgent(strategies=("feasibility",), max_candidates_per_cycle=1)
@@ -691,3 +704,93 @@ def test_unreviewed_parents_keep_the_rotation_order():
     agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=2)
 
     assert agent._strategies_for_cycle(context, [first, second]) == ["simplification", "grounding"]
+
+
+def _verdict(hypothesis_id: str, recommendation: str, alignment: float, confidence: float, parents=()) -> Hypothesis:
+    hypothesis = Hypothesis(hypothesis_id, "Seed", "A seed hypothesis.")
+    hypothesis.reflection_report = ReflectionReport(
+        recommendation=recommendation,
+        alignment_score=alignment,
+        overall_confidence=confidence,
+    )
+    hypothesis.parent_ids = list(parents)
+    return hypothesis
+
+
+def test_parent_selection_moves_past_evolved_parents_before_any_tournament_match():
+    """Every Elo is still 1200, and sorting on the ID re-sent the Generation parents each pass."""
+
+    candidates = [
+        _verdict("G2059", "REVISE", 6.0, 5.4),
+        _verdict("G1111", "REVISE", 7.0, 5.5),
+        _verdict("E3634", "REVISE", 8.0, 5.0, parents=["G2059"]),
+        _verdict("E4728", "REVISE", 9.0, 5.6, parents=["G2059", "G1111"]),
+        _verdict("E8807", "ACCEPT", 10.0, 7.4, parents=["G2059", "G1111"]),
+    ]
+
+    selected = EvolutionAgent._select_parents(candidates, 2, None)
+
+    assert [parent.hypothesis_id for parent in selected] == ["E8807", "E4728"]
+
+
+def test_parent_selection_follows_elo_once_matches_are_played():
+    ranked_higher = _verdict("G2059", "REVISE", 6.0, 5.4)
+    ranked_higher.elo_score = 1216.0
+    child = _verdict("E8807", "ACCEPT", 10.0, 7.4, parents=["G2059"])
+
+    selected = EvolutionAgent._select_parents([child, ranked_higher], 1, None)
+
+    assert [parent.hypothesis_id for parent in selected] == ["G2059"]
+
+
+def test_parent_selection_puts_ranked_hypotheses_ahead_of_the_default_elo():
+    """An unranked REVISE still at 1200 must not beat a ranked hypothesis that lost narrowly."""
+
+    runner_up = _verdict("E4071", "ACCEPT", 10.0, 5.2)
+    runner_up.elo_score = 1199.97
+    unranked = _verdict("G1653", "REVISE", 5.0, 6.8)
+
+    selected = EvolutionAgent._select_parents([unranked, runner_up], 1, None, ranked_ids={"E4071"})
+
+    assert [parent.hypothesis_id for parent in selected] == ["E4071"]
+
+
+def test_out_of_box_takes_the_last_of_three_slots_when_two_parents_exist():
+    """Rotation reached out_of_box only on a second Cycle, so one Cycle's children shared one cluster."""
+
+    context, first, second = _context()
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+
+    assert agent._strategies_for_cycle(context, [first, second]) == ["combination", "feasibility", "out_of_box"]
+
+
+def test_single_parent_strategies_take_distinct_parents_by_need():
+    agent = EvolutionAgent(strategies=EVOLUTION_STRATEGIES, max_candidates_per_cycle=3)
+    strong = _reviewed("H1")
+    untestable = _reviewed("H2", testability_score=2.0)
+
+    assignments = agent._assign_parents(["combination", "simplification", "feasibility"], [strong, untestable])
+
+    assert [parent.hypothesis_id for parent in assignments["combination"]] == ["H1", "H2"]
+    assert [parent.hypothesis_id for parent in assignments["simplification"]] == ["H2"]
+    assert [parent.hypothesis_id for parent in assignments["feasibility"]] == ["H1"]
+
+
+def test_revise_parent_leaves_the_pool_once_its_revision_exists():
+    context = ContextMemory()
+    accepted = _verdict("G7173", "ACCEPT", 10.0, 7.1)
+    revise = _verdict("G1653", "REVISE", 5.0, 6.8)
+    context.add_hypothesis(accepted)
+    context.add_hypothesis(revise)
+    child = Hypothesis("E7447", "Combined", "A combined hypothesis.")
+    child.parent_ids = ["G7173", "G1653"]
+    supervisor = SupervisorAgent()
+    supervisor.evolution_agent = Mock()
+    supervisor.evolution_agent.evolve_hypotheses.return_value = [child]
+
+    supervisor.step_evolution(_goal(), context, lambda *args, **kwargs: None, {})
+
+    assert context.hypotheses["E7447"].is_active
+    assert accepted.is_active
+    assert not revise.is_active
+    assert revise.deactivation_reason == "revised_as_E7447"

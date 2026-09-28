@@ -11,6 +11,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Callable, Dict, List, Literal, Sequence
 
 from ..config import config
@@ -47,6 +48,59 @@ def _output_token_limit(task: str, default: int) -> int:
         return max(1, int(configured.get(task, default)))
     except (TypeError, ValueError):
         return default
+
+
+_QUOTE_TOKEN = re.compile(r"\w+(?:[-']\w+)*")
+# A quote may skip at most this many stretches of the goal, which covers a
+# shared lead-in applied to one list item ("adjusting ... handover policies")
+# plus a trailing qualifier, without letting scattered goal words pass.
+_MAX_GOAL_QUOTE_ELISIONS = 2
+
+
+def goal_quote_is_faithful(goal_quote: str, research_goal: str) -> bool:
+    """Return whether a quote uses only the goal's own words, in the goal's order.
+
+    A verbatim span always passes. So does a span that elides part of the goal,
+    as a planner does when it distributes a shared verb over a coordinated list:
+    "dynamically adjusting network slices" from "dynamically adjusting radio
+    resources, network slices, ...". Each kept stretch must still appear
+    contiguously and in order, so a quote cannot introduce a word the goal lacks.
+    """
+
+    normalized_goal = " ".join(research_goal.casefold().split())
+    normalized_quote = " ".join(goal_quote.casefold().split())
+    if not normalized_quote:
+        return False
+    if normalized_quote in normalized_goal:
+        return True
+
+    goal_tokens = _QUOTE_TOKEN.findall(normalized_goal)
+    quote_tokens = _QUOTE_TOKEN.findall(normalized_quote)
+    if not quote_tokens:
+        return False
+
+    def find_run(run: list[str], start: int) -> int:
+        """Return the end of the first contiguous occurrence at or after start, or -1."""
+        width = len(run)
+        for index in range(start, len(goal_tokens) - width + 1):
+            if goal_tokens[index : index + width] == run:
+                return index + width
+        return -1
+
+    def matches(remaining: list[str], start: int, segments_left: int) -> bool:
+        if not remaining:
+            return True
+        if segments_left == 0:
+            return False
+        # Try the longest leading run first; any split that keeps every run
+        # contiguous and ordered is acceptable.
+        for width in range(len(remaining), 0, -1):
+            end = find_run(remaining[:width], start)
+            if end != -1 and matches(remaining[width:], end, segments_left - 1):
+                return True
+        return False
+
+    return matches(quote_tokens, 0, _MAX_GOAL_QUOTE_ELISIONS + 1)
 
 
 # Required fields for any valid candidate hypothesis emitted by the LLM
@@ -399,6 +453,25 @@ def call_llm_for_generation(
         ]
 
 
+_QUERY_STEM_TRAILING_WORDS = {"a", "an", "and", "as", "for", "in", "of", "on", "or", "the", "to", "with"}
+
+
+def _query_stem(text: str, limit: int) -> str:
+    """Shorten ``text`` for a search query at a word boundary.
+
+    A plain character slice sent "handovers, an" and "performanc" to the
+    search providers; a dangling conjunction or article is dropped as well.
+    """
+
+    words = " ".join(str(text).split()).rstrip(" .,;:")
+    if len(words) > limit:
+        words = words[: limit + 1].rsplit(" ", 1)[0]
+    kept = words.split(" ")
+    while len(kept) > 1 and kept[-1].strip(".,;:").casefold() in _QUERY_STEM_TRAILING_WORDS:
+        kept.pop()
+    return " ".join(kept).rstrip(" .,;:")
+
+
 def call_llm_for_search_queries(
     research_goal: str,
     model: str | None = None,
@@ -460,7 +533,6 @@ def call_llm_for_search_queries(
         if not isinstance(raw_hypotheses, list):
             raise ValueError("Research Planner must return provisional_hypotheses.")
 
-        normalized_goal = " ".join(research_goal.casefold().split())
         hypotheses: list[ProvisionalHypothesis] = []
         seen_ids: set[str] = set()
         seen_roles: set[str] = set()
@@ -471,14 +543,12 @@ def call_llm_for_search_queries(
             role = str(raw_hypothesis.get("role", "")).strip().casefold()
             statement = str(raw_hypothesis.get("statement", "")).strip()
             goal_quote = str(raw_hypothesis.get("goal_quote", "")).strip()
-            normalized_quote = " ".join(goal_quote.casefold().split())
             if (
                 not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", hypothesis_id)
                 or role not in {"primary", "alternative", "null"}
                 or not statement
                 or len(statement.split()) > 60
-                or not normalized_quote
-                or normalized_quote not in normalized_goal
+                or not goal_quote_is_faithful(goal_quote, research_goal)
                 or len(goal_quote.split()) > 16
                 or hypothesis_id in seen_ids
                 or role in seen_roles
@@ -648,15 +718,12 @@ def call_llm_for_search_queries(
             aspect_id = str(raw_aspect.get("id", "")).strip()
             goal_quote = str(raw_aspect.get("goal_quote", "")).strip()
             evidence_need = str(raw_aspect.get("evidence_need", "")).strip()
-            normalized_goal = " ".join(research_goal.casefold().split())
-            normalized_quote = " ".join(goal_quote.casefold().split())
             normalized_evidence_need = " ".join(evidence_need.casefold().split())
             if (
                 # IDs are opaque references, not Python identifiers. Technology
                 # names such as 5G and 3D naturally produce digit-leading IDs.
                 not re.fullmatch(r"[a-z0-9][a-z0-9_]{1,39}", aspect_id)
-                or not normalized_quote
-                or normalized_quote not in normalized_goal
+                or not goal_quote_is_faithful(goal_quote, research_goal)
                 or len(goal_quote.split()) > 16
                 or (evidence_need and len(evidence_need.split()) > 24)
                 or aspect_id in seen_aspect_ids
@@ -838,21 +905,21 @@ def call_llm_for_search_queries(
                 for intent in sorted(missing_intents):
                     anchor = primary
                     if intent == "prior_art" and primary:
-                        query_text = primary.statement[:80].rstrip() + " existing methods prior work"
-                        sub_q = f"What prior work exists on: {primary.statement[:60]}?"
+                        query_text = _query_stem(primary.statement, 80) + " existing methods prior work"
+                        sub_q = f"What prior work exists on: {_query_stem(primary.statement, 60)}?"
                     elif intent == "counterevidence":
                         anchor = null_hyp or primary
                         anchor_text = anchor.statement if anchor else research_goal
-                        query_text = anchor_text[:80].rstrip() + " limitations challenges contradictory evidence"
-                        sub_q = f"What evidence challenges: {anchor_text[:60]}?"
+                        query_text = _query_stem(anchor_text, 80) + " limitations challenges contradictory evidence"
+                        sub_q = f"What evidence challenges: {_query_stem(anchor_text, 60)}?"
                     elif intent == "support" and primary:
-                        query_text = primary.statement[:80].rstrip() + " experimental evidence validation"
-                        sub_q = f"What evidence supports: {primary.statement[:60]}?"
+                        query_text = _query_stem(primary.statement, 80) + " experimental evidence validation"
+                        sub_q = f"What evidence supports: {_query_stem(primary.statement, 60)}?"
                     elif intent == "prior_art":
-                        query_text = research_goal[:80].rstrip() + " existing literature prior art"
+                        query_text = _query_stem(research_goal, 80) + " existing literature prior art"
                         sub_q = "What prior work addresses the research goal?"
                     elif intent == "support":
-                        query_text = research_goal[:80].rstrip() + " empirical evidence primary sources"
+                        query_text = _query_stem(research_goal, 80) + " empirical evidence primary sources"
                         sub_q = "What evidence supports claims relevant to the research goal?"
                     else:
                         continue
@@ -886,17 +953,33 @@ def call_llm_for_search_queries(
                             replaceable.append(index)
                     else:
                         seen_intents.add(planned_query.search_intent)
+                # A requirement's only query is never given up: one run replaced
+                # the slicing query this way, and slicing then went unsearched.
+                # When every slot is some requirement's only query, the missing
+                # intents are added on top of the budget instead.
+                requirement_query_counts: dict[str, int] = {}
+                for planned_query in normalized_queries:
+                    if planned_query.evidence_requirement_id:
+                        requirement_query_counts[planned_query.evidence_requirement_id] = (
+                            requirement_query_counts.get(planned_query.evidence_requirement_id, 0) + 1
+                        )
+
+                def can_give_up(candidate: int) -> bool:
+                    requirement_id = normalized_queries[candidate].evidence_requirement_id
+                    return not requirement_id or requirement_query_counts[requirement_id] > 1
+
                 for synthesized in synthesized_queries:
                     if len(normalized_queries) < query_count:
                         normalized_queries.append(synthesized)
                         continue
-                    if not replaceable:
-                        raise ValueError(
-                            "Query plan omitted required support, counterevidence, or prior-art intents "
-                            "and left no generic query within the query budget to replace."
-                        )
-                    index = replaceable.pop(0)
+                    index = next((candidate for candidate in replaceable if can_give_up(candidate)), None)
+                    if index is None:
+                        normalized_queries.append(synthesized)
+                        continue
+                    replaceable.remove(index)
                     replaced = normalized_queries[index]
+                    if replaced.evidence_requirement_id:
+                        requirement_query_counts[replaced.evidence_requirement_id] -= 1
                     normalized_queries[index] = SearchQuery(
                         query=synthesized.query,
                         sub_question=synthesized.sub_question,
@@ -926,12 +1009,17 @@ def call_llm_for_search_queries(
             research_plan=structured_research_plan,
         )
 
+    # Without the date the planner fell back to its training years and asked
+    # for "Recent (2020-2024)" research in September 2026.
     planner_prompt = f"""
 USER RESEARCH GOAL
 {research_goal}
 
 REQUESTED RESEARCH TYPE
 {fixed_research_type or "auto (infer one supported research type)"}
+
+TODAY'S DATE
+{date.today().isoformat()}
 """.strip()
     planner_response = _call_llm(
         planner_prompt,

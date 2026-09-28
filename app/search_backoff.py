@@ -44,7 +44,12 @@ def guarded_search(source, search, *, provider_name=""):
         status = getattr(source, "last_error_status", None)
         kind = getattr(source, "last_error_kind", "")
         delay = 0
-        if status in (401, 402, 403, 432, 433) or kind == "quota_or_plan_rejection":
+        # arXiv answers 406 once it throttles this host, and every query its
+        # cache misses keeps failing for tens of minutes: a probe at one request
+        # a minute stayed blocked for 19. Retrying inside a run only extends it.
+        if status == 406:
+            delay = 1800
+        elif status in (401, 402, 403, 432, 433) or kind == "quota_or_plan_rejection":
             delay = 300
         elif status in (429, 503) or kind == "rate_limited":
             delay = 60

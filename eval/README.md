@@ -79,7 +79,7 @@ Every later run is then just the run and the goal:
 ```powershell
 uv run python scripts/evaluate_run.py `
   ../results/runs/run-20260911-073448-611c235c.json `
-  --goal-file goals/goal_005_5G-NIDD.txt `
+  --goal-file goals/Goal1.txt `
   --llm-metrics `
   --metric-suite hypothesis
 ```
@@ -453,7 +453,7 @@ The command exits with status 0 when all completed metrics pass, 1 when at least
 one metric is below threshold or no metric could run, and 2 for invalid input,
 configuration, or judge errors.
 
-The default fixed goal is `goals/goal_001_perovskite_humidity.txt`. Supply
+The default fixed goal is `goals/Goal1.txt`. Supply
 another goal with `--goal-file PATH`. A goal mismatch is reported as a
 validation error and returns a non-zero exit status.
 
