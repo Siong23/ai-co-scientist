@@ -22,7 +22,7 @@ RUNS_DIR_ENV = "CO_SCIENTIST_RUNS_DIR"
 # by the current template from one left over by an older version. Bump the
 # version whenever render_report()'s output changes in a way that should
 # invalidate reports already on disk.
-REPORT_TEMPLATE_MARKER = "<!-- co-scientist-report-template: v2 -->"
+REPORT_TEMPLATE_MARKER = "<!-- co-scientist-report-template: v4 -->"
 
 SECRET_PATTERNS = [
     re.compile(r"sk-or-v1-[A-Za-z0-9_-]+"),
@@ -248,7 +248,24 @@ def render_report(run: Dict[str, Any]) -> str:
     cycle = run.get("cycle_details", {})
     steps = cycle.get("steps", {})
     research_trace = cycle.get("research_trace", [])
+
     final_hypotheses = _final_hypotheses(steps)
+
+    experiment_result = run.get("experiment_result")
+    if not isinstance(experiment_result, dict):
+        experiment_result = {}
+
+    # Prefer the explicitly saved comparison result. Fall back to the
+    # cycle_details copy for compatibility with older saved runs.
+    comparison_result = run.get("comparison_result")
+    if not isinstance(comparison_result, dict) or not comparison_result:
+        comparison_result = cycle.get("comparison_result")
+
+    if not isinstance(comparison_result, dict):
+        comparison_result = {}
+
+    status = _escape(run.get("status"), "Unknown")
+    status_class = status.lower().replace(" ", "-")
 
     html_parts = [
         "<!doctype html>",
@@ -258,22 +275,164 @@ def render_report(run: Dict[str, Any]) -> str:
         '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>{_escape(run.get('run_id'), 'Run report')}</title>",
-        "<style>",
-        "body{font-family:Arial,sans-serif;line-height:1.5;margin:32px;color:#1f2933;background:#fff}",
-        "main{max-width:960px;margin:0 auto}",
-        "section{border-top:1px solid #d9e2ec;padding-top:18px;margin-top:24px}",
-        ".meta{color:#52606d}.hypothesis{border-left:4px solid #2f80ed;padding-left:12px;margin:14px 0}",
-        "pre{white-space:pre-wrap;background:#f5f7fa;padding:12px;border-radius:6px;overflow:auto}",
-        "table{border-collapse:collapse;width:100%}td,th{border:1px solid #d9e2ec;padding:8px;text-align:left}",
-        ".file-link{display:inline-block;padding:8px 12px;border:1px solid #bcccdc;border-radius:6px;text-decoration:none}",
-        ".file-link:hover{text-decoration:underline}",
-        ".file-missing{color:#9b1c1c}",
-        "</style>",
+        """
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                line-height: 1.5;
+                margin: 32px;
+                color: #1f2933;
+                background: #f8fafc;
+            }
+
+            main {
+                max-width: 1100px;
+                margin: 0 auto;
+            }
+
+            section {
+                background: #ffffff;
+                border: 1px solid #d9e2ec;
+                border-radius: 10px;
+                padding: 22px;
+                margin-top: 24px;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+            }
+
+            h1 {
+                margin-bottom: 4px;
+            }
+
+            h2 {
+                margin-top: 0;
+            }
+
+            h3 {
+                margin-top: 20px;
+            }
+
+            .meta {
+                color: #52606d;
+            }
+
+            .status {
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-weight: 600;
+            }
+
+            .status.completed,
+            .status.success {
+                color: #166534;
+                background: #dcfce7;
+            }
+
+            .status.warning {
+                color: #92400e;
+                background: #fef3c7;
+            }
+
+            .status.error,
+            .status.failed {
+                color: #991b1b;
+                background: #fee2e2;
+            }
+
+            .hypothesis {
+                border-left: 4px solid #2f80ed;
+                background: #f7fbff;
+                padding: 16px 18px;
+                margin: 14px 0;
+                border-radius: 6px;
+            }
+
+            .selected-hypothesis {
+                border-left: 5px solid #059669;
+                background: #f0fdf4;
+                padding: 18px;
+                border-radius: 8px;
+                margin-top: 12px;
+            }
+
+            .metric-good {
+                font-weight: 600;
+            }
+
+            .metric-difference {
+                font-weight: 600;
+                white-space: nowrap;
+            }
+
+            pre {
+                white-space: pre-wrap;
+                background: #f5f7fa;
+                padding: 12px;
+                border-radius: 6px;
+                overflow: auto;
+            }
+
+            table {
+                border-collapse: collapse;
+                width: 100%;
+                margin-top: 10px;
+            }
+
+            td,
+            th {
+                border: 1px solid #d9e2ec;
+                padding: 9px;
+                text-align: left;
+                vertical-align: top;
+            }
+
+            th {
+                background: #f5f7fa;
+            }
+
+            .file-link {
+                display: inline-block;
+                padding: 7px 11px;
+                border: 1px solid #bcccdc;
+                border-radius: 6px;
+                text-decoration: none;
+            }
+
+            .file-link:hover {
+                text-decoration: underline;
+            }
+
+            .file-missing {
+                color: #9b1c1c;
+            }
+
+            .source-list {
+                margin: 8px 0;
+                padding-left: 22px;
+            }
+
+            .muted {
+                color: #6b7280;
+            }
+
+            details {
+                margin-top: 12px;
+                border: 1px solid #d9e2ec;
+                border-radius: 7px;
+                padding: 10px 14px;
+                background: #fafbfc;
+            }
+
+            summary {
+                cursor: pointer;
+                font-weight: 600;
+            }
+        </style>
+        """,
         "</head>",
         "<body><main>",
         f"<h1>Research Run {_escape(run.get('run_id'))}</h1>",
         f'<p class="meta">Created: {_escape(run.get("created_at"))}</p>',
-        f"<p>{_escape(run.get('status'))}</p>",
+        f'<p><span class="status {status_class}">{status}</span></p>',
         "<section><h2>Research Goal</h2>",
         f"<p>{_escape(goal.get('description'))}</p>",
         _settings_table(goal),
@@ -289,11 +448,60 @@ def render_report(run: Dict[str, Any]) -> str:
 
     html_parts.append("</section>")
     experiment_result = run.get("experiment_result")
-    if isinstance(experiment_result, dict) and experiment_result:
+
+    # ------------------------------------------------------------
+    # Selected Rank #1 hypothesis
+    # ------------------------------------------------------------
+
+    selected_hypothesis = _get_selected_experiment_hypothesis(
+        experiment_result,
+        final_hypotheses,
+    )
+
+    if selected_hypothesis:
+        html_parts.append(
+            "<section>"
+            "<h2>Selected Rank #1 Hypothesis (For Automated Experiment)</h2>"
+            '<div class="selected-hypothesis">'
+            f"<p><strong>Title:</strong> "
+            f"{_escape(selected_hypothesis.get('title'), 'Untitled')}</p>"
+            f"<p><strong>ID:</strong> "
+            f"{_escape(selected_hypothesis.get('id'))}</p>"
+            f"<p>{_escape(selected_hypothesis.get('text'))}</p>"
+            "</div>"
+            "</section>"
+        )
+
+    # ------------------------------------------------------------
+    # Evidence / reference experiment
+    # ------------------------------------------------------------
+
+    if experiment_result:
+        evidence_section = _evidence_reference_section(experiment_result)
+
+        if evidence_section:
+            html_parts.append(evidence_section)
+
+    # ------------------------------------------------------------
+    # Automated experiment
+    # ------------------------------------------------------------
+
+    if experiment_result:
         html_parts.append(_experiment_report_section(experiment_result))
-    comparison_result = (run.get("cycle_details", {}).get("comparison_result"))
-    if isinstance(comparison_result, dict) and comparison_result:
-        html_parts.append(_comparison_report_section(comparison_result))
+
+    # ------------------------------------------------------------
+    # Paper vs experiment
+    # ------------------------------------------------------------
+
+    if comparison_result:
+        html_parts.append(
+            _comparison_report_section(comparison_result)
+        )
+
+    # ------------------------------------------------------------
+    # Research trace
+    # ------------------------------------------------------------
+
     if research_trace:
         html_parts.extend(
             [
@@ -305,20 +513,28 @@ def render_report(run: Dict[str, Any]) -> str:
                 "</section>",
             ]
         )
+
+    # ------------------------------------------------------------
+    # Cycle steps
+    # ------------------------------------------------------------
+
     html_parts.append("<section><h2>Cycle Steps</h2>")
-    # for step_name, step_data in steps.items():
-    #     hypotheses = step_data.get("hypotheses", []) if isinstance(step_data, dict) else []
-    #     html_parts.append(f"<h3>{_escape(step_name)}</h3>")
-    #     html_parts.append(f"<p>{len(hypotheses)} hypotheses</p>")
-    #     if step_name == "meta_review":
-    #         html_parts.append(f"<pre>{_escape(json.dumps(step_data, indent=2, sort_keys=True))}</pre>")
+
     for step_name, step_data in steps.items():
-        hypotheses = step_data.get("hypotheses", []) if isinstance(step_data, dict) else []
-        html_parts.append(f"<h3>{_escape(step_name)}</h3>")
-        html_parts.append(f"<p>{len(hypotheses)} hypotheses</p>")
+        hypotheses = (
+            step_data.get("hypotheses", [])
+            if isinstance(step_data, dict)
+            else []
+        )
+
+        html_parts.append(
+            f"<h3>{_escape(step_name)}</h3>"
+            f"<p>{len(hypotheses)} hypotheses</p>"
+        )
 
         if step_name == "generation":
             funnel = step_data.get("evidence_funnel", {})
+
             if isinstance(funnel, dict) and funnel:
                 labels = (
                     ("raw_search_hits", "Raw search hits"),
@@ -338,25 +554,54 @@ def render_report(run: Dict[str, Any]) -> str:
                     ("coverage_approved_sources", "Coverage-approved sources"),
                     ("generation_consumed_sources", "Generation-consumed sources"),
                 )
-                html_parts.append("<h4>Evidence funnel</h4><table><tbody>")
+
+                html_parts.append(
+                    "<h4>Evidence funnel</h4>"
+                    "<table><tbody>"
+                )
+
                 for key, label in labels:
-                    html_parts.append(f"<tr><th>{_escape(label)}</th><td>{_escape(funnel.get(key, 0))}</td></tr>")
+                    html_parts.append(
+                        f"<tr><th>{_escape(label)}</th>"
+                        f"<td>{_escape(funnel.get(key, 0))}</td></tr>"
+                    )
+
                 html_parts.append("</tbody></table>")
 
             pipeline = step_data.get("evidence_pipeline", [])
+
             if isinstance(pipeline, list) and pipeline:
                 html_parts.append(
-                    "<h4>Evidence path diagnostics</h4><table><thead><tr>"
-                    "<th>Requirement</th><th>Query</th><th>Provider</th><th>Raw results</th>"
-                    "<th>Source</th><th>Rank</th><th>Reserved</th><th>PDF eligible</th>"
-                    "<th>Attempted</th><th>Acquisition</th><th>Index</th><th>Indexed chunks</th>"
-                    "<th>Selected chunk IDs</th><th>Strict gate</th><th>Coverage</th>"
+                    '<details style="max-height: 400px; overflow-y: auto; overflow-x: auto; border: 1px solid #ddd; border-radius: 6px;">'
+                    '<summary>Evidence path diagnostics</summary>'
+                    '<table><thead><tr>'
+                    '<th>Requirement</th>'
+                    '<th>Query</th>'
+                    '<th>Provider</th>'
+                    "<th>Raw results</th>"
+                    "<th>Source</th>"
+                    "<th>Rank</th>"
+                    "<th>Reserved</th>"
+                    "<th>PDF eligible</th>"
+                    "<th>Attempted</th>"
+                    "<th>Acquisition</th>"
+                    "<th>Index</th>"
+                    "<th>Indexed chunks</th>"
+                    "<th>Selected chunk IDs</th>"
+                    "<th>Strict gate</th>"
+                    "<th>Coverage</th>"
                     "</tr></thead><tbody>"
                 )
+
                 for item in pipeline:
                     if not isinstance(item, dict):
                         continue
-                    selected_chunk_ids = ", ".join(str(value) for value in item.get("selected_chunk_ids") or [])
+
+                    selected_chunk_ids = ", ".join(
+                        str(value)
+                        for value in item.get("selected_chunk_ids") or []
+                    )
+
                     html_parts.append(
                         "<tr>"
                         f"<td>{_escape(item.get('requirement_id') or 'unscoped')}</td>"
@@ -376,72 +621,336 @@ def render_report(run: Dict[str, Any]) -> str:
                         f"<td>{_escape(bool(item.get('coverage_contribution')))}</td>"
                         "</tr>"
                     )
-                html_parts.append("</tbody></table>")
 
-        # ----------------------------
-        # Ranking results
-        # ----------------------------
+                html_parts.append(
+                    "</tbody></table>"
+                    "</details>"
+                )
+
         if step_name.startswith("ranking"):
             tournament = step_data.get("tournament_results", [])
+
             if tournament:
-                html_parts.append("""
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Comparison</th>
-                            <th>Outcome</th>
-                            <th>Confidence</th>
-                            <th>Criteria</th>
-                            <th>Reasoning</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                """)
+                html_parts.append(
+                    "<details>"
+                    "<summary>Ranking Tournament Details</summary>"
+                    "<table>"
+                    "<thead><tr>"
+                    "<th>Comparison</th>"
+                    "<th>Outcome</th>"
+                    "<th>Confidence</th>"
+                    "<th>Criteria</th>"
+                    "<th>Reasoning</th>"
+                    "</tr></thead><tbody>"
+                )
+
+                title_lookup = {
+                    h["id"]: h["title"]
+                    for h in hypotheses
+                    if isinstance(h, dict) and h.get("id")
+                }
+
                 for result in tournament:
-                    confidence = f"{result.get('confidence', 1)}/10"
-                    criteria = ", ".join(result.get("criteria", []))
-                    title_lookup = {h["id"]: h["title"] for h in hypotheses}
-                    title_a = title_lookup.get(result.get("hypothesis_a"), result.get("hypothesis_a"))
-                    title_b = title_lookup.get(result.get("hypothesis_b"), result.get("hypothesis_b"))
-                    html_parts.append(f"""
-                    <tr>
-                        <td>
-                            {_escape(title_a)} (ID: <b>{result.get("hypothesis_a")}</b>)
-                            vs
-                            {_escape(title_b)} (ID: <b>{result.get("hypothesis_b")}</b>)
-                        </td>
+                    confidence = (
+                        f"{result.get('confidence', 1)}/10"
+                    )
+                    criteria = ", ".join(
+                        result.get("criteria", [])
+                    )
 
-                        <td style="text-align: center;">
-                            {result.get("outcome")}
-                        </td>
+                    title_a = title_lookup.get(
+                        result.get("hypothesis_a"),
+                        result.get("hypothesis_a"),
+                    )
+                    title_b = title_lookup.get(
+                        result.get("hypothesis_b"),
+                        result.get("hypothesis_b"),
+                    )
 
-                        <td style="text-align: center;">
-                            {confidence}
-                        </td>
+                    html_parts.append(
+                        "<tr>"
+                        "<td>"
+                        f"{_escape(title_a)} "
+                        f"(ID: <b>{_escape(result.get('hypothesis_a'))}</b>)"
+                        " vs "
+                        f"{_escape(title_b)} "
+                        f"(ID: <b>{_escape(result.get('hypothesis_b'))}</b>)"
+                        "</td>"
+                        f"<td>{_escape(result.get('outcome'))}</td>"
+                        f"<td>{_escape(confidence)}</td>"
+                        f"<td>{_escape(criteria)}</td>"
+                        f"<td>{_escape(result.get('reasoning', ''))}</td>"
+                        "</tr>"
+                    )
 
-                        <td>
-                            {_escape(criteria)}
-                        </td>
+                html_parts.append(
+                    "</tbody></table>"
+                    "</details>"
+                )
 
-                        <td>
-                            {_escape(result.get("reasoning", ""))}
-                        </td>
-                    </tr>
-                    """)
-                html_parts.append("</tbody></table>")
         if step_name == "meta_review":
-            html_parts.append(f"<pre>{_escape(json.dumps(step_data, indent=2, sort_keys=True))}</pre>")
+            html_parts.append(
+                "<details>"
+                "<summary>Meta Review Data</summary>"
+                f"<pre>{_escape(json.dumps(step_data, indent=2, sort_keys=True))}</pre>"
+                "</details>"
+            )
 
     html_parts.extend(
         [
-            "</section><section><h2>References</h2>",
+            "</section>",
+            "<section><h2>References</h2>",
             "<p>Reference results are stored from the app display for this run.</p>",
             f"<pre>{_escape(run.get('references_html'))}</pre>",
             "</section>",
             "</main></body></html>",
         ]
     )
+
     return "\n".join(html_parts)
+
+
+def _format_report_value(value: Any) -> str:
+    if value is None:
+        return "N/A"
+
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True)
+
+    return str(value)
+
+
+def _format_report_metric(value: Any, metric_name: str = "") -> str:
+    """
+    Format a metric for the evidence/reference section.
+
+    Classification metrics represented as proportions are displayed as
+    percentages when the value is between 0 and 1.
+    """
+    if value is None:
+        return "N/A"
+
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+
+        percentage_metrics = {
+            "accuracy",
+            "acc",
+            "precision",
+            "precision_weighted",
+            "weighted_precision",
+            "recall",
+            "recall_weighted",
+            "weighted_recall",
+            "f1",
+            "f1_score",
+            "f1_weighted",
+            "weighted_f1",
+        }
+
+        if metric_name.lower() in percentage_metrics and 0.0 <= numeric <= 1.0:
+            return f"{numeric * 100:.2f}%"
+
+        return f"{numeric:.4f}"
+
+    return str(value)
+
+
+def _evidence_reference_section(
+    experiment_result: Dict[str, Any],
+) -> str:
+    """
+    Render the evidence sources and reference experiment used to guide the
+    automated experiment.
+    """
+    if not isinstance(experiment_result, dict):
+        return ""
+
+    preparation = experiment_result.get(
+        "experiment_preparation",
+        {},
+    )
+
+    if not isinstance(preparation, dict):
+        preparation = {}
+
+    evidence_sources = (
+        preparation.get("evidence_sources")
+        or experiment_result.get("evidence_sources")
+        or []
+    )
+
+    if isinstance(evidence_sources, dict):
+        evidence_sources = [evidence_sources]
+
+    if not isinstance(evidence_sources, list):
+        evidence_sources = []
+
+    reference_experiment = (
+        preparation.get("reference_experiment")
+        or experiment_result.get("reference_experiment")
+        or {}
+    )
+
+    if not isinstance(reference_experiment, dict):
+        reference_experiment = {}
+
+    evaluation_guidance = (
+        preparation.get("evaluation_guidance")
+        or experiment_result.get("evaluation_guidance")
+        or {}
+    )
+
+    if not isinstance(evaluation_guidance, dict):
+        evaluation_guidance = {}
+
+    if not evidence_sources and not reference_experiment:
+        return ""
+
+    parts = [
+        "<section>",
+        "<h2>Evidence & Reference</h2>",
+        "<p class=\"muted\">"
+        "Research evidence used to guide the automated experiment."
+        "</p>",
+    ]
+
+    # ------------------------------------------------------------
+    # Evidence sources
+    # ------------------------------------------------------------
+
+    if evidence_sources:
+        parts.append("<h3>Evidence Sources</h3><ul class=\"source-list\">")
+
+        for source in evidence_sources:
+            if isinstance(source, dict):
+                title = (
+                    source.get("title")
+                    or source.get("name")
+                    or source.get("source_id")
+                    or "Untitled source"
+                )
+
+                url = source.get("url") or source.get("source_url")
+                source_id = source.get("source_id")
+
+                label = _escape(title)
+
+                if url:
+                    safe_url = _escape(url)
+                    label = (
+                        f'<a href="{safe_url}" target="_blank">'
+                        f"{label}</a>"
+                    )
+
+                if source_id:
+                    label += (
+                        f" <span class=\"muted\">"
+                        f"(ID: {_escape(source_id)})</span>"
+                    )
+
+                parts.append(f"<li>{label}</li>")
+
+            else:
+                parts.append(
+                    f"<li>{_escape(source)}</li>"
+                )
+
+        parts.append("</ul>")
+
+    # ------------------------------------------------------------
+    # Reference experiment
+    # ------------------------------------------------------------
+
+    if reference_experiment:
+        parts.append("<h3>Reference Experiment</h3>")
+
+        available = reference_experiment.get("available")
+
+        if available is not None:
+            parts.append(
+                f"<p><strong>Available:</strong> "
+                f"{_escape(available)}</p>"
+            )
+
+        models = (
+            reference_experiment.get("models")
+            or reference_experiment.get("model")
+        )
+
+        datasets = (
+            reference_experiment.get("datasets")
+            or reference_experiment.get("dataset")
+        )
+
+        sources = reference_experiment.get("sources")
+
+        if models:
+            parts.append(
+                f"<p><strong>Model:</strong> "
+                f"{_escape(_format_report_value(models))}</p>"
+            )
+
+        if datasets:
+            parts.append(
+                f"<p><strong>Dataset:</strong> "
+                f"{_escape(_format_report_value(datasets))}</p>"
+            )
+
+        if sources:
+            parts.append(
+                f"<p><strong>Sources:</strong> "
+                f"{_escape(_format_report_value(sources))}</p>"
+            )
+
+        reference_metrics = (
+            reference_experiment.get("reference_metrics")
+            or reference_experiment.get("metrics")
+            or {}
+        )
+
+        if isinstance(reference_metrics, dict) and reference_metrics:
+            parts.append(
+                "<h4>Reported Reference Metrics</h4>"
+                "<table>"
+                "<thead><tr>"
+                "<th>Metric</th>"
+                "<th>Reported Value</th>"
+                "</tr></thead>"
+                "<tbody>"
+            )
+
+            for name, value in reference_metrics.items():
+                parts.append(
+                    "<tr>"
+                    f"<td>{_escape(name)}</td>"
+                    f"<td>{_escape(_format_report_metric(value, name))}</td>"
+                    "</tr>"
+                )
+
+            parts.append("</tbody></table>")
+
+    # ------------------------------------------------------------
+    # Evaluation guidance
+    # ------------------------------------------------------------
+
+    preferred_metrics = evaluation_guidance.get(
+        "preferred_comparison_metrics"
+    )
+
+    if preferred_metrics:
+        parts.append(
+            "<h3>Evaluation Guidance</h3>"
+            f"<p><strong>Preferred comparison metrics:</strong> "
+            f"{_escape(_format_report_value(preferred_metrics))}</p>"
+        )
+
+    parts.append("</section>")
+
+    return "\n".join(parts)
 
 
 def _experiment_report_section(
@@ -749,12 +1258,50 @@ def _experiment_report_section(
     # ------------------------------------------------------------
 
     if metrics:
-        parts.append("<h3>Evaluation Metrics</h3><table><tbody>")
+        parts.append(
+            "<h3>Evaluation Metrics</h3>"
+            "<table>"
+            "<thead>"
+            "<tr>"
+            "<th>Metric</th>"
+            "<th>Value</th>"
+            "</tr>"
+            "</thead>"
+            "<tbody>"
+        )
 
         for name, value in metrics.items():
-            parts.append(f"<tr><th>{_escape(name)}</th><td>{_escape(value)}</td></tr>")
+            formatted_value = _format_report_metric(value, name)
 
-        parts.append("</tbody></table>")
+            if (
+                isinstance(value, (int, float))
+                and name.lower() in {
+                    "accuracy",
+                    "acc",
+                    "precision",
+                    "precision_weighted",
+                    "weighted_precision",
+                    "recall",
+                    "recall_weighted",
+                    "weighted_recall",
+                    "f1",
+                    "f1_score",
+                    "f1_weighted",
+                    "weighted_f1",
+                }
+                and 0.0 <= float(value) <= 1.0
+            ):
+                formatted_value = (
+                    f"{formatted_value} "
+                    f"({_escape(value)})"
+                )
+
+            parts.append(
+                "<tr>"
+                f"<td>{_escape(name)}</td>"
+                f"<td>{formatted_value}</td>"
+                "</tr>"
+            )
 
     # ------------------------------------------------------------
     # Errors
@@ -822,7 +1369,6 @@ def _comparison_report_section(
     comparison_result: Dict[str, Any],
 ) -> str:
     """Render the paper-vs-automated-experiment comparison."""
-
     if not isinstance(comparison_result, dict):
         return ""
 
@@ -831,39 +1377,174 @@ def _comparison_report_section(
     conclusion = comparison_result.get("conclusion", "")
     error = comparison_result.get("error", "")
 
-    html = [
+    html_parts = [
         "<section>",
         "<h2>Paper vs Automated Experiment</h2>",
         f"<p><strong>Status:</strong> {_escape(status)}</p>",
     ]
 
     if conclusion:
-        html.append(
-            f"<p><strong>Conclusion:</strong> {_escape(conclusion)}</p>"
+        html_parts.append(
+            f"<p><strong>Conclusion:</strong> "
+            f"{_escape(conclusion)}</p>"
         )
 
     comparability = comparison_result.get("comparability")
+
     if isinstance(comparability, dict):
         comparable = comparability.get("comparable")
 
         if comparable is not None:
-            html.append(
-                f"<p><strong>Comparable:</strong> {_escape(comparable)}</p>"
+            html_parts.append(
+                f"<p><strong>Comparable:</strong> "
+                f"{_escape(comparable)}</p>"
             )
 
         reason = comparability.get("reason")
+
         if reason:
-            html.append(
-                f"<p><strong>Reason:</strong> {_escape(reason)}</p>"
+            html_parts.append(
+                f"<p><strong>Reason:</strong> "
+                f"{_escape(reason)}</p>"
             )
 
-    paper_metrics = comparison_result.get("paper_metrics")
-    experiment_metrics = comparison_result.get("experiment_metrics")
+    # Prefer the structured metric comparison because it contains the
+    # calculated difference and percentage-point difference.
+    metric_comparison = comparison_result.get(
+        "metric_comparison"
+    )
 
-    if isinstance(paper_metrics, dict) or isinstance(experiment_metrics, dict):
-        html.append("<h3>Metric Comparison</h3>")
-        html.append("<table>")
-        html.append(
+    paper_metrics = comparison_result.get("paper_metrics")
+    experiment_metrics = comparison_result.get(
+        "experiment_metrics"
+    )
+
+    if isinstance(metric_comparison, dict) and metric_comparison:
+        html_parts.append(
+            "<h3>Metric Comparison</h3>"
+            "<table>"
+            "<thead>"
+            "<tr>"
+            "<th>Metric</th>"
+            "<th>Paper</th>"
+            "<th>Automated Experiment</th>"
+            "<th>Difference</th>"
+            "</tr>"
+            "</thead>"
+            "<tbody>"
+        )
+
+        for metric in sorted(metric_comparison):
+            values = metric_comparison.get(metric, {})
+
+            if not isinstance(values, dict):
+                values = {}
+
+            paper_value = values.get("paper")
+            experiment_value = values.get("experiment")
+            difference = values.get("difference")
+
+            difference_pp = values.get(
+                "difference_percentage_points"
+            )
+
+            unit = values.get("unit")
+
+            is_percentage = (
+                difference_pp is not None
+                or unit in {
+                    "%",
+                    "percent",
+                    "percentage",
+                    "percentage_points",
+                    "percentage_point",
+                    "pp",
+                }
+                or metric.lower() in {
+                    "accuracy",
+                    "acc",
+                    "precision",
+                    "precision_weighted",
+                    "weighted_precision",
+                    "recall",
+                    "recall_weighted",
+                    "weighted_recall",
+                    "f1",
+                    "f1_score",
+                    "f1_weighted",
+                    "weighted_f1",
+                }
+            )
+
+            if is_percentage:
+                paper_text = (
+                    f"{paper_value * 100:.2f}%"
+                    if isinstance(paper_value, (int, float))
+                    else _escape(paper_value)
+                )
+
+                experiment_text = (
+                    f"{experiment_value * 100:.2f}%"
+                    if isinstance(experiment_value, (int, float))
+                    else _escape(experiment_value)
+                )
+
+                if difference_pp is not None:
+                    difference_text = (
+                        f"{float(difference_pp):+.2f} pp"
+                    )
+                elif difference is not None:
+                    difference_text = (
+                        f"{float(difference) * 100:+.2f} pp"
+                    )
+                else:
+                    difference_text = "N/A"
+
+            else:
+                paper_text = _escape(
+                    _format_report_value(paper_value)
+                )
+
+                experiment_text = _escape(
+                    _format_report_value(experiment_value)
+                )
+
+                if difference is not None:
+                    difference_text = _escape(
+                        f"{float(difference):+.4f}"
+                    )
+                else:
+                    difference_text = "N/A"
+
+                if unit:
+                    difference_text = (
+                        f"{difference_text} "
+                        f"{_escape(unit)}"
+                    )
+
+            html_parts.append(
+                "<tr>"
+                f"<td>{_escape(metric)}</td>"
+                f"<td>{paper_text}</td>"
+                f"<td>{experiment_text}</td>"
+                f'<td class="metric-difference">'
+                f"{difference_text}</td>"
+                "</tr>"
+            )
+
+        html_parts.append(
+            "</tbody></table>"
+        )
+
+    elif isinstance(paper_metrics, dict) or isinstance(
+        experiment_metrics,
+        dict,
+    ):
+        # Backward-compatible fallback for older comparison results
+        # that do not contain metric_comparison.
+        html_parts.append(
+            "<h3>Metric Comparison</h3>"
+            "<table>"
             "<thead>"
             "<tr>"
             "<th>Metric</th>"
@@ -871,8 +1552,8 @@ def _comparison_report_section(
             "<th>Automated Experiment</th>"
             "</tr>"
             "</thead>"
+            "<tbody>"
         )
-        html.append("<tbody>")
 
         metric_names = set()
 
@@ -888,30 +1569,76 @@ def _comparison_report_section(
                 if isinstance(paper_metrics, dict)
                 else None
             )
+
             experiment_value = (
                 experiment_metrics.get(metric)
                 if isinstance(experiment_metrics, dict)
                 else None
             )
 
-            html.append(
+            paper_text = _format_report_metric(paper_value, metric)
+            experiment_text = _format_report_metric(experiment_value, metric)
+
+            if (
+                isinstance(paper_value, (int, float))
+                and metric.lower() in {
+                    "accuracy",
+                    "acc",
+                    "precision",
+                    "precision_weighted",
+                    "weighted_precision",
+                    "recall",
+                    "recall_weighted",
+                    "weighted_recall",
+                    "f1",
+                    "f1_score",
+                    "f1_weighted",
+                    "weighted_f1",
+                }
+                and 0.0 <= float(paper_value) <= 1.0
+            ):
+                paper_text = f"{paper_text} ({paper_value})"
+
+            if (
+                isinstance(experiment_value, (int, float))
+                and metric.lower() in {
+                    "accuracy",
+                    "acc",
+                    "precision",
+                    "precision_weighted",
+                    "weighted_precision",
+                    "recall",
+                    "recall_weighted",
+                    "weighted_recall",
+                    "f1",
+                    "f1_score",
+                    "f1_weighted",
+                    "weighted_f1",
+                }
+                and 0.0 <= float(experiment_value) <= 1.0
+            ):
+                experiment_text = f"{experiment_text} ({experiment_value})"
+
+            html_parts.append(
                 "<tr>"
                 f"<td>{_escape(metric)}</td>"
-                f"<td>{_escape(paper_value)}</td>"
-                f"<td>{_escape(experiment_value)}</td>"
+                f"<td>{_escape(paper_text)}</td>"
+                f"<td>{_escape(experiment_text)}</td>"
                 "</tr>"
             )
 
-        html.append("</tbody></table>")
+        html_parts.append(
+            "</tbody></table>"
+        )
 
     if not success and error:
-        html.append(
+        html_parts.append(
             f"<p><strong>Error:</strong> {_escape(error)}</p>"
         )
 
-    html.append("</section>")
+    html_parts.append("</section>")
 
-    return "".join(html)
+    return "\n".join(html_parts)
 
 
 def write_report(run: Dict[str, Any]) -> Path:
@@ -997,6 +1724,39 @@ def _settings_table(goal: Dict[str, Any]) -> str:
     ]
     rows = "".join(f"<tr><th>{_escape(field)}</th><td>{_escape(goal.get(field))}</td></tr>" for field in fields)
     return f"<table><tbody>{rows}</tbody></table>"
+
+
+def _get_selected_experiment_hypothesis(
+    experiment_result: Dict[str, Any],
+    final_hypotheses: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Return the hypothesis explicitly selected for the automated experiment.
+
+    Prefer the hypothesis stored by ExperimentOrchestrator. Fall back to the
+    highest-ranked final hypothesis for compatibility with older run data.
+    """
+    if isinstance(experiment_result, dict):
+        preparation = experiment_result.get(
+            "experiment_preparation",
+            {},
+        )
+
+        if isinstance(preparation, dict):
+            selected = preparation.get("selected_hypothesis")
+
+            if isinstance(selected, dict) and selected:
+                return selected
+
+        selected = experiment_result.get("selected_hypothesis")
+
+        if isinstance(selected, dict) and selected:
+            return selected
+
+    if final_hypotheses:
+        return final_hypotheses[0]
+
+    return None
 
 
 def _final_hypotheses(steps: Dict[str, Any]) -> List[Dict[str, Any]]:
