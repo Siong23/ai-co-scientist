@@ -558,6 +558,10 @@ def call_llm_for_search_queries(
         hypotheses: list[ProvisionalHypothesis] = []
         seen_ids: set[str] = set()
         seen_roles: set[str] = set()
+        # Name each rejection so the repair prompt says what to fix; a bare
+        # "expected primary/alternative/null" made the planner resend the
+        # same hypotheses unchanged.
+        rejections: list[str] = []
         for raw_hypothesis in raw_hypotheses:
             if not isinstance(raw_hypothesis, dict):
                 continue
@@ -565,16 +569,23 @@ def call_llm_for_search_queries(
             role = str(raw_hypothesis.get("role", "")).strip().casefold()
             statement = str(raw_hypothesis.get("statement", "")).strip()
             goal_quote = str(raw_hypothesis.get("goal_quote", "")).strip()
-            if (
-                not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", hypothesis_id)
-                or role not in {"primary", "alternative", "null"}
-                or not statement
-                or len(statement.split()) > 60
-                or not goal_quote_is_faithful(goal_quote, research_goal)
-                or len(goal_quote.split()) > 16
-                or hypothesis_id in seen_ids
-                or role in seen_roles
-            ):
+            # The quote only anchors the hypothesis to the goal, so the leading
+            # 16 words of a faithful quote (often the whole goal) anchor it too.
+            goal_quote = " ".join(goal_quote.split()[:16])
+            if not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", hypothesis_id):
+                reason = "hypothesis_id must be snake_case"
+            elif role not in {"primary", "alternative", "null"}:
+                reason = "role must be primary, alternative, or null"
+            elif not statement or len(statement.split()) > 60:
+                reason = "statement must be 1 to 60 words"
+            elif not goal_quote_is_faithful(goal_quote, research_goal):
+                reason = "goal_quote is not copied from the research goal"
+            elif hypothesis_id in seen_ids or role in seen_roles:
+                reason = "duplicate hypothesis_id or role"
+            else:
+                reason = ""
+            if reason:
+                rejections.append(f"{hypothesis_id or role or 'unnamed'} ({reason})")
                 continue
             seen_ids.add(hypothesis_id)
             seen_roles.add(role)
@@ -588,7 +599,10 @@ def call_llm_for_search_queries(
             )
 
         if required and seen_roles != {"primary", "alternative", "null"}:
-            raise ValueError("Expected one goal-anchored primary, alternative, and null provisional hypothesis.")
+            detail = f" Rejected: {'; '.join(rejections)}" if rejections else ""
+            raise ValueError(
+                "Expected one goal-anchored primary, alternative, and null provisional hypothesis." + detail
+            )
         return tuple(hypotheses)
 
     def parse_research_plan(response: str, previous_payload: dict | None = None) -> ResearchPlan:

@@ -238,6 +238,50 @@ def test_exploratory_planner_repairs_missing_hypotheses():
     assert "primary, alternative, and null provisional hypothesis" in llm.call_args_list[1].args[0]
 
 
+def test_hypotheses_quoting_the_whole_long_goal_are_kept():
+    # Captured from a qwen3.8-27b run: every hypothesis quoted the 21-word goal,
+    # the 16-word limit rejected all three, and the planner failed twice.
+    goal = (
+        "Investigate whether AI-driven traffic prediction can enable proactive network-slice "
+        "resource allocation and reduce SLA violations in 5G networks."
+    )
+    query_payload = json.loads(_query_payload(goal, with_hypothesis_ids=True))
+    query_payload["explicit_requirements"][0]["goal_quote"] = "AI-driven traffic prediction"
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            _planner_payload("hypothesis_testing", goal, hypotheses=_hypotheses(goal)),
+            json.dumps(query_payload),
+        ],
+    ) as llm:
+        plan, error = call_llm_for_search_queries(goal, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None
+    assert plan is not None
+    assert llm.call_count == 2
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == ["primary", "alternative", "null"]
+    assert all(len(hypothesis.goal_quote.split()) == 16 for hypothesis in plan.provisional_hypotheses)
+    assert all(hypothesis.goal_quote in goal for hypothesis in plan.provisional_hypotheses)
+
+
+def test_planner_repair_prompt_names_why_each_hypothesis_was_rejected():
+    goal = "Assess target evidence"
+    paraphrased = _hypotheses(goal)
+    paraphrased[0]["goal_quote"] = "Evaluate the evidence for the target"
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            _planner_payload("hypothesis_testing", goal, hypotheses=paraphrased),
+            _planner_payload("hypothesis_testing", goal, hypotheses=_hypotheses(goal)),
+            _query_payload(goal, with_hypothesis_ids=True),
+        ],
+    ) as llm:
+        plan, error = call_llm_for_search_queries(goal, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None and plan is not None
+    assert "primary_hypothesis (goal_quote is not copied from the research goal)" in llm.call_args_list[1].args[0]
+
+
 def test_exploratory_plan_without_missing_evidence_uses_its_listed_gaps():
     goal = "Assess target evidence"
     payload = json.loads(_planner_payload("exploratory", goal, hypotheses=_hypotheses(goal)))

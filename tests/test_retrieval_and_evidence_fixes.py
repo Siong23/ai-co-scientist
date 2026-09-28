@@ -369,6 +369,23 @@ def test_minimal_fallback_plan_decomposes_goal_and_diversifies_queries():
     assert len(plan.explicit_requirements) >= 2
     for aspect in plan.explicit_requirements:
         assert aspect.goal_quote in goal, f"Aspect quote '{aspect.goal_quote}' must be a substring of goal"
+    # No paper "develops" the user's framework, so coverage grades the topic.
+    assert plan.explicit_requirements[0].goal_quote == "closed-loop multi-agent AI framework"
+
+
+def test_minimal_fallback_plan_grades_the_whole_undivided_goal_topic():
+    # Captured goal with no clause markers: the old 80-character cut graded
+    # "Investigate whether ... proactive network-sl" and could never pass.
+    goal = (
+        "Investigate whether AI-driven traffic prediction can enable proactive network-slice "
+        "resource allocation and reduce SLA violations in 5G networks."
+    )
+
+    plan = GenerationAgent._build_minimal_fallback_plan(goal)
+
+    assert [(aspect.aspect_id, aspect.coverage_description) for aspect in plan.explicit_requirements] == [
+        ("goal_scope", goal.removeprefix("Investigate whether "))
+    ]
 
 
 # ---------------------------------------------------------------------------
