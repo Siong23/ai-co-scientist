@@ -105,24 +105,24 @@ from .paper_reader import PaperReader
 from ..data.dataset_manager import DatasetManager
 from ..utils import logger
 
-import inspect
+# import inspect
 
-print(
-    "ExperimentRunner source:",
-    inspect.getfile(ExperimentRunner),
-)
+# print(
+#     "ExperimentRunner source:",
+#     inspect.getfile(ExperimentRunner),
+# )
 
-print(
-    "ExperimentRunner signature:",
-    inspect.signature(ExperimentRunner.__init__),
-)
+# print(
+#     "ExperimentRunner signature:",
+#     inspect.signature(ExperimentRunner.__init__),
+# )
 
-print(
-    "ExperimentRunner.run_generated_result signature:",
-    inspect.signature(
-        ExperimentRunner.run_generated_result
-    ),
-)
+# print(
+#     "ExperimentRunner.run_generated_result signature:",
+#     inspect.signature(
+#         ExperimentRunner.run_generated_result
+#     ),
+# )
 
 
 # ============================================================
