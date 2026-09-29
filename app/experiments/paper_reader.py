@@ -1074,6 +1074,19 @@ PAPER TEXT:
 
         return ""
 
+    @staticmethod
+    def _name_has_keyword(
+        normalized_name: str,
+        keyword: str,
+    ) -> bool:
+        """
+        Match a keyword against whole words of a normalized metric name.
+
+        Substring matching read "generations" and "operation" as
+        containing "ratio", so generation counts became percentages.
+        """
+        return f"_{keyword}_" in f"_{normalized_name}_"
+
     @classmethod
     def _infer_value_type(
         cls,
@@ -1103,20 +1116,26 @@ PAPER TEXT:
 
         normalized = cls._normalise_metric_name(metric_name)
 
-        if "percent" in normalized or "percentage" in normalized:
+        if any(
+            cls._name_has_keyword(normalized, keyword)
+            for keyword in ("percent", "percentage", "pct")
+        ):
             return "percentage"
 
-        if "proportion" in normalized:
+        if cls._name_has_keyword(normalized, "proportion"):
             return "proportion"
 
-        if "fold" in normalized or "factor" in normalized:
+        if cls._name_has_keyword(normalized, "factor") or any(
+            word.endswith("fold")
+            for word in normalized.split("_")
+        ):
             return "factor"
 
         if normalized.endswith("_count") or normalized == "count":
             return "count"
 
         for keyword in cls.PERCENTAGE_METRIC_KEYWORDS:
-            if keyword in normalized:
+            if cls._name_has_keyword(normalized, keyword):
                 return "percentage"
 
         if unit:

@@ -115,3 +115,17 @@ def test_read_experiment_reference_sends_results_from_indexed_chunks():
     assert reference["indexed"] is True
     assert "RESULTS-TEXT Table 2 shows 94.1%" in reference["results_text"]
     assert "PaperChunk(" not in reference["results_text"]
+
+
+def test_metric_keywords_match_whole_words_only():
+    # "generations" and "operation" contain "ratio"; "percentile" contains "percent".
+    assert PaperReader._normalise_metric_value("convergence_generations_standard", 4) == 4
+    assert PaperReader._normalise_metric_value("non_stationary_simulation_generations", 60) == 60
+    assert PaperReader._infer_value_type("non_stationary_operation_periods") == "numeric"
+    assert PaperReader._infer_value_type("p95_latency_percentile") != "percentage"
+
+    assert PaperReader._infer_value_type("packet_delivery_ratio") == "percentage"
+    assert PaperReader._infer_value_type("F1-score") == "percentage"
+    assert PaperReader._infer_value_type("threefold_reduction") == "factor"
+    assert PaperReader._normalise_metric_value("accuracy", 95) == 0.95
+    assert PaperReader._normalise_metric_value("throughput_improvement_vs_pf_percent", 2.4) == 0.024
