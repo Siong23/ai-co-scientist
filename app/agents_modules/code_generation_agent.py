@@ -639,15 +639,15 @@ class CodeGenerationAgent:
         Important:
             - `metrics` describes metrics evaluated/discussed by the paper.
             - `metric_definitions` describes meaning, units, and direction.
-            - `reference_metrics` contains only explicitly extracted
-              numerical paper results.
-            - No reference result is copied into generated experiment
-              results.
+            - `reference_metrics` contains explicitly extracted paper results together with their semantic value types.
+            - `reference_conditions` contains experimental configuration/setup information and is not itself an evaluation result.
+            - No reference result is copied into generated experiment results.
         """
         result: Dict[str, Any] = {
             "metrics": [],
             "metric_definitions": {},
             "reference_metrics": {},
+            "reference_conditions": {},
         }
 
         if not isinstance(
@@ -763,6 +763,19 @@ class CodeGenerationAgent:
                         result[
                             "reference_metrics"
                         ][name] = value
+
+            reference_conditions = details.get(
+                "reference_conditions",
+                {},
+            )
+
+            if isinstance(reference_conditions, dict):
+                for name, value in reference_conditions.items():
+                    if not isinstance(name, str):
+                        continue
+
+                    if name not in result["reference_conditions"]:
+                        result["reference_conditions"][name] = value
 
         return result
 
@@ -909,61 +922,222 @@ The reference model/approach should be preserved as reference
 metadata for downstream ExperimentComparator.
 
 ============================================================
+REFERENCE METRICS VS REFERENCE CONDITIONS
+============================================================
+
+The reference experiment may contain two different types of
+information.
+
+1. REFERENCE METRICS
+
+`reference_metrics` contains quantities reported by the supporting
+paper that may be used for downstream scientific comparison.
+
+Reference metrics may represent:
+
+- measured_value
+- upper_bound
+- lower_bound
+- range
+- qualitative_result
+- unknown
+
+Reference metrics MUST preserve their semantic structure, including
+when available:
+
+- value
+- unit
+- value_type
+- relation
+- source_text
+
+Do not flatten a structured reference metric into a plain number.
+
+For example:
+
+{
+    "value": 80,
+    "unit": "ms",
+    "value_type": "upper_bound",
+    "relation": "less_than"
+}
+
+means:
+
+    latency < 80 ms
+
+It does NOT mean:
+
+    latency = 80 ms
+
+
+2. REFERENCE CONDITIONS
+
+`reference_conditions` describes the conditions under which the
+reference experiment was performed.
+
+Examples include:
+
+- number of users
+- number of User Equipment (UEs)
+- batch size
+- number of epochs
+- hardware
+- traffic load
+- network configuration
+- testbed configuration
+- dataset size
+- deployment configuration
+
+Reference conditions are NOT automatically evaluation metrics.
+
+For example:
+
+{
+    "value": 500,
+    "unit": "UEs",
+    "value_type": "configuration"
+}
+
+means that the reference experiment was conducted with 500 UEs.
+
+It does NOT mean that:
+
+    num_user_equipment = 500
+
+is an automated-experiment performance measurement.
+
+Reference conditions may be used to understand or reproduce the
+reference setup when the local environment supports them.
+
+Do not fabricate unavailable infrastructure, network load, users,
+hardware, or measurements merely to reproduce a reference condition.
+
+Reference metrics and reference conditions MUST remain separate from
+the automated experiment's measured results.
+
+============================================================
 4. COMPARABLE EVALUATION METRICS
 ============================================================
 
-The evaluation metrics should be selected to support a fair
-comparison between the reference paper and the Rank #1 hypothesis
-experiment.
+The evaluation metrics should be selected to support a scientifically
+meaningful comparison between the reference paper and the Rank #1
+hypothesis experiment where such comparison is possible.
+
+The selected Rank #1 hypothesis remains authoritative for the
+automated experiment.
 
 When the supporting paper reports explicit evaluation metrics:
 
-1. Extract the paper's metrics from `evidence_metric_guidance`.
+1. Use the paper's `metrics`, `metric_definitions`, and structured
+   `reference_metrics` from the evidence-derived reference experiment.
 
-2. Prefer the SAME metrics for the Rank #1 experiment when they are
+2. Use `evidence_metric_guidance` as additional guidance when
+   determining which metrics are scientifically compatible with the
+   Rank #1 hypothesis.
+
+3. Prefer the SAME metrics for the Rank #1 experiment when they are
    scientifically compatible with the Rank #1 hypothesis.
 
-3. Preserve the original metric definition.
+4. Preserve the original metric definition.
 
-4. Preserve the original unit.
+5. Preserve the original unit.
 
-5. Preserve the direction of improvement when known.
+6. Preserve the direction of improvement when known.
 
-6. Calculate the metric independently from the automated experiment.
+7. Preserve the semantic type of every reference value.
 
-7. NEVER copy the paper's numerical result into the experiment.
+   A reference value may be:
 
-8. NEVER use the paper's numerical result as simulated input to
-   produce the experiment result.
+   - measured_value
+   - upper_bound
+   - lower_bound
+   - range
+   - qualitative_result
+   - unknown
 
-9. NEVER estimate the experiment result from the paper result.
+8. Preserve the relation associated with a reference value when known.
 
-10. If the metric cannot actually be measured in the available
-    environment, report it as:
+   Possible relations include:
 
-        unavailable
+   - exact
+   - less_than
+   - less_than_or_equal
+   - greater_than
+   - greater_than_or_equal
+   - range
+   - none
+
+9. A reference upper or lower bound is a comparison constraint,
+   NOT an exact experiment result.
+
+   Example:
+
+       paper:
+       latency < 80 ms
+
+       means:
+
+       value = 80
+       unit = ms
+       value_type = upper_bound
+       relation = less_than
+
+       It does NOT mean:
+
+       experiment latency = 80 ms
+
+10. A reference range must remain a range.
+
+    Do not replace a range with its midpoint, minimum, maximum,
+    or another invented single value.
+
+11. A qualitative reference result must remain qualitative.
+
+    Do not convert qualitative statements into invented numerical
+    measurements.
+
+12. Calculate every automated-experiment metric independently from
+    the actual experiment execution.
+
+13. NEVER copy a reference-paper numerical result into the automated
+    experiment result.
+
+14. NEVER use a reference-paper numerical result as:
+
+    - simulated input
+    - calibration value
+    - seed value
+    - target value
+    - hard-coded measurement
+    - generated measurement
+    - random sampling boundary
+
+15. NEVER estimate an automated-experiment result from a paper result.
+
+16. Every reported automated-experiment measurement must originate
+    from an operation actually performed by the generated experiment.
+
+17. If the local environment cannot independently perform the
+    measurement required for a reference metric, report that metric
+    as:
+
+    unavailable
 
     or:
 
-        not_directly_comparable
+    not_directly_comparable
 
     together with the reason.
 
-11. A proxy may be used only when scientifically justified and it
-    MUST be explicitly labelled as a proxy.
+18. A proxy may be used only when scientifically justified and MUST
+    be explicitly labelled as a proxy.
 
-12. A proxy must NOT be presented as equivalent to the paper's
-    original measurement.
+19. A proxy MUST NOT be presented as equivalent to the original
+    reference measurement.
 
-The objective is:
-
-    SAME METRIC
-        +
-    SAME SCIENTIFIC DEFINITION
-        +
-    INDEPENDENT MEASUREMENT
-        =
-    FAIR COMPARISON
+20. Reference metrics are comparison guidance only. They must remain
+    separate from the automated experiment's measured results.
 
 Do not force accuracy, precision, recall, or F1 merely because the
 available dataset is a classification dataset.

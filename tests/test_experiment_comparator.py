@@ -175,7 +175,8 @@ def test_extract_experiment_results():
 def test_compare_metrics():
     """
     Test numerical comparison between paper and automated
-    experiment metrics.
+    experiment metrics using the current semantic comparison
+    structure.
     """
 
     comparator = ExperimentComparator()
@@ -208,7 +209,10 @@ def test_compare_metrics():
     assert "recall_weighted" in metrics
     assert "f1_weighted" in metrics
 
+    # ---------------------------------------------------------
+    # Numerical differences
     # Difference = experiment - paper
+    # ---------------------------------------------------------
 
     assert round(
         metrics["accuracy"]["difference"], 4
@@ -226,41 +230,110 @@ def test_compare_metrics():
         metrics["f1_weighted"]["difference"], 4
     ) == -0.0169
 
+    # ---------------------------------------------------------
     # Percentage-point differences
+    # ---------------------------------------------------------
 
     assert round(
-        metrics["accuracy"]["difference_percentage_points"], 2
+        metrics["accuracy"]["difference_percentage_points"],
+        2,
     ) == -1.36
 
     assert round(
-        metrics["precision_weighted"]["difference_percentage_points"],
+        metrics["precision_weighted"][
+            "difference_percentage_points"
+        ],
         2,
     ) == -2.09
 
     assert round(
-        metrics["recall_weighted"]["difference_percentage_points"],
+        metrics["recall_weighted"][
+            "difference_percentage_points"
+        ],
         2,
     ) == -1.26
 
     assert round(
-        metrics["f1_weighted"]["difference_percentage_points"],
+        metrics["f1_weighted"][
+            "difference_percentage_points"
+        ],
         2,
     ) == -1.69
 
-    # All automated metrics are lower than the paper.
-    assert set(result["worse_metrics"]) == {
+    # ---------------------------------------------------------
+    # Reference values
+    # ---------------------------------------------------------
+
+    assert metrics["accuracy"]["reference_value"] == 0.952
+
+    assert (
+        metrics["precision_weighted"]["reference_value"]
+        == 0.948
+    )
+
+    assert (
+        metrics["recall_weighted"]["reference_value"]
+        == 0.951
+    )
+
+    assert metrics["f1_weighted"]["reference_value"] == 0.949
+
+    # ---------------------------------------------------------
+    # Semantic reference type
+    #
+    # These are ordinary measured paper results, so they should
+    # be treated as measured_value rather than constraints.
+    # ---------------------------------------------------------
+
+    for metric_name in (
         "accuracy",
         "precision_weighted",
         "recall_weighted",
         "f1_weighted",
-    }
+    ):
+        assert (
+            metrics[metric_name]["reference_value_type"]
+            == "measured_value"
+        )
 
-    assert result["improved_metrics"] == []
-    assert result["unchanged_metrics"] == []
+        assert (
+            metrics[metric_name]["reference_relation"]
+            == "exact"
+        )
 
-    assert round(
-        result["average_difference"], 4
-    ) == -0.016
+        # A measured reference is NOT a pass/fail constraint.
+        assert (
+            metrics[metric_name]["constraint_satisfied"]
+            is None
+        )
+
+    # ---------------------------------------------------------
+    # Automated experiment is lower than the paper for every
+    # metric in this test case.
+    #
+    # Check the actual per-metric comparison rather than the
+    # removed legacy `worse_metrics` summary.
+    # ---------------------------------------------------------
+
+    for metric_name in (
+        "accuracy",
+        "precision_weighted",
+        "recall_weighted",
+        "f1_weighted",
+    ):
+        assert (
+            metrics[metric_name]["higher_than_paper"]
+            is False
+        )
+
+        assert (
+            metrics[metric_name]["same_as_paper"]
+            is False
+        )
+
+        assert (
+            metrics[metric_name]["difference"] < 0
+        )
 
 
 # ============================================================

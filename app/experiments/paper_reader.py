@@ -1320,6 +1320,121 @@ PAPER TEXT:
                 return number / 100.0
 
         return number
+    
+    @classmethod
+    def _normalise_reference_value(
+        cls,
+        value: Any,
+        metric_name: str,
+        metric_definition: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Normalize a structured reference metric while preserving
+        its scientific meaning.
+
+        Unlike _normalise_metric_value(), this method does NOT reduce
+        the reference to a single float. It preserves whether the
+        reported value is:
+
+        - an exact measured value
+        - an upper/lower bound
+        - a range
+        - a configuration value
+        - a qualitative result
+
+        This prevents statements such as "less than 80 ms" from being
+        incorrectly converted into an exact measurement of 80 ms.
+        """
+        definition = metric_definition or {}
+
+        if isinstance(value, dict):
+            normalized = dict(value)
+        else:
+            normalized = {
+                "value": value,
+            }
+
+        raw_value = normalized.get("value")
+
+        unit = (
+            normalized.get("unit")
+            or definition.get("unit")
+            or cls._infer_unit_from_metric_name(metric_name)
+        )
+
+        unit = cls._normalise_unit(unit)
+
+        value_type = str(
+            normalized.get("value_type")
+            or "unknown"
+        ).strip().lower()
+
+        relation = str(
+            normalized.get("relation")
+            or "none"
+        ).strip().lower()
+
+        allowed_value_types = {
+            "measured_value",
+            "upper_bound",
+            "lower_bound",
+            "range",
+            "configuration",
+            "qualitative_result",
+            "unknown",
+        }
+
+        if value_type not in allowed_value_types:
+            value_type = "unknown"
+
+        allowed_relations = {
+            "exact",
+            "less_than",
+            "less_than_or_equal",
+            "greater_than",
+            "greater_than_or_equal",
+            "range",
+            "none",
+        }
+
+        if relation not in allowed_relations:
+            relation = "none"
+
+        # Normalize numeric values, but preserve the semantic wrapper.
+        numeric_value = cls._safe_float(raw_value)
+
+        if numeric_value is not None:
+            value = numeric_value
+        else:
+            value = raw_value
+
+        source_text = normalized.get(
+            "source_text",
+            "",
+        )
+
+        if source_text is None:
+            source_text = ""
+
+        result = {
+            "value": value,
+            "unit": unit or None,
+            "value_type": value_type,
+            "relation": relation,
+            "source_text": str(source_text),
+        }
+
+        # Preserve optional fields if supplied by the LLM.
+        for key in (
+            "lower_value",
+            "upper_value",
+            "lower_unit",
+            "upper_unit",
+        ):
+            if key in normalized:
+                result[key] = normalized[key]
+
+        return result
 
     @classmethod
     def _normalise_metrics(
@@ -1373,19 +1488,24 @@ PAPER TEXT:
     def _recover_reference_metrics_from_results(
         cls,
         details: Dict[str, Any],
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Dict[str, Any]]:
         """
-        Recover numeric metrics from structured result entries when
+        Recover structured reference metrics from result entries when
         possible.
 
         This is a safety net for LLM responses where the model correctly
         places a numerical result in `results` but accidentally leaves
         `reference_metrics` empty.
 
-        This method intentionally does NOT attempt to calculate values
-        from prose. It only uses explicit structured numeric fields.
+        The recovered values preserve scientific semantics instead of
+        being reduced to plain floats.
+
+        Important:
+            This method only uses explicitly structured numeric fields
+            already present in the result objects. It does NOT attempt
+            to calculate, estimate, or infer values from prose.
         """
-        recovered: Dict[str, float] = {}
+        recovered: Dict[str, Dict[str, Any]] = {}
 
         results = details.get("results")
 
@@ -1416,14 +1536,39 @@ PAPER TEXT:
                     {},
                 )
 
-                number = cls._normalise_metric_value(
-                    metric_name,
-                    value,
-                    definition,
-                )
+                # Preserve structured semantic information if the result
+                # already contains it.
+                if isinstance(value, dict):
+                    normalized_value = cls._normalise_reference_value(
+                        value,
+                        metric_name,
+                        definition,
+                    )
 
-                if number is not None:
-                    recovered[metric_name] = number
+                else:
+                    # A plain numeric result entry represents an explicitly
+                    # reported measurement, but we must not invent a bound,
+                    # threshold, or other semantic relation.
+                    normalized_value = cls._normalise_reference_value(
+                        {
+                            "value": value,
+                            "unit": (
+                                definition.get("unit")
+                                or cls._infer_unit_from_metric_name(
+                                    metric_name
+                                )
+                                or None
+                            ),
+                            "value_type": "measured_value",
+                            "relation": "exact",
+                            "source_text": "",
+                        },
+                        metric_name,
+                        definition,
+                    )
+
+                if normalized_value.get("value") is not None:
+                    recovered[metric_name] = normalized_value
 
         return recovered
 
@@ -1454,6 +1599,7 @@ PAPER TEXT:
             "hyperparameters": {},
             "training_details": {},
             "reference_metrics": {},
+            "reference_conditions": {},
             "results": [],
             "experiment_notes": [],
         }
@@ -1466,11 +1612,36 @@ PAPER TEXT:
             details.get("metric_definitions", {})
         )
 
-        # Normalize explicitly reported reference metrics.
-        reference_metrics = cls._normalise_metrics(
-            details.get("reference_metrics", {}),
-            metric_definitions,
+        # Normalize explicitly reported reference metrics while
+        # preserving their scientific semantics.
+        reference_metrics: Dict[str, Dict[str, Any]] = {}
+
+        raw_reference_metrics = details.get(
+            "reference_metrics",
+            {},
         )
+
+        if isinstance(raw_reference_metrics, dict):
+            for name, value in raw_reference_metrics.items():
+                metric_name = cls._normalise_metric_name(name)
+
+                if not metric_name:
+                    continue
+
+                definition = metric_definitions.get(
+                    metric_name,
+                    {},
+                )
+
+                normalized_value = cls._normalise_reference_value(
+                    value,
+                    metric_name,
+                    definition,
+                )
+
+                # Keep only entries that actually contain a value.
+                if normalized_value.get("value") is not None:
+                    reference_metrics[metric_name] = normalized_value
 
         # Recover structured metrics from result objects if present.
         recovered_metrics = cls._recover_reference_metrics_from_results(
@@ -1482,6 +1653,49 @@ PAPER TEXT:
                 name,
                 value,
             )
+
+        # Normalize reference conditions while preserving their
+        # configuration semantics.
+        reference_conditions: Dict[str, Dict[str, Any]] = {}
+
+        raw_reference_conditions = details.get(
+            "reference_conditions",
+            {},
+        )
+
+        if isinstance(raw_reference_conditions, dict):
+            for name, value in raw_reference_conditions.items():
+                condition_name = cls._normalise_metric_name(name)
+
+                if not condition_name:
+                    continue
+
+                if isinstance(value, dict):
+                    normalized_condition = dict(value)
+                else:
+                    normalized_condition = {
+                        "value": value,
+                    }
+
+                normalized_condition.setdefault(
+                    "value_type",
+                    "configuration",
+                )
+                normalized_condition.setdefault(
+                    "unit",
+                    None,
+                )
+                normalized_condition.setdefault(
+                    "source_text",
+                    "",
+                )
+
+                if normalized_condition.get("value") is not None:
+                    reference_conditions[condition_name] = (
+                        normalized_condition
+                    )
+
+        details["reference_conditions"] = reference_conditions
 
         # Normalize the list of metric names.
         metric_names: List[str] = []
@@ -1542,6 +1756,9 @@ PAPER TEXT:
         object_fields = [
             "hyperparameters",
             "training_details",
+            "reference_conditions",
+            "metric_definitions",
+            "reference_metrics",
         ]
 
         for field in object_fields:
@@ -1639,7 +1856,23 @@ Use exactly this structure:
   "metric_definitions": {{}},
   "hyperparameters": {{}},
   "training_details": {{}},
-  "reference_metrics": {{}},
+  "reference_metrics": {{
+    "<metric_name>": {{
+        "value": <number>,
+        "unit": "<unit or null>",
+        "value_type": "measured_value|upper_bound|lower_bound|range|qualitative_result|unknown",
+        "relation": "exact|less_than|less_than_or_equal|greater_than|greater_than_or_equal|range|none",
+        "source_text": "<short original wording>"
+    }}
+  }},
+  "reference_conditions": {{
+    "<condition_name>": {{
+        "value": <number|string|list>,
+        "unit": "<unit or null>",
+        "value_type": "configuration",
+        "source_text": "<short original wording>"
+    }}
+  }},
   "results": [],
   "experiment_notes": []
 }}
@@ -1926,6 +2159,96 @@ Include:
 Do not invent missing information.
 
 ============================================================
+REFERENCE VALUE SEMANTICS
+============================================================
+
+For every explicitly reported numerical value that may be useful
+for downstream comparison, determine what the value represents.
+
+Do NOT treat every number as an exact measured result.
+
+Each reference value should be classified using:
+
+"value_type":
+
+- "measured_value"
+  An explicitly reported measured experimental result.
+
+- "upper_bound"
+  A statement such as "less than 80 ms", "<80 ms",
+  "below 5%", or equivalent.
+
+- "lower_bound"
+  A statement such as "more than 90%", ">90%",
+  "above 1 Gbps", or equivalent.
+
+- "range"
+  A reported interval such as "10-20 ms" or "between 10 and 20 ms".
+
+- "configuration"
+  A value describing an experimental setup or condition,
+  such as "500 UEs", "100 users", "batch size 64", or
+  "trained for 50 epochs".
+
+- "qualitative_result"
+  A qualitative finding without a directly reported numerical
+  measurement.
+
+- "unknown"
+  Use this only when the semantic meaning cannot be determined
+  reliably from the supplied evidence.
+
+Also determine:
+
+"relation":
+
+- "exact"
+- "less_than"
+- "less_than_or_equal"
+- "greater_than"
+- "greater_than_or_equal"
+- "range"
+- "none"
+
+Preserve the original wording that establishes the meaning.
+
+For example:
+
+"less than 80 ms overhead for 500 UEs"
+
+must NOT be represented simply as:
+
+"latency_overhead_ms": 80
+
+Instead, represent the latency reference as an upper bound and
+represent 500 UEs as an experimental configuration.
+
+The numerical value itself must remain unchanged. Do not calculate,
+estimate, or normalize the value.
+
+============================================================
+IMPORTANT DISTINCTION
+============================================================
+
+A reference value is NOT automatically an experiment metric.
+
+Distinguish between:
+
+1. measured result
+2. threshold/bound
+3. experimental configuration
+4. qualitative finding
+
+A configuration value such as "500 UEs" must not be treated as a
+performance metric.
+
+A threshold such as "less than 80 ms" must not be treated as an
+exact measured value of 80 ms.
+
+A qualitative statement such as "effective detection" must not be
+converted into an invented numerical detection rate.
+
+============================================================
 SCIENTIFIC FIDELITY
 ============================================================
 
@@ -2015,6 +2338,7 @@ PAPER EXPERIMENTAL TEXT
                 exc,
             )
             return {}
+
 
     def _determine_results_status(
         self,
