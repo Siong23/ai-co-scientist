@@ -2,7 +2,7 @@
 Automated Experiment Orchestrator.
 
 This module connects the completed AI Co-Scientist workflow to the
-automated deep-learning experiment pipeline.
+automated experiment pipeline.
 
 Architecture:
 
@@ -27,24 +27,57 @@ Architecture:
     ExperimentOrchestrator
         |
         +--> Select final accepted hypothesis
+        +--> Extract evidence sources
+        +--> Read reference experiments from papers
+        +--> Extract evidence-derived evaluation metrics
         +--> Build experiment specification
         +--> Generate PyTorch experiment code
         +--> Execute experiment
-        +--> Evaluate results
+        +--> Compare experiment results against paper evidence
         +--> Save artifacts
         |
         v
     Experiment Results
 
-The orchestrator intentionally does NOT reproduce the SupervisorAgent's
-scientific workflow. It consumes the final ContextMemory produced by the
-Supervisor.
+Scientific design:
 
-Current experiment domain:
+    Rank #1 Hypothesis
+        |
+        +--> defines WHAT is being tested
+        |
+        v
+    Evidence Sources / Reference Experiments
+        |
+        +--> guide methodology
+        +--> guide model/design where applicable
+        +--> guide evaluation metrics
+        +--> provide reference values when explicitly reported
+        |
+        v
+    Dataset + Environment
+        |
+        +--> determines what can actually be reproduced
+        |
+        v
+    CodeGenerationAgent
+        |
+        v
+    ExperimentRunner
+        |
+        v
+    ExperimentComparator
+        |
+        v
+    Paper vs Experiment
 
-    Dataset: 5G-NIDD
-    Task: 5G network intrusion detection classification
-    Framework: PyTorch
+Important:
+- The orchestrator does not create a new hypothesis.
+- Paper reference values are never copied into experiment results.
+- Evaluation metrics should be derived from the experiment specification,
+  selected hypothesis, and supporting evidence rather than a universal
+  hard-coded classification metric list.
+- If a paper metric cannot be reproduced, the experiment should record
+  that limitation rather than inventing a value.
 """
 
 from __future__ import annotations
@@ -52,10 +85,8 @@ from __future__ import annotations
 import json
 import math
 import re
-# import subprocess
 import sys
 import time
-
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -63,16 +94,36 @@ from typing import Any, Dict, List, Optional
 from app.paper_library import ChromaPaperLibrary
 
 from ..agents_modules.code_generation_agent import (
-    CodeGenerationAgent, 
+    CodeGenerationAgent,
     _call_llm,
 )
+
 from .experiment_runner import ExperimentRunner
 from .experiment_comparator import ExperimentComparator
 from .paper_reader import PaperReader
+
 from ..data.dataset_manager import DatasetManager
 from ..utils import logger
-import app.experiments.paper_reader as pr
-print(pr.__file__)
+
+# import inspect
+
+# print(
+#     "ExperimentRunner source:",
+#     inspect.getfile(ExperimentRunner),
+# )
+
+# print(
+#     "ExperimentRunner signature:",
+#     inspect.signature(ExperimentRunner.__init__),
+# )
+
+# print(
+#     "ExperimentRunner.run_generated_result signature:",
+#     inspect.signature(
+#         ExperimentRunner.run_generated_result
+#     ),
+# )
+
 
 # ============================================================
 # Configuration
@@ -81,7 +132,6 @@ print(pr.__file__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 BASE_EXPERIMENT_DIR = PROJECT_ROOT / "app/experiments"
-
 RESULTS_DIR = BASE_EXPERIMENT_DIR / "results"
 
 GENERATED_CODE_DIR = RESULTS_DIR / "generated_code"
@@ -89,7 +139,6 @@ CHECKPOINT_DIR = RESULTS_DIR / "checkpoints"
 METRICS_DIR = RESULTS_DIR / "metrics"
 VISUALIZATION_DIR = RESULTS_DIR / "visualizations"
 RUNS_DIR = RESULTS_DIR / "runs"
-# DEFAULT_DATASET_PATH = PROJECT_ROOT / "data/5g_nidd/5g_nidd.csv"
 
 
 # ============================================================
@@ -99,7 +148,7 @@ RUNS_DIR = RESULTS_DIR / "runs"
 class ExperimentOrchestrator:
     """
     Bridge between the AI Co-Scientist and the automated
-    deep-learning experiment pipeline.
+    experiment pipeline.
 
     The SupervisorAgent is responsible for:
 
@@ -119,13 +168,29 @@ class ExperimentOrchestrator:
         1. Inspect final ContextMemory.
         2. Identify final accepted hypotheses.
         3. Use the RankingAgent's Elo result to select the best candidate.
-        4. Build a structured experiment specification.
-        5. Persist the specification and scientific provenance.
-        6. Provide an integration point for code generation.
-        7. Optionally execute generated PyTorch code.
-        8. Collect experiment results.
-    """
+        4. Extract evidence sources associated with the hypothesis.
+        5. Read reference experiments from supporting papers.
+        6. Extract evidence-derived evaluation metrics.
+        7. Build a structured experiment specification.
+        8. Persist the specification and scientific provenance.
+        9. Generate experiment code.
+        10. Optionally execute the generated experiment.
+        11. Compare experiment results against paper evidence.
 
+    Scientific precedence:
+
+        Rank #1 hypothesis
+            ->
+        Evidence/reference experiment
+            ->
+        Dataset/environment constraints
+            ->
+        Experiment implementation
+
+    The selected hypothesis defines the research question.
+    Supporting papers guide implementation and evaluation but
+    must not silently replace the hypothesis.
+    """
 
     def __init__(
         self,
@@ -163,12 +228,6 @@ class ExperimentOrchestrator:
         self.dataset_path = Path(
             self.dataset_manager.get_latest_dataset()
         )
-
-        # self.dataset_path = (
-        #     Path(dataset_path)
-        #     if dataset_path
-        #     else DEFAULT_DATASET_PATH
-        # )
 
         self.device = device
 
@@ -266,9 +325,6 @@ class ExperimentOrchestrator:
     def _json_safe(value: Any) -> Any:
         """
         Convert common Python/model objects into JSON-safe data.
-
-        This avoids forcing every object in the Co-Scientist
-        context to implement its own serializer.
         """
 
         if value is None:
@@ -319,6 +375,282 @@ class ExperimentOrchestrator:
         return str(value)
 
     # ========================================================
+    # Metric Helpers
+    # ========================================================
+
+    @staticmethod
+    def _normalise_metric_name(
+        metric_name: Any,
+    ) -> str:
+        """
+        Normalize a metric name for deduplication while preserving
+        the human-readable metric name elsewhere.
+        """
+
+        return re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(metric_name).strip().lower(),
+        ).strip("_")
+
+    @classmethod
+    def _extract_reference_metric_requirements(
+        cls,
+        reference_experiment: Any,
+    ) -> Dict[str, Any]:
+        """
+        Extract evaluation guidance from PaperReader output.
+
+        Returns
+        -------
+        dict
+            {
+                "metrics": [...],
+                "metric_definitions": {...},
+                "reference_metrics": {...}
+            }
+
+        Important:
+        - metrics are metric names reported or identified by the paper.
+        - metric_definitions describe meaning/unit/direction when available.
+        - reference_metrics contain numerical values explicitly reported
+          by the paper.
+        - No reference value is treated as an experiment result.
+        """
+
+        result: Dict[str, Any] = {
+            "metrics": [],
+            "metric_definitions": {},
+            "reference_metrics": {},
+        }
+
+        if not isinstance(reference_experiment, dict):
+            return result
+
+        sources = reference_experiment.get(
+            "sources",
+            [],
+        )
+
+        if not isinstance(sources, list):
+            return result
+
+        seen_metrics = set()
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+
+            details = source.get(
+                "experiment_details",
+                {},
+            )
+
+            if not isinstance(details, dict):
+                continue
+
+            # ------------------------------------------------
+            # Metric names
+            # ------------------------------------------------
+
+            metrics = details.get(
+                "metrics",
+                [],
+            )
+
+            if isinstance(metrics, list):
+                for metric in metrics:
+                    if not isinstance(metric, str):
+                        continue
+
+                    metric = metric.strip()
+
+                    if not metric:
+                        continue
+
+                    key = cls._normalise_metric_name(
+                        metric
+                    )
+
+                    if key and key not in seen_metrics:
+                        result["metrics"].append(metric)
+                        seen_metrics.add(key)
+
+            # ------------------------------------------------
+            # Metric definitions
+            # ------------------------------------------------
+
+            definitions = details.get(
+                "metric_definitions",
+                {},
+            )
+
+            if isinstance(definitions, dict):
+                for name, definition in definitions.items():
+
+                    name = str(name).strip()
+
+                    if not name:
+                        continue
+
+                    key = cls._normalise_metric_name(
+                        name
+                    )
+
+                    existing_key = next(
+                        (
+                            cls._normalise_metric_name(existing)
+                            for existing in result[
+                                "metric_definitions"
+                            ]
+                        ),
+                        None,
+                    )
+
+                    if key and key not in {
+                        cls._normalise_metric_name(existing)
+                        for existing in result[
+                            "metric_definitions"
+                        ]
+                    }:
+                        result[
+                            "metric_definitions"
+                        ][name] = cls._json_safe(
+                            definition
+                        )
+
+            # ------------------------------------------------
+            # Explicit numerical reference values
+            # ------------------------------------------------
+
+            reference_metrics = details.get(
+                "reference_metrics",
+                {},
+            )
+
+            if isinstance(reference_metrics, dict):
+                for name, value in reference_metrics.items():
+
+                    name = str(name).strip()
+
+                    if not name:
+                        continue
+
+                    key = cls._normalise_metric_name(
+                        name
+                    )
+
+                    existing_keys = {
+                        cls._normalise_metric_name(existing)
+                        for existing in result[
+                            "reference_metrics"
+                        ]
+                    }
+
+                    if key and key not in existing_keys:
+                        result[
+                            "reference_metrics"
+                        ][name] = cls._json_safe(
+                            value
+                        )
+
+        return result
+
+    @classmethod
+    def _build_evaluation_guidance(
+        cls,
+        specification: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Build the complete evaluation guidance passed to
+        CodeGenerationAgent.
+
+        Precedence:
+
+            1. Explicit experiment specification metrics
+            2. Metrics required by the selected hypothesis
+            3. Metrics reported by supporting evidence
+            4. Additional standard metrics only when scientifically
+               appropriate
+
+        Reference numerical values are retained separately and must
+        never be copied into experiment output.
+        """
+
+        explicit_metrics = specification.get(
+            "evaluation_metrics",
+            [],
+        )
+
+        if not isinstance(explicit_metrics, list):
+            explicit_metrics = []
+
+        reference_guidance = cls._extract_reference_metric_requirements(
+            specification.get(
+                "reference_experiment",
+                {},
+            )
+        )
+
+        evidence_metrics = reference_guidance.get(
+            "metrics",
+            [],
+        )
+
+        definitions = {}
+
+        specification_definitions = specification.get(
+            "evaluation_metric_definitions",
+            {},
+        )
+
+        if isinstance(specification_definitions, dict):
+            definitions.update(
+                cls._json_safe(
+                    specification_definitions
+                )
+            )
+
+        definitions.update(
+            reference_guidance.get(
+                "metric_definitions",
+                {},
+            )
+        )
+
+        reference_metrics = {}
+
+        specification_reference_metrics = specification.get(
+            "reference_metrics",
+            {},
+        )
+
+        if isinstance(specification_reference_metrics, dict):
+            reference_metrics.update(
+                cls._json_safe(
+                    specification_reference_metrics
+                )
+            )
+
+        reference_metrics.update(
+            reference_guidance.get(
+                "reference_metrics",
+                {},
+            )
+        )
+
+        return {
+            "required_by_specification": cls._json_safe(
+                explicit_metrics
+            ),
+            "evidence_metrics": cls._json_safe(
+                evidence_metrics
+            ),
+            "metric_definitions": definitions,
+            "reference_metrics": reference_metrics,
+        }
+
+    # ========================================================
     # Experiment ID
     # ========================================================
 
@@ -342,13 +674,9 @@ class ExperimentOrchestrator:
             ).strip("_")
 
             if safe_id:
-                return (
-                    f"{safe_id}_{timestamp}"
-                )
+                return f"{safe_id}_{timestamp}"
 
-        return (
-            f"experiment_{timestamp}"
-        )
+        return f"experiment_{timestamp}"
 
     # ========================================================
     # Context / Hypothesis Access
@@ -360,10 +688,6 @@ class ExperimentOrchestrator:
     ) -> List[Any]:
         """
         Retrieve active hypotheses from ContextMemory.
-
-        The actual ContextMemory implementation provides:
-
-            context.get_active_hypotheses()
         """
 
         if context is None:
@@ -402,10 +726,20 @@ class ExperimentOrchestrator:
             return default
 
         if isinstance(hypothesis, dict):
-            return hypothesis.get(key, default)
+            return hypothesis.get(
+                key,
+                default,
+            )
 
-        return getattr(hypothesis, key, default)
+        return getattr(
+            hypothesis,
+            key,
+            default,
+        )
 
+    # ========================================================
+    # Reference Experiment
+    # ========================================================
 
     def extract_reference_experiment(
         self,
@@ -415,8 +749,17 @@ class ExperimentOrchestrator:
         Read the evidence papers associated with a hypothesis and
         extract experiment information for code generation.
 
-        The extracted information is reference material only. It does
-        not replace the selected hypothesis.
+        The extracted information is reference material only.
+
+        It can guide:
+            - methodology
+            - model/design
+            - baselines
+            - assumptions
+            - evaluation metrics
+            - reported reference values
+
+        It does not replace the selected hypothesis.
         """
 
         if hypothesis is None:
@@ -440,7 +783,10 @@ class ExperimentOrchestrator:
         reference_sources: List[Dict[str, Any]] = []
 
         for source in evidence_sources:
-            paper_url = self._extract_evidence_url(source)
+
+            paper_url = self._extract_evidence_url(
+                source
+            )
 
             if not paper_url:
                 logger.warning(
@@ -468,7 +814,9 @@ class ExperimentOrchestrator:
                     )
                     continue
 
-                reference_sources.append(reference)
+                reference_sources.append(
+                    reference
+                )
 
             except Exception as error:
                 logger.warning(
@@ -480,11 +828,28 @@ class ExperimentOrchestrator:
         if not reference_sources:
             return {}
 
-        return {
+        reference_experiment = {
             "available": True,
             "source_count": len(reference_sources),
             "sources": reference_sources,
         }
+
+        # NEW:
+        # Extract a compact summary of the metrics immediately so
+        # downstream components do not need to rediscover them.
+        metric_guidance = (
+            self._extract_reference_metric_requirements(
+                reference_experiment
+            )
+        )
+
+        reference_experiment[
+            "evaluation_guidance"
+        ] = metric_guidance
+
+        return self._json_safe(
+            reference_experiment
+        )
 
     # ========================================================
     # Reflection Routing
@@ -496,21 +861,14 @@ class ExperimentOrchestrator:
     ) -> List[Any]:
         """
         Retrieve hypotheses that Reflection explicitly accepted.
-
-        This mirrors the Supervisor's reflection routing:
-
-            ACCEPT  -> rankable
-            REJECT  -> inactive
-            REVISE  -> revision path
-            other   -> unreviewed
-
-        The orchestrator does not change hypothesis state.
-        It only reads the final state.
         """
 
         accepted: List[Any] = []
 
-        for hypothesis in self.get_active_hypotheses(context):
+        for hypothesis in self.get_active_hypotheses(
+            context
+        ):
+
             if not self._is_valid_hypothesis(
                 hypothesis
             ):
@@ -555,35 +913,11 @@ class ExperimentOrchestrator:
         """
         Return final active hypotheses explicitly accepted
         by the ReflectionAgent.
-
-        Only hypotheses with an ACCEPT recommendation are
-        eligible for automated experiment execution.
         """
-        return self.get_accepted_hypotheses(context)
 
-        # if hypothesis is None:
-        #     raise ValueError(
-        #         "No final Reflection-accepted active hypothesis "
-        #         "is available for experiment generation."
-        #     )
-
-        # accepted = self.get_accepted_hypotheses(
-        #     context
-        # )
-
-        # if accepted:
-        #     return accepted
-
-        # return [
-        #     hypothesis
-        #     for hypothesis in self.get_active_hypotheses(context)
-        #     if self._is_valid_hypothesis(hypothesis)
-        #     and getattr(
-        #         hypothesis,
-        #         "reflection_report",
-        #         None,
-        #     ) is None
-        # ]
+        return self.get_accepted_hypotheses(
+            context
+        )
 
     def _is_valid_hypothesis(
         self,
@@ -592,10 +926,8 @@ class ExperimentOrchestrator:
         """
         Check whether a hypothesis contains the minimum
         information required by the experiment layer.
-
-        Supports both Hypothesis objects and serialized
-        hypothesis dictionaries.
         """
+
         if hypothesis is None:
             return False
 
@@ -631,19 +963,16 @@ class ExperimentOrchestrator:
         produced by the RankingAgent.
 
         The orchestrator does not run another tournament.
-
-        RankingAgent has already updated:
-
-            hypothesis.elo_score
-
-        during the Supervisor cycle.
         """
 
         candidates = self.get_experiment_candidates(
             context
         )
 
-        def elo_key(hypothesis: Any) -> float:
+        def elo_key(
+            hypothesis: Any,
+        ) -> float:
+
             score = self._safe_float(
                 self._get_hypothesis_value(
                     hypothesis,
@@ -676,12 +1005,6 @@ class ExperimentOrchestrator:
         """
         Select the highest-Elo hypothesis from the final
         Reflection-accepted candidates.
-
-        Selection order:
-
-            1. Active
-            2. Reflection ACCEPT
-            3. Highest RankingAgent Elo score
         """
 
         ranked = self.get_ranked_hypotheses(
@@ -983,6 +1306,9 @@ class ExperimentOrchestrator:
             ),
         }
 
+    # ========================================================
+    # Evidence URL
+    # ========================================================
 
     @classmethod
     def _extract_evidence_url(
@@ -1004,6 +1330,7 @@ class ExperimentOrchestrator:
             )
 
         if isinstance(evidence_source, dict):
+
             possible_keys = (
                 "url",
                 "paper_url",
@@ -1013,7 +1340,10 @@ class ExperimentOrchestrator:
             )
 
             for key in possible_keys:
-                value = evidence_source.get(key)
+
+                value = evidence_source.get(
+                    key
+                )
 
                 if value:
                     return str(value).strip()
@@ -1029,6 +1359,7 @@ class ExperimentOrchestrator:
         )
 
         for attribute in possible_attributes:
+
             value = getattr(
                 evidence_source,
                 attribute,
@@ -1040,7 +1371,6 @@ class ExperimentOrchestrator:
 
         return None
 
-   
     # ========================================================
     # Tournament Serialization
     # ========================================================
@@ -1051,9 +1381,6 @@ class ExperimentOrchestrator:
     ) -> List[Dict[str, Any]]:
         """
         Preserve the RankingAgent's tournament decisions.
-
-        This is scientific provenance rather than another ranking
-        operation.
         """
 
         if context is None:
@@ -1081,7 +1408,7 @@ class ExperimentOrchestrator:
         context: Any,
     ) -> Dict[str, Any]:
         """
-        Preserve the latest ProximityAgent output when available.
+        Preserve the latest ProximityAgent output.
         """
 
         if context is None:
@@ -1109,7 +1436,7 @@ class ExperimentOrchestrator:
         context: Any,
     ) -> List[Dict[str, Any]]:
         """
-        Preserve MetaReviewAgent feedback from ContextMemory.
+        Preserve MetaReviewAgent feedback.
         """
 
         if context is None:
@@ -1128,6 +1455,254 @@ class ExperimentOrchestrator:
             list(feedback)
         )
 
+    @classmethod
+    def _extract_hypothesis_metric_requirements(
+        cls,
+        hypothesis: Any,
+    ) -> List[str]:
+        """
+        Extract explicitly structured evaluation metrics from
+        the selected hypothesis.
+
+        Metrics are only read from dedicated fields. They are
+        not inferred from free-form hypothesis text.
+        """
+
+        if hypothesis is None:
+            return []
+
+        candidate_fields = (
+            "evaluation_metrics",
+            "metrics",
+            "metric_requirements",
+            "experiment_metrics",
+        )
+
+        metrics: List[str] = []
+        seen = set()
+
+        for field in candidate_fields:
+            value = cls._get_hypothesis_value(
+                hypothesis,
+                field,
+                None,
+            )
+
+            if isinstance(value, str):
+                value = [value]
+
+            if not isinstance(value, list):
+                continue
+
+            for metric in value:
+                if not isinstance(metric, str):
+                    continue
+
+                name = metric.strip()
+
+                if not name:
+                    continue
+
+                key = cls._normalise_metric_name(name)
+
+                if key and key not in seen:
+                    metrics.append(name)
+                    seen.add(key)
+
+        return metrics
+
+    @classmethod
+    def _merge_metric_names(
+        cls,
+        *metric_lists: Any,
+    ) -> List[str]:
+        """
+        Merge metric-name lists while preserving order and
+        removing duplicates.
+        """
+
+        merged: List[str] = []
+        seen = set()
+
+        for metric_list in metric_lists:
+
+            if isinstance(metric_list, str):
+                metric_list = [metric_list]
+
+            if not isinstance(metric_list, list):
+                continue
+
+            for metric in metric_list:
+
+                if not isinstance(metric, str):
+                    continue
+
+                name = metric.strip()
+
+                if not name:
+                    continue
+
+                key = cls._normalise_metric_name(name)
+
+                if key and key not in seen:
+                    merged.append(name)
+                    seen.add(key)
+
+        return merged
+    
+    @classmethod
+    def _infer_experiment_type(
+        cls,
+        hypothesis: Any,
+        reference_experiment: Dict[str, Any],
+    ) -> str:
+        """
+        Infer the experiment type from the selected hypothesis and
+        supporting evidence.
+
+        This does not invent a methodology. It only identifies the
+        broad experimental form needed by the evidence.
+        """
+
+        text_parts: List[str] = []
+
+        hypothesis_text = cls._get_hypothesis_value(
+            hypothesis,
+            "text",
+            "",
+        )
+
+        hypothesis_title = cls._get_hypothesis_value(
+            hypothesis,
+            "title",
+            "",
+        )
+
+        if isinstance(hypothesis_text, str):
+            text_parts.append(hypothesis_text)
+
+        if isinstance(hypothesis_title, str):
+            text_parts.append(hypothesis_title)
+
+        for source in reference_experiment.get("sources", []):
+            if not isinstance(source, dict):
+                continue
+
+            details = source.get("experiment_details", {})
+
+            if not isinstance(details, dict):
+                continue
+
+            for field in (
+                "objective",
+                "methodology",
+                "setup",
+                "experiment_type",
+                "task",
+            ):
+                value = details.get(field)
+
+                if isinstance(value, str):
+                    text_parts.append(value)
+
+                elif isinstance(value, list):
+                    text_parts.extend(
+                        str(item)
+                        for item in value
+                        if item is not None
+                    )
+
+        text = " ".join(text_parts).lower()
+
+        # Measurement / benchmarking experiments
+        measurement_keywords = (
+            "latency",
+            "delay",
+            "overhead",
+            "throughput",
+            "bandwidth",
+            "tunnel setup",
+            "setup time",
+            "response time",
+            "execution time",
+            "stability",
+            "benchmark",
+            "performance measurement",
+            "pqc",
+            "ml-kem",
+            "ipsec",
+        )
+
+        if any(
+            keyword in text
+            for keyword in measurement_keywords
+        ):
+            return "measurement_benchmark"
+
+        # ML training experiments
+        classification_keywords = (
+            "classification",
+            "intrusion detection",
+            "anomaly detection",
+            "classifier",
+            "train",
+            "training",
+            "prediction",
+        )
+
+        if any(
+            keyword in text
+            for keyword in classification_keywords
+        ):
+            return "ml_training"
+
+        return "general_experiment"
+
+    @classmethod
+    def _build_experiment_design(
+        self,
+        experiment_type: str,
+    ) -> Dict[str, Any]:
+        """
+        Build experiment-design requirements according to the
+        actual experiment type.
+
+        Training-specific requirements must not be imposed on
+        measurement or benchmarking experiments.
+        """
+
+        if experiment_type == "ml_training":
+            return {
+                "experiment_type": experiment_type,
+                "preprocessing_required": True,
+                "train_validation_test_split": True,
+                "reproducibility_required": True,
+                "checkpoint_required": True,
+                "training_history_required": True,
+                "training_required": True,
+            }
+
+        if experiment_type == "measurement_benchmark":
+            return {
+                "experiment_type": experiment_type,
+                "preprocessing_required": False,
+                "train_validation_test_split": False,
+                "reproducibility_required": True,
+                "checkpoint_required": False,
+                "training_history_required": False,
+                "training_required": False,
+            }
+
+        return {
+            "experiment_type": experiment_type,
+            "preprocessing_required": False,
+            "train_validation_test_split": False,
+            "reproducibility_required": True,
+            "checkpoint_required": False,
+            "training_history_required": False,
+            "training_required": False,
+        }
+
     # ========================================================
     # Build Experiment Specification
     # ========================================================
@@ -1144,8 +1719,15 @@ class ExperimentOrchestrator:
         AI Co-Scientist and the experiment pipeline.
 
         The selected hypothesis remains the scientific source
-        of the experiment idea. The experiment layer does not
-        invent a new hypothesis.
+        of the experiment idea.
+
+        Supporting evidence provides:
+            - methodology guidance
+            - reference experiment details
+            - evaluation metric guidance
+            - numerical reference values when explicitly reported
+
+        Reference values are NOT experiment results.
         """
 
         if hypothesis is None:
@@ -1153,11 +1735,14 @@ class ExperimentOrchestrator:
                 "Cannot build an experiment specification "
                 "without a selected hypothesis."
             )
-        
+
         if reference_experiment is None:
             reference_experiment = {}
 
-        if not isinstance(reference_experiment, dict):
+        if not isinstance(
+            reference_experiment,
+            dict,
+        ):
             raise TypeError(
                 "reference_experiment must be a dictionary."
             )
@@ -1179,7 +1764,66 @@ class ExperimentOrchestrator:
             or {}
         )
 
+        # ----------------------------------------------------
+        # NEW:
+        # Extract evidence-derived metric guidance.
+        # ----------------------------------------------------
+
+        reference_metric_guidance = (
+            self._extract_reference_metric_requirements(
+                reference_experiment
+            )
+        )
+
+        evidence_metrics = (
+            reference_metric_guidance.get(
+                "metrics",
+                [],
+            )
+        )
+
+        metric_definitions = (
+            reference_metric_guidance.get(
+                "metric_definitions",
+                {},
+            )
+        )
+
+        reference_metrics = (
+            reference_metric_guidance.get(
+                "reference_metrics",
+                {},
+            )
+        )
+
+        hypothesis_metrics = (
+            self._extract_hypothesis_metric_requirements(
+                hypothesis
+            )
+        )
+
+        evaluation_metrics = (
+            self._merge_metric_names(
+                hypothesis_metrics,
+                evidence_metrics,
+            )
+        )
+
+        experiment_type = self._infer_experiment_type(
+            hypothesis,
+            reference_experiment,
+        )
+
+        experiment_design = self._build_experiment_design(
+            experiment_type,
+        )
+
+        # ----------------------------------------------------
+        # Experiment specification
+        # ----------------------------------------------------
+
         specification = {
+
             "dataset": {
                 "name": self.dataset_name,
                 "path": (
@@ -1187,9 +1831,11 @@ class ExperimentOrchestrator:
                     if self.dataset_path
                     else None
                 ),
-                "task": (
-                    "5G network intrusion "
-                    "detection classification"
+                "task": None,
+                "role": (
+                    "training_dataset"
+                    if experiment_type == "ml_training"
+                    else "supporting_or_reference_dataset"
                 ),
             },
 
@@ -1206,6 +1852,35 @@ class ExperimentOrchestrator:
             "reference_experiment": self._json_safe(
                 reference_experiment
             ),
+
+            # NEW:
+            # Explicitly expose the metric information instead
+            # of making CodeGenerationAgent rediscover it.
+            "evaluation_guidance": {
+                "hypothesis_metrics": self._json_safe(
+                    hypothesis_metrics
+                ),
+                "evidence_metrics": self._json_safe(
+                    evidence_metrics
+                ),
+                "preferred_comparison_metrics": self._json_safe(
+                    evaluation_metrics
+                ),
+                "metric_definitions": self._json_safe(
+                    metric_definitions
+                ),
+                "reference_metrics": self._json_safe(
+                    reference_metrics
+                ),
+                "reference_values_are_not_experiment_results": True,
+                "policy": {
+                    "same_metrics_preferred": True,
+                    "never_copy_reference_values": True,
+                    "never_fabricate_metrics": True,
+                    "allow_proxy_metrics": True,
+                    "require_proxy_label": True,
+                },
+            },
 
             "scientific_evaluation": {
                 "alignment_score": reflection_report.get(
@@ -1249,78 +1924,162 @@ class ExperimentOrchestrator:
                 ),
             },
 
+            # ------------------------------------------------
+            # CHANGED:
+            # These describe the current default 5G-NIDD
+            # training pipeline. They are implementation
+            # defaults rather than universal scientific
+            # requirements for every evidence source.
+            # ------------------------------------------------
+
             "experiment_design": {
                 "input_source": (
                     "selected_ai_co_scientist_hypothesis"
                 ),
-                "preprocessing_required": True,
-                "train_validation_test_split": True,
-                "reproducibility_required": True,
-                "checkpoint_required": True,
-                "training_history_required": True,
+
+                # These requirements are determined by the
+                # actual experiment type rather than being
+                # universally forced.
+                **experiment_design,
+
+                "metric_selection_source": [
+                    "selected_hypothesis",
+                    "supporting_evidence",
+                    "experiment_type",
+                ],
+
+                "reference_metrics_must_not_be_copied": True,
+
+                "unreproducible_metrics_policy": (
+                    "Mark unavailable/not_directly_comparable "
+                    "or use a clearly identified proxy; "
+                    "never fabricate a value."
+                ),
             },
 
             "code_generation_requirements": {
-                "framework": "PyTorch",
-                "language": "Python",
-                "dataset": self.dataset_name,
-                "dataset_path": (
-                    str(self.dataset_path)
-                    if self.dataset_path
-                    else None
-                ),
-                "device": self.device,
-                "include_preprocessing": True,
-                "include_train_validation_test": True,
-                "include_checkpoint": True,
-                "include_training_history": True,
-                "include_reproducibility": True,
-                "include_evaluation": True,
-            },
 
-            "evaluation_metrics": [
-                "accuracy",
-                "precision_weighted",
-                "recall_weighted",
-                "f1_weighted",
-                "confusion_matrix",
-                "training_seconds",
-                "evaluation_seconds",
-                "total_execution_seconds",
+            "framework": "PyTorch",
+            "language": "Python",
+
+            "dataset": self.dataset_name,
+
+            "dataset_path": (
+                str(self.dataset_path)
+                if self.dataset_path
+                else None
+            ),
+
+            "device": self.device,
+
+            "experiment_type": experiment_type,
+
+            "include_preprocessing": experiment_design[
+                "preprocessing_required"
             ],
+
+            "include_train_validation_test": experiment_design[
+                "train_validation_test_split"
+            ],
+
+            "include_checkpoint": experiment_design[
+                "checkpoint_required"
+            ],
+
+            "include_training_history": experiment_design[
+                "training_history_required"
+            ],
+
+            "include_reproducibility": experiment_design[
+                "reproducibility_required"
+            ],
+
+            "include_evaluation": True,
+
+            "use_evidence_derived_metrics": True,
+
+            "do_not_copy_reference_metric_values": True,
+
+            "record_unreproducible_metrics": True,
+        },
+
+            # ------------------------------------------------
+            # CHANGED:
+            # No universal hard-coded accuracy/F1 list.
+            #
+            # Keep this empty so CodeGenerationAgent can derive
+            # the evaluation requirements from the hypothesis,
+            # evidence, and experiment type.
+            # ------------------------------------------------
+
+            "evaluation_metrics": self._json_safe(
+                evaluation_metrics
+            ),
+
+            # NEW:
+            "evaluation_metric_definitions": (
+                self._json_safe(
+                    metric_definitions
+                )
+            ),
+
+            # NEW:
+            "reference_metrics": (
+                self._json_safe(
+                    reference_metrics
+                )
+            ),
+
+            # ------------------------------------------------
+            # CHANGED:
+            # Artifact requirements are conditional.
+            # ------------------------------------------------
 
             "expected_artifacts": [
                 "experiment_config.json",
                 "generated_pytorch_code.py",
-                "checkpoint",
                 "metrics.json",
+                "experiment_summary.json",
+            ],
+
+            "optional_artifacts": [
+                "checkpoint",
                 "training_history.json",
-                "loss_visualization",
-                "accuracy_visualization",
-                "confusion_matrix_visualization",
-                "performance_metrics_visualization",
+                "visualizations",
+                "latency_visualization",
+                "performance_visualization",
+                "stability_visualization",
             ],
         }
 
+        # ----------------------------------------------------
+        # AI Co-Scientist provenance
+        # ----------------------------------------------------
+
         if context is not None:
+
             specification[
                 "ai_co_scientist_provenance"
             ] = {
+
                 "iteration_number": getattr(
                     context,
                     "iteration_number",
                     None,
                 ),
+
                 "tournament_results": (
                     self.serialize_tournament_results(
                         context
                     )
                 ),
+
                 "proximity_analysis": (
                     self.serialize_proximity_analysis(
                         context
                     )
                 ),
+
                 "meta_review_feedback": (
                     self.serialize_meta_review(
                         context
@@ -1359,6 +2118,7 @@ class ExperimentOrchestrator:
             "w",
             encoding="utf-8",
         ) as file:
+
             json.dump(
                 self._json_safe(data),
                 file,
@@ -1440,9 +2200,6 @@ class ExperimentOrchestrator:
     ) -> Path:
         """
         Save the final experiment candidate ranking.
-
-        This records the final state produced by the
-        Reflection + Ranking workflow.
         """
 
         ranked_hypotheses = (
@@ -1457,6 +2214,7 @@ class ExperimentOrchestrator:
             ranked_hypotheses,
             start=1,
         ):
+
             item = (
                 self.serialize_hypothesis(
                     hypothesis
@@ -1556,13 +2314,12 @@ class ExperimentOrchestrator:
             1. Retrieve final experiment candidates.
             2. Rank them using existing Elo values.
             3. Select the highest-ranked candidate.
-            4. Build experiment specification.
-            5. Save configuration.
-            6. Save final rankings.
-            7. Save Co-Scientist provenance.
-
-        No Generation, Reflection, Ranking, Evolution,
-        Proximity, or Meta-review agents are executed here.
+            4. Extract reference experiments from evidence.
+            5. Extract evidence-derived evaluation metrics.
+            6. Build experiment specification.
+            7. Save configuration.
+            8. Save final rankings.
+            9. Save Co-Scientist provenance.
         """
 
         started_at = time.perf_counter()
@@ -1580,6 +2337,7 @@ class ExperimentOrchestrator:
         }
 
         try:
+
             if context is None:
                 raise ValueError(
                     "ContextMemory is required."
@@ -1590,6 +2348,7 @@ class ExperimentOrchestrator:
             # ------------------------------------------------
 
             if hypothesis is None:
+
                 hypothesis = (
                     self.select_best_hypothesis(
                         context
@@ -1660,11 +2419,31 @@ class ExperimentOrchestrator:
             # ------------------------------------------------
 
             if reference_experiment is None:
+
                 reference_experiment = (
                     self.extract_reference_experiment(
                         hypothesis
                     )
                 )
+
+            # Ensure a dictionary is always passed downstream.
+
+            if reference_experiment is None:
+                reference_experiment = {}
+
+            if not isinstance(
+                reference_experiment,
+                dict,
+            ):
+                raise TypeError(
+                    "reference_experiment must be a dictionary."
+                )
+
+            result["reference_experiment"] = (
+                self._json_safe(
+                    reference_experiment
+                )
+            )
 
             # ------------------------------------------------
             # Build specification
@@ -1728,11 +2507,24 @@ class ExperimentOrchestrator:
                 "provenance_path"
             ] = str(provenance_path)
 
+            # ------------------------------------------------
+            # NEW:
+            # Expose evaluation guidance at preparation level.
+            # ------------------------------------------------
+
+            result[
+                "evaluation_guidance"
+            ] = specification.get(
+                "evaluation_guidance",
+                {},
+            )
+
             result[
                 "success"
             ] = True
 
         except Exception as error:
+
             result[
                 "errors"
             ].append(
@@ -1740,6 +2532,7 @@ class ExperimentOrchestrator:
             )
 
         finally:
+
             result[
                 "preparation_seconds"
             ] = (
@@ -1761,27 +2554,76 @@ class ExperimentOrchestrator:
         Generate PyTorch experiment code from the structured
         experiment specification.
 
-        The CodeGenerationAgent receives the experiment
-        specification produced from the selected AI Co-Scientist
-        hypothesis and returns generated experiment code.
+        CodeGenerationAgent receives:
+
+            - selected Rank #1 hypothesis
+            - research goal
+            - dataset/schema
+            - reference experiment
+            - evidence-derived metric guidance
+            - reproducibility requirements
+
+        The hypothesis remains authoritative for WHAT is tested.
+        Supporting evidence guides HOW it is evaluated.
         """
+
+        if not isinstance(
+            specification,
+            dict,
+        ):
+            raise TypeError(
+                "specification must be a dictionary."
+            )
 
         logger.info(
             "CodeGeneration specification size: %d characters",
-            len(json.dumps(specification, ensure_ascii=False)),
+            len(
+                json.dumps(
+                    specification,
+                    ensure_ascii=False,
+                )
+            ),
         )
 
         logger.info(
             "Reference experiment size: %d characters",
-            len(json.dumps(
-                specification.get("reference_experiment", {}),
-                ensure_ascii=False,
-            )),
+            len(
+                json.dumps(
+                    specification.get(
+                        "reference_experiment",
+                        {},
+                    ),
+                    ensure_ascii=False,
+                )
+            ),
         )
-        # raise NotImplementedError(
-        #     "CodeGenerationAgent has not yet "
-        #     "been connected to ExperimentOrchestrator."
-        # )
+
+        # NEW:
+        # Log the actual evidence-derived metrics.
+
+        evaluation_guidance = (
+            specification.get(
+                "evaluation_guidance",
+                {},
+            )
+        )
+
+        logger.info(
+            "Evidence-derived evaluation metrics: %s",
+            evaluation_guidance.get(
+                "evidence_metrics",
+                [],
+            ),
+        )
+
+        logger.info(
+            "Paper reference metric values: %s",
+            evaluation_guidance.get(
+                "reference_metrics",
+                {},
+            ),
+        )
+
         return self.code_generation_agent.generate(
             specification
         )
@@ -1800,7 +2642,10 @@ class ExperimentOrchestrator:
         experiment run directory.
         """
 
-        if not isinstance(code, str):
+        if not isinstance(
+            code,
+            str,
+        ):
             raise TypeError(
                 "Generated code must be a string."
             )
@@ -1819,7 +2664,6 @@ class ExperimentOrchestrator:
 
         return output_path
 
-
     # ========================================================
     # Run Generated Experiment
     # ========================================================
@@ -1831,7 +2675,7 @@ class ExperimentOrchestrator:
         timeout_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Execute generated PyTorch code through ExperimentRunner.
+        Execute generated experiment code through ExperimentRunner.
 
         ExperimentRunner is responsible for:
 
@@ -1866,12 +2710,16 @@ class ExperimentOrchestrator:
             )
 
         try:
-            logger.info("Training started")
+
+            logger.info(
+                "Experiment execution started."
+            )
+
             runner_result = (
                 self.experiment_runner.run_generated_result(
                     generated_result=generated_result,
                     dataset_path=self.dataset_path,
-                    run_name=experiment_id,
+                    experiment_id=experiment_id,
                 )
             )
 
@@ -1882,6 +2730,7 @@ class ExperimentOrchestrator:
             return runner_result
 
         finally:
+
             self.experiment_runner.timeout_seconds = (
                 original_timeout
             )
@@ -1894,24 +2743,46 @@ class ExperimentOrchestrator:
         self,
         hypothesis: Dict[str, Any],
         execution_result: Dict[str, Any],
+        reference_experiment: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Compare successful automated experiment results against
-        the evidence sources associated with the selected
-        Rank #1 hypothesis.
+        evidence sources associated with the selected hypothesis.
+
+        The comparator is responsible for determining:
+
+            - which paper metrics are available
+            - which experiment metrics are available
+            - unit compatibility
+            - numerical differences
+            - relative differences
+            - comparability
+            - limitations
+
+        This method does not assume that accuracy/F1/etc. are
+        universally applicable.
         """
 
-        if not isinstance(hypothesis, dict):
+        if not isinstance(
+            hypothesis,
+            dict,
+        ):
             raise TypeError(
                 "hypothesis must be a dictionary."
             )
 
-        if not isinstance(execution_result, dict):
+        if not isinstance(
+            execution_result,
+            dict,
+        ):
             raise TypeError(
                 "execution_result must be a dictionary."
             )
 
-        if not execution_result.get("success", False):
+        if not execution_result.get(
+            "success",
+            False,
+        ):
             return {
                 "success": False,
                 "status": "experiment_failed",
@@ -1922,7 +2793,9 @@ class ExperimentOrchestrator:
             }
 
         evidence_sources = (
-            hypothesis.get("evidence_sources")
+            hypothesis.get(
+                "evidence_sources"
+            )
             or []
         )
 
@@ -1939,6 +2812,7 @@ class ExperimentOrchestrator:
         return self.experiment_comparator.compare(
             hypothesis=hypothesis,
             experiment_result=execution_result,
+            reference_experiment=reference_experiment,
         )
 
     # ========================================================
@@ -1968,10 +2842,22 @@ class ExperimentOrchestrator:
             Existing Elo ranking
                     |
                     v
-            Best hypothesis
+            Rank #1 hypothesis
                     |
                     v
-            Experiment specification
+            Evidence Sources
+                    |
+                    v
+            PaperReader
+                    |
+                    v
+            Reference Experiment
+                    |
+                    v
+            Evidence-derived Metrics
+                    |
+                    v
+            Experiment Specification
                     |
                     v
             CodeGenerationAgent
@@ -1980,17 +2866,25 @@ class ExperimentOrchestrator:
             Generated PyTorch code
                     |
                     v
-            Optional execution
+            ExperimentRunner
                     |
                     v
-            Metrics / artifacts
+            Experiment Results
+                    |
+                    v
+            ExperimentComparator
+                    |
+                    v
+            Paper vs Experiment
 
-        By default, code execution is disabled until a real
-        CodeGenerationAgent is connected.
+        By default, generated code execution is disabled.
         """
 
         started_at = time.perf_counter()
-        logger.info("Experiment started")
+
+        logger.info(
+            "Experiment started"
+        )
 
         preparation = (
             self.prepare_experiment(
@@ -2016,12 +2910,17 @@ class ExperimentOrchestrator:
                     [],
                 )
             ),
+            "reference_experiment": preparation.get(
+                "reference_experiment",
+                {},
+            ),
         }
 
         if not preparation.get(
             "success",
             False,
         ):
+
             result[
                 "total_seconds"
             ] = (
@@ -2040,143 +2939,298 @@ class ExperimentOrchestrator:
         )
 
         try:
-            code_generation = self.generate_pytorch_code(
-                specification
+
+            code_generation = (
+                self.generate_pytorch_code(
+                    specification
+                )
             )
 
-            result["code_generation"] = code_generation
+            result[
+                "code_generation"
+            ] = code_generation
 
-            if not isinstance(code_generation, dict):
-                result["errors"].append(
+            if not isinstance(
+                code_generation,
+                dict,
+            ):
+
+                result[
+                    "errors"
+                ].append(
                     "Code generation did not return a dictionary."
                 )
-                result["success"] = False
 
-            elif not code_generation.get("success", False):
-                generation_errors = code_generation.get(
-                    "errors",
-                    [],
+                result[
+                    "success"
+                ] = False
+
+            elif not code_generation.get(
+                "success",
+                False,
+            ):
+
+                generation_errors = (
+                    code_generation.get(
+                        "errors",
+                        [],
+                    )
                 )
-                if isinstance(generation_errors, list):
-                    result["errors"].extend(
+
+                if isinstance(
+                    generation_errors,
+                    list,
+                ):
+
+                    result[
+                        "errors"
+                    ].extend(
                         str(error)
                         for error in generation_errors
                         if str(error).strip()
                     )
+
                 elif generation_errors:
-                    result["errors"].append(
+
+                    result[
+                        "errors"
+                    ].append(
                         str(generation_errors)
                     )
+
                 else:
-                    result["errors"].append(
+
+                    result[
+                        "errors"
+                    ].append(
                         code_generation.get(
                             "error",
-                            "Code generation failed."
+                            "Code generation failed.",
                         )
                     )
-                result["success"] = False
+
+                result[
+                    "success"
+                ] = False
 
         except Exception as error:
-            result["errors"].append(
+
+            result[
+                "errors"
+            ].append(
                 f"Code generation failed: {error}"
             )
-            result["success"] = False
+
+            result[
+                "success"
+            ] = False
 
         # ----------------------------------------------------
         # Optional execution
         # ----------------------------------------------------
 
-        if execute_generated_code and result.get("success", False):
-            code_generation = result["code_generation"]
-            experiment_id = preparation["experiment_id"]
+        if (
+            execute_generated_code
+            and result.get(
+                "success",
+                False,
+            )
+        ):
+
+            code_generation = (
+                result[
+                    "code_generation"
+                ]
+            )
+
+            experiment_id = (
+                preparation[
+                    "experiment_id"
+                ]
+            )
 
             try:
-                execution = self.run_generated_experiment(
-                    experiment_id=experiment_id,
-                    generated_result=code_generation,
-                    timeout_seconds=timeout_seconds,
+
+                execution = (
+                    self.run_generated_experiment(
+                        experiment_id=experiment_id,
+                        generated_result=code_generation,
+                        timeout_seconds=timeout_seconds,
+                    )
                 )
+
             except Exception as error:
+
                 execution = {
                     "success": False,
                     "status": "runner_error",
-                    "errors": [str(error)],
+                    "errors": [
+                        str(error)
+                    ],
                     "error": str(error),
                 }
 
-            result["execution"] = execution
+            result[
+                "execution"
+            ] = execution
 
-            output_validation = execution.get("output_validation", {})
+            output_validation = (
+                execution.get(
+                    "output_validation",
+                    {},
+                )
+            )
 
-            if execution.get("success", False) and output_validation.get("valid", True):
-                result["success"] = True
+            execution_valid = (
+                execution.get(
+                    "success",
+                    False,
+                )
+                and output_validation.get(
+                    "valid",
+                    True,
+                )
+            )
+
+            if execution_valid:
+
+                result[
+                    "success"
+                ] = True
+
             else:
-                result["success"] = False
-                result["errors"].extend(
-                    execution.get("errors", [])
+
+                result[
+                    "success"
+                ] = False
+
+                execution_errors = (
+                    execution.get(
+                        "errors",
+                        [],
+                    )
                 )
 
+                if isinstance(
+                    execution_errors,
+                    list,
+                ):
+
+                    result[
+                        "errors"
+                    ].extend(
+                        execution_errors
+                    )
+
             # ------------------------------------------------
-            # Compare successful experiment with paper evidence
+            # Compare successful experiment with evidence
             # ------------------------------------------------
-            if (
-                execution.get("success", False)
-                and output_validation.get("valid", True)
-            ):
+
+            if execution_valid:
+
                 try:
+
+                    comparison_reference_experiment = (
+                        preparation[
+                            "experiment_specification"
+                        ].get(
+                            "reference_experiment",
+                            {},
+                        )
+                    )
+
                     comparison = (
                         self.compare_experiment_results(
                             hypothesis=preparation[
                                 "selected_hypothesis"
                             ],
                             execution_result=execution,
+                            reference_experiment=(
+                                comparison_reference_experiment
+                            ),
                         )
                     )
 
-                    result["comparison"] = comparison
+                    result[
+                        "comparison"
+                    ] = comparison
 
                 except Exception as error:
-                    result["comparison"] = {
+
+                    result[
+                        "comparison"
+                    ] = {
                         "success": False,
                         "status": "comparison_error",
-                        "errors": [str(error)],
+                        "errors": [
+                            str(error)
+                        ],
                     }
 
-                    result["errors"].append(
+                    result[
+                        "errors"
+                    ].append(
                         f"Experiment comparison failed: {error}"
                     )
-
 
         # ----------------------------------------------------
         # Final status
         # ----------------------------------------------------
+
         if execute_generated_code:
-            execution = result.get("execution")
+
+            execution = result.get(
+                "execution"
+            )
 
             if execution is not None:
-                output_validation = execution.get(
-                    "output_validation",
-                    {},
+
+                output_validation = (
+                    execution.get(
+                        "output_validation",
+                        {},
+                    )
                 )
 
-                result["success"] = bool(
-                    execution.get("success", False)
-                    and output_validation.get("valid", True)
+                result[
+                    "success"
+                ] = bool(
+                    execution.get(
+                        "success",
+                        False,
+                    )
+                    and output_validation.get(
+                        "valid",
+                        True,
+                    )
                 )
+
             else:
-                result["success"] = False
 
-        elif result.get("code_generation"):
-            result["success"] = bool(
-                result["code_generation"].get(
+                result[
+                    "success"
+                ] = False
+
+        elif result.get(
+            "code_generation"
+        ):
+
+            result[
+                "success"
+            ] = bool(
+                result[
+                    "code_generation"
+                ].get(
                     "success",
                     False,
                 )
             )
 
-
-        result["total_seconds"] = (
-            time.perf_counter() - started_at
+        result[
+            "total_seconds"
+        ] = (
+            time.perf_counter()
+            - started_at
         )
 
         return result

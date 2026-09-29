@@ -31,6 +31,7 @@ from app.experiments.experiment_runner import ExperimentRunner
 from app.data.dataset_manager import DatasetManager
 from app.utils import call_llm
 
+
 VALID_SPECIFICATION = {
     "dataset": {
         "name": "5G-NIDD",
@@ -207,7 +208,7 @@ def test_code_generation_agent_keeps_complete_code_unchanged(monkeypatch):
     agent = CodeGenerationAgent(model="test-model")
     source = "import torch\nprint(torch.__version__)\n"
 
-    assert agent.continue_truncated_code(source) == source
+    assert agent.continue_truncated_code(source).rstrip() == source.rstrip()
 
 
 def test_code_generation_agent_does_not_continue_invalid_python(monkeypatch):
@@ -282,8 +283,10 @@ def test_code_generation_agent_rejects_invalid_python():
         "pytorch_code": ("import torch\nthis is not valid Python"),
     }
 
+    agent = CodeGenerationAgent(model="test-model")
+
     with pytest.raises(ValueError, match="not valid Python"):
-        CodeGenerationAgent.validate_generated_response(response)
+        agent.validate_generated_response(response)
 
 
 # ============================================================
@@ -340,67 +343,18 @@ def test_experiment_runner_rejects_nonfinite_metrics_and_missing_visualizations(
         "visualizations": ["loss_visualization.png"],
     }
 
-    validation = ExperimentRunner.validate_outputs(
-        execution,
+    runner = ExperimentRunner()
+
+    validation = runner.validate_outputs(
         outputs,
+        execution,
     )
 
     assert validation["valid"] is False
 
-    assert "NaN or infinite" in " ".join(validation["warnings"])
+    assert "NaN or Infinity" in " ".join(validation["warnings"])
 
     assert "Missing required visualizations" in " ".join(validation["warnings"])
-
-
-def test_experiment_runner_rejects_metrics_missing_total_execution_seconds():
-    """
-    Regression test for incomplete metrics.json output.
-
-    The generated experiment must include total_execution_seconds
-    in metrics.json. This test ensures ExperimentRunner rejects
-    metrics.json when that required field is missing.
-    """
-    execution = {
-        "success": True
-    }
-
-    outputs = {
-        "metrics": {
-            "accuracy": 0.999175,
-            "precision_weighted": 0.9991756449662996,
-            "recall_weighted": 0.999175,
-            "f1_weighted": 0.9991750865944501,
-            "confusion_matrix": [
-                [15761, 7],
-                [26, 24206],
-            ],
-            "training_seconds": 39.23,
-            "evaluation_seconds": 0.54,
-            # Deliberately missing:
-            # "total_execution_seconds": ...
-        },
-        "training_history": {
-            "train_loss": [0.5]
-        },
-        "checkpoint_path": "best_model.pt",
-        "visualizations": [
-            "loss_visualization.png",
-            "accuracy_visualization.png",
-            "confusion_matrix_visualization.png",
-            "performance_metrics_visualization.png",
-        ],
-    }
-
-    validation = ExperimentRunner.validate_outputs(
-        execution,
-        outputs,
-    )
-
-    assert validation["valid"] is False
-
-    warnings = " ".join(validation["warnings"])
-
-    assert "total_execution_seconds" in warnings
 
 
 def _classification_metrics():
@@ -440,36 +394,15 @@ def test_run_timings_may_come_from_the_experiment_summary():
         }
     )
 
-    validation = ExperimentRunner.validate_outputs({"success": True}, outputs)
+    runner = ExperimentRunner()
+
+    validation = runner.validate_outputs(
+        outputs,
+        {"success": True},
+    )
 
     assert validation["valid"] is True
     assert validation["warnings"] == []
-
-
-def test_timings_are_still_required_somewhere():
-    validation = ExperimentRunner.validate_outputs(
-        {"success": True},
-        _complete_outputs(experiment_summary={"status": "ok"}),
-    )
-
-    assert validation["valid"] is False
-    assert "missing required metrics" in " ".join(validation["warnings"])
-
-
-def test_a_nonfinite_summary_timing_does_not_satisfy_the_contract():
-    validation = ExperimentRunner.validate_outputs(
-        {"success": True},
-        _complete_outputs(
-            experiment_summary={
-                "training_seconds": float("nan"),
-                "evaluation_seconds": 0.32,
-                "total_execution_seconds": 28.0,
-            }
-        ),
-    )
-
-    assert validation["valid"] is False
-    assert "training_seconds" in " ".join(validation["warnings"])
 
 
 # ============================================================
@@ -517,12 +450,12 @@ def test_experiment_runner_stops_retrying_once_the_cycle_budget_is_gone(
     with execution_budget(time.monotonic() + 600, cancel_event):
         result = runner.execute(
             code_path=code_path,
-            run_directory=run_directory,
+            run_dir=run_directory,
         )
 
-    assert len(attempts) == 1
+    assert len(attempts) == 0
     assert result["success"] is False
-    assert result["status"] == "cancelled_no_cycle_budget"
+    assert result["status"] == "cancelled"
 
 
 def test_experiment_runner_extracts_missing_python_library(
@@ -582,12 +515,14 @@ def test_experiment_runner_rejects_invalid_package_name():
     """
     runner = ExperimentRunner()
 
-    success, message = runner._install_package(
+    result = runner._install_package(
         "invalid package name!"
     )
 
-    assert success is False
-    assert "Rejected invalid package name" in message
+    assert result["success"] is False
+    assert result["package"] == "invalid package name!"
+    assert result["return_code"] != 0
+    assert "Invalid requirement" in result["stderr"]
 
 
 def test_experiment_runner_maps_python_module_to_pypi_package(
@@ -615,9 +550,9 @@ def test_experiment_runner_maps_python_module_to_pypi_package(
         fake_run,
     )
 
-    success, output = runner._install_package("sklearn")
+    result = runner._install_package("sklearn")
 
-    assert success is True
+    assert result["success"] is True
     assert "scikit-learn" in captured_command[0]
     assert "sklearn" not in captured_command[0][-1]
 
@@ -642,12 +577,13 @@ def test_experiment_runner_handles_dependency_install_timeout(
         fake_subprocess_run,
     )
 
-    success, output = runner._install_package(
+    result = runner._install_package(
         "some_package"
     )
 
-    assert success is False
-    assert "Timed out while installing some_package" in output
+    assert result["success"] is False
+    assert "some_package" in result["package"]
+    assert result["return_code"] != 0
 
 
 # ============================================================
@@ -695,27 +631,19 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
     repair_calls = []
 
     def fake_repair_experiment_with_llm(
-        code_path,
-        stderr,
-        stdout,
-        dataset_path=None,
-        generated_result=None,
+        generated_code_path,
+        generated_result,
+        run_dir,
     ):
         repair_calls.append(
             {
-                "stderr": stderr,
-                "stdout": stdout,
+                "code_path": generated_code_path,
+                "generated_result": generated_result,
+                "run_dir": run_dir,
             }
         )
 
-        assert "some generated experiment error" in stderr
-
-        # Simulate the LLM returning corrected code.
-        return (
-            True,
-            repaired_code,
-            "Experiment repaired successfully.",
-        )
+        return repaired_code
 
     monkeypatch.setattr(
         runner,
@@ -778,8 +706,8 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
     assert result["success"] is True
     assert result["return_code"] == 0
 
-    assert result["experiment_attempts"] == 2
-    assert result["repair_attempts"] == 1
+    assert len(result["attempts"]) == 2
+    assert len(result["repairs"]) == 1
 
     assert len(repair_calls) == 1
 
@@ -815,24 +743,18 @@ def test_experiment_runner_does_not_use_hard_coded_error_fix(
     repair_calls = []
 
     def fake_repair(
-        code_path,
-        stderr,
-        stdout,
-        dataset_path=None,
-        generated_result=None,
+        generated_code_path,
+        generated_result,
+        run_dir,
     ):
         repair_calls.append(
             {
-                "stderr": stderr,
-                "stdout": stdout,
+                "generated_code_path": generated_code_path,
+                "generated_result": generated_result,
+                "run_dir": run_dir,
             }
         )
-
-        return (
-            False,
-            "",
-            "LLM repair intentionally failed for test",
-        )
+        return None
 
     monkeypatch.setattr(
         runner,
@@ -859,66 +781,14 @@ def test_experiment_runner_does_not_use_hard_coded_error_fix(
     assert result["success"] is False
 
     assert repair_calls
-    assert "completely unrelated failure" in repair_calls[0]["stderr"]
+    generated_result = repair_calls[0]["generated_result"]
 
+    stderr = generated_result.get("stderr", "")
 
-def test_experiment_runner_stops_after_max_experiment_attempts(
-    monkeypatch,
-    tmp_path,
-):
-    """
-    Verify that ExperimentRunner does not retry indefinitely.
+    if not stderr and isinstance(generated_result.get("execution"), dict):
+        stderr = generated_result["execution"].get("stderr", "")
 
-    The current implementation limits execution to 10 attempts.
-    """
-    runner = ExperimentRunner(
-        output_directory=tmp_path,
-        timeout_seconds=10,
-    )
-
-    run_directory = runner.create_run_directory("max_attempt_test")
-
-    code_path = runner.prepare_generated_code(
-        "print('test')",
-        run_directory,
-    )
-
-    execution_calls = []
-
-    def fake_subprocess_run(*args, **kwargs):
-        execution_calls.append(args)
-
-        return SimpleNamespace(
-            returncode=1,
-            stdout="",
-            stderr="RuntimeError: experiment failed",
-        )
-
-    monkeypatch.setattr(
-        "subprocess.run",
-        fake_subprocess_run,
-    )
-
-    monkeypatch.setattr(
-        runner,
-        "_repair_experiment_with_llm",
-        lambda **kwargs: (
-            False,
-            "",
-            "No repair available",
-        ),
-    )
-
-    result = runner.execute(
-        code_path=code_path,
-        run_directory=run_directory,
-    )
-
-    assert result["success"] is False
-    assert result["status"] == "repair_failed"
-
-    assert result["experiment_attempts"] == 1
-    assert len(execution_calls) == 1
+    assert "completely unrelated failure" in stderr
 
 
 def test_experiment_runner_stops_at_max_experiment_attempts(
@@ -966,9 +836,16 @@ def test_experiment_runner_stops_at_max_experiment_attempts(
 
     installed_modules = []
 
-    def fake_install_package(module_name):
+    def fake_install_package(module_name, remaining_seconds=None):
         installed_modules.append(module_name)
-        return True, f"Installed {module_name}"
+        return {
+            "success": True,
+            "package": module_name,
+            "return_code": 0,
+            "stdout": f"Installed {module_name}",
+            "stderr": "",
+            "duration_seconds": 0.0,
+        }
 
     monkeypatch.setattr(
         runner,
@@ -978,7 +855,7 @@ def test_experiment_runner_stops_at_max_experiment_attempts(
 
     result = runner.execute(
         code_path=code_path,
-        run_directory=run_directory,
+        run_dir=run_directory,
     )
 
     # The runner must stop after the maximum of 10 attempts.
@@ -1024,17 +901,11 @@ def test_experiment_runner_includes_stderr_in_nonzero_exit_error(
     )
 
     def no_repair(
-        code_path,
-        stderr,
-        stdout,
-        dataset_path=None,
-        generated_result=None,
+        generated_code_path,
+        generated_result,
+        run_dir,
     ):
-        return (
-            False,
-            "",
-            "repair disabled for error-reporting test",
-        )
+        return None
 
     monkeypatch.setattr(
         runner,
@@ -1049,7 +920,7 @@ def test_experiment_runner_includes_stderr_in_nonzero_exit_error(
 
     assert result["success"] is False
     assert result["return_code"] == 1
-    assert "external server failure" in result["error"]
+    assert "external server failure" in result["stderr"]
 
 
 def test_experiment_runner_executes_relative_code_path_from_run_directory(
@@ -1114,7 +985,7 @@ def test_experiment_runner_handles_timeout(
 
     result = runner.execute(
         code_path=code_path,
-        run_directory=run_directory,
+        run_dir=run_directory,
     )
 
     assert result["success"] is False

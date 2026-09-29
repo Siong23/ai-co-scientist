@@ -254,12 +254,27 @@ class DatasetManager:
                 )
 
             if candidate_reasons:
-                target_candidates.append({
+                value_counts = series.value_counts(dropna=True)
+
+                sample_values = [
+                    value.item() if hasattr(value, "item") else value
+                    for value in value_counts.index.tolist()[:10]
+                ]
+
+                candidate = {
                     "column": column,
                     "dtype": str(series.dtype),
                     "unique_values": unique_count,
+                    "sample_values": sample_values,
+                    "sample_value_counts": {
+                        str(key): int(value)
+                        for key, value in value_counts.head(10).items()
+                    },
+                    "missing_count": int(series.isna().sum()),
                     "reasons": candidate_reasons,
-                })
+                }
+
+                target_candidates.append(candidate)
 
         return {
             "dataset_name": self.dataset_name,
