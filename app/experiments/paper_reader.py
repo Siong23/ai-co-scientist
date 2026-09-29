@@ -140,6 +140,53 @@ class PaperReader:
         "ratio",
     )
 
+    # Indexed chunks are chosen for the LLM by section heading and by
+    # result cues, so measured results win over the introduction.
+    RESULT_SECTION_KEYWORDS = (
+        "result",
+        "experiment",
+        "evaluation",
+        "performance",
+        "simulation",
+        "discussion",
+        "benchmark",
+        "numerical",
+        "case study",
+    )
+
+    SETUP_SECTION_KEYWORDS = (
+        "method",
+        "setup",
+        "implementation",
+        "system model",
+        "proposed",
+        "approach",
+        "dataset",
+        "training",
+        "configuration",
+    )
+
+    LOW_VALUE_SECTION_KEYWORDS = (
+        "introduction",
+        "related work",
+        "background",
+        "literature",
+        "acknowledg",
+        "reference",
+    )
+
+    # Heading detection is imperfect, so the text itself also counts:
+    # percentages, table/figure references, and comparison wording.
+    RESULT_CUE_PATTERN = re.compile(
+        r"\d+(?:\.\d+)?\s?%"
+        r"|\b(?:table|fig\.?|figure)\s*\d"
+        r"|outperform"
+        r"|improv"
+        r"|compared (?:to|with)"
+        r"|results? (?:show|indicate|demonstrate)",
+        re.IGNORECASE,
+    )
+
     def __init__(
         self,
         timeout: int = 30,
@@ -1027,6 +1074,19 @@ PAPER TEXT:
 
         return ""
 
+    @staticmethod
+    def _name_has_keyword(
+        normalized_name: str,
+        keyword: str,
+    ) -> bool:
+        """
+        Match a keyword against whole words of a normalized metric name.
+
+        Substring matching read "generations" and "operation" as
+        containing "ratio", so generation counts became percentages.
+        """
+        return f"_{keyword}_" in f"_{normalized_name}_"
+
     @classmethod
     def _infer_value_type(
         cls,
@@ -1056,20 +1116,26 @@ PAPER TEXT:
 
         normalized = cls._normalise_metric_name(metric_name)
 
-        if "percent" in normalized or "percentage" in normalized:
+        if any(
+            cls._name_has_keyword(normalized, keyword)
+            for keyword in ("percent", "percentage", "pct")
+        ):
             return "percentage"
 
-        if "proportion" in normalized:
+        if cls._name_has_keyword(normalized, "proportion"):
             return "proportion"
 
-        if "fold" in normalized or "factor" in normalized:
+        if cls._name_has_keyword(normalized, "factor") or any(
+            word.endswith("fold")
+            for word in normalized.split("_")
+        ):
             return "factor"
 
         if normalized.endswith("_count") or normalized == "count":
             return "count"
 
         for keyword in cls.PERCENTAGE_METRIC_KEYWORDS:
-            if keyword in normalized:
+            if cls._name_has_keyword(normalized, keyword):
                 return "percentage"
 
         if unit:
@@ -2424,6 +2490,91 @@ PAPER EXPERIMENTAL TEXT
     # Indexed Chunk Preparation
     # ============================================================
 
+    @staticmethod
+    def _indexed_chunk_text(
+        chunk: Any,
+    ) -> str:
+        """Return the paper passage held by one indexed chunk."""
+
+        if hasattr(chunk, "page_content"):
+            text = chunk.page_content
+
+        elif isinstance(chunk, dict):
+            text = (
+                chunk.get("page_content")
+                or chunk.get("text")
+                or chunk.get("content")
+                or ""
+            )
+
+        elif isinstance(getattr(chunk, "text", None), str):
+            # PaperChunk keeps the passage in ``text``; str() would
+            # return its dataclass repr with every metadata field.
+            text = chunk.text
+
+        else:
+            text = str(chunk)
+
+        return str(text or "").strip()
+
+    @staticmethod
+    def _indexed_chunk_section(
+        chunk: Any,
+    ) -> str:
+        """Return the lower-cased section heading of one indexed chunk."""
+
+        if isinstance(chunk, dict):
+            metadata = chunk.get("metadata")
+            source = metadata if isinstance(metadata, dict) else chunk
+            values = [
+                source.get("section"),
+                source.get("section_path"),
+            ]
+
+        elif isinstance(getattr(chunk, "metadata", None), dict):
+            values = [
+                chunk.metadata.get("section"),
+                chunk.metadata.get("section_path"),
+            ]
+
+        else:
+            values = [
+                getattr(chunk, "section", ""),
+                getattr(chunk, "section_path", ""),
+            ]
+
+        parts: List[str] = []
+
+        for value in values:
+            if isinstance(value, (list, tuple)):
+                parts.extend(str(item) for item in value)
+
+            elif value:
+                parts.append(str(value))
+
+        return " ".join(parts).lower()
+
+    def _indexed_chunk_score(
+        self,
+        chunk: Any,
+        text: str,
+    ) -> int:
+        """Score how likely one chunk is to report measured results."""
+
+        section = self._indexed_chunk_section(chunk)
+        score = len(self.RESULT_CUE_PATTERN.findall(text))
+
+        if any(keyword in section for keyword in self.RESULT_SECTION_KEYWORDS):
+            score += 10
+
+        elif any(keyword in section for keyword in self.SETUP_SECTION_KEYWORDS):
+            score += 3
+
+        elif any(keyword in section for keyword in self.LOW_VALUE_SECTION_KEYWORDS):
+            score -= 10
+
+        return score
+
     def _prepare_indexed_text(
         self,
         chunks: List[Any],
@@ -2431,36 +2582,62 @@ PAPER EXPERIMENTAL TEXT
         """
         Prepare indexed paper chunks for LLM processing.
 
-        Chunks are kept in their existing order and the total text
-        passed to the LLM is capped to prevent excessively large
-        prompts.
+        The first chunk and the first abstract chunk (title and
+        abstract) are always kept. The rest of the budget goes to the
+        chunks most likely to report measured results, so the
+        experiments are not crowded out by the introduction. Selected
+        chunks are returned in paper order and the total text passed
+        to the LLM is capped to prevent excessively large prompts.
         """
         if not chunks:
             return ""
 
-        chunk_texts: List[str] = []
+        candidates = []
+
+        for position, chunk in enumerate(chunks):
+            text = self._indexed_chunk_text(chunk)
+
+            if text:
+                candidates.append((position, chunk, text))
+
+        if not candidates:
+            return ""
+
+        # Heading detection can label several chunks "Abstract", so only
+        # the first one leads; later ones are ranked like any other.
+        leading = candidates[:1]
+
+        first_abstract = next(
+            (
+                item
+                for item in candidates
+                if "abstract" in self._indexed_chunk_section(item[1])
+            ),
+            None,
+        )
+
+        if first_abstract is not None and first_abstract[0] != leading[0][0]:
+            leading.append(first_abstract)
+
+        leading_positions = {item[0] for item in leading}
+
+        # Remaining chunks by score; ties keep paper order.
+        ranked = leading + sorted(
+            (
+                item
+                for item in candidates
+                if item[0] not in leading_positions
+            ),
+            key=lambda item: (
+                -self._indexed_chunk_score(item[1], item[2]),
+                item[0],
+            ),
+        )
+
+        selected = []
         total_length = 0
 
-        for chunk in chunks:
-            if hasattr(chunk, "page_content"):
-                text = chunk.page_content
-
-            elif isinstance(chunk, dict):
-                text = (
-                    chunk.get("page_content")
-                    or chunk.get("text")
-                    or chunk.get("content")
-                    or ""
-                )
-
-            else:
-                text = str(chunk)
-
-            if not text or not text.strip():
-                continue
-
-            text = text.strip()
-
+        for position, _chunk, text in ranked:
             remaining = (
                 self.max_indexed_text_length
                 - total_length
@@ -2470,16 +2647,23 @@ PAPER EXPERIMENTAL TEXT
                 break
 
             if len(text) > remaining:
+                # Only the leading chunk is cut. A later chunk that does
+                # not fit is skipped so a smaller one can still fit whole.
+                if selected:
+                    continue
+
                 text = text[:remaining]
 
-            chunk_texts.append(text)
+            selected.append((position, text))
 
             total_length += len(text)
 
-            if total_length >= self.max_indexed_text_length:
-                break
+        selected.sort()
 
-        return "\n\n".join(chunk_texts)
+        return "\n\n".join(
+            text
+            for _position, text in selected
+        )
 
     # ============================================================
     # Read + Extract Experiment

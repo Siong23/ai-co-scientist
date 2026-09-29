@@ -135,6 +135,23 @@ def test_generation_repairs_unparsable_output_once():
     assert "format" in repair_call.args[0].lower()
 
 
+def test_generation_keeps_latex_backslashes_instead_of_rejecting_the_batch():
+    # Captured from a qwen3.5-9b run: \dots is not a JSON escape, so strict
+    # decoding rejected all four hypotheses even after format repair.
+    payload = (
+        '[{"title": "T", "hypothesis": "H \\"quoted\\"", "rationale": "R\\nline two",'
+        ' "feasibility": "Compare $PB = N_c P_{Bm} + \\dots$ across rates $\\lambda$.",'
+        ' "source_ids": ["arXiv:1407.2322"]}]'
+    )
+    with patch("app.agents.call_llm", return_value=payload) as mock_call:
+        result = call_llm_for_generation("test goal", num_hypotheses=1)
+
+    assert mock_call.call_count == 1
+    assert result[0]["feasibility"] == "Compare $PB = N_c P_{Bm} + \\dots$ across rates $\\lambda$."
+    assert result[0]["hypothesis"] == 'H "quoted"'
+    assert result[0]["rationale"] == "R\nline two"
+
+
 def test_generation_recovers_remaining_candidate_after_truncated_json():
     first = {
         "title": "Hypothesis A",

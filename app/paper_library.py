@@ -362,6 +362,31 @@ class ChromaPaperLibrary:
         record = self._manifest_source(source_id.strip())
         return str(record.get("status", "MISSING")) if record else "MISSING"
 
+    def _current_committed_source_id(self, source_id: str) -> str:
+        """Return the committed version that now holds an older source's chunks.
+
+        Evidence saved with a hypothesis keeps the source ID that was current
+        then. A later run may index a newer version of the same paper under
+        another ID, which marks the old ID SUPERSEDED and deletes its chunks.
+        """
+
+        source_id = source_id.strip()
+        record = self._manifest_source(source_id) or {}
+        canonical_source_id = str(record.get("canonical_source_id") or source_id)
+        with self._manifest_lock:
+            sources = self._read_manifest()["sources"]
+        candidates = [
+            candidate
+            for candidate in sources.values()
+            if isinstance(candidate, dict)
+            and candidate.get("canonical_source_id") == canonical_source_id
+            and candidate.get("status") == "COMMITTED"
+            and candidate.get("source_id") != source_id
+        ]
+        if not candidates:
+            return ""
+        return str(max(candidates, key=JsonSourceRegistry._version_order).get("source_id") or "")
+
     def _current_index_signature(self) -> dict[str, Any]:
         return {
             "collection_name": self.collection_name,
@@ -1206,6 +1231,18 @@ class ChromaPaperLibrary:
         records = self._stored_source_records(
             normalized_source_id
         )
+
+        # A superseded source ID has no chunks left; read the paper's
+        # current committed version instead.
+        if not records:
+            current_source_id = self._current_committed_source_id(
+                normalized_source_id
+            )
+
+            if current_source_id:
+                records = self._stored_source_records(
+                    current_source_id
+                )
 
         chunks = []
 

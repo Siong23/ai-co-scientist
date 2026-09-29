@@ -327,6 +327,23 @@ Return only valid JSON:
 }"""
 
 
+# A goal opens with the user's task ("Investigate whether ...", "Develop a ...");
+# no paper performs that task, so coverage should grade the topic that follows.
+_TASK_LEAD = re.compile(
+    r"^(?:investigate|explore|examine|assess|evaluate|determine|develop|design|create|build|"
+    r"propose|identify|study|analy[sz]e|understand|automate|generate|find|compare)\s+"
+    r"(?:(?:whether|if|how|the|a|an)\s+)*",
+    flags=re.IGNORECASE,
+)
+
+
+def _strip_task_lead(text: str) -> str:
+    """Drop a leading task verb from a goal span, keeping the rest verbatim."""
+
+    stripped = _TASK_LEAD.sub("", text.strip(), count=1)
+    return stripped if len(stripped.split()) >= 2 else text.strip()
+
+
 def _index_document_evidence_refs(documents: List[Document]) -> dict[str, dict]:
     """Index substantive retrieved passages by their exact persisted chunk ID."""
 
@@ -1061,19 +1078,23 @@ class GenerationAgent:
                     verbatim_quote = normalized_goal[start_pos : start_pos + len(clause)]
                 else:
                     verbatim_quote = clause
+                topic = _strip_task_lead(verbatim_quote)
                 explicit_requirements.append(
                     EvidenceAspect(
                         aspect_id=f"req_{idx}",
-                        description=clause,
-                        goal_quote=verbatim_quote[:80],
+                        description=topic,
+                        goal_quote=topic,
                     )
                 )
         if not explicit_requirements:
+            # Coverage grades the goal_quote, so cutting it at 80 characters
+            # graded "...proactive network-sl" and could never be satisfied.
+            topic = _strip_task_lead(normalized_goal)
             explicit_requirements.append(
                 EvidenceAspect(
                     aspect_id="goal_scope",
-                    description=normalized_goal,
-                    goal_quote=normalized_goal[:80],
+                    description=topic,
+                    goal_quote=topic,
                 )
             )
 
@@ -1868,6 +1889,7 @@ Your refined contribution:
         # Planning and original-goal retrieval are independent. Overlap their
         # latency while retaining the original goal as the retrieval anchor.
         query_plan, rewrite_error, candidate_documents = self._plan_and_retrieve_initial(research_goal)
+        planned_by_llm = not rewrite_error and query_plan is not None
         if execution_cancelled():
             return [], ["Cycle cancelled during search planning."]
 
@@ -1946,30 +1968,40 @@ Your refined contribution:
 
         expanded_retrieval_attempted = False
 
-        # If original goal returned no documents, execute the planned search queries.
+        # Always execute an LLM-planned query set once. Running it only when the
+        # original-goal search looked insufficient let a lenient coverage grade
+        # skip every rewritten and hypothesis-guided query, leaving generation
+        # with whatever the goal sentence alone found. The minimal fallback
+        # plan only rephrases the goal sentence, so it still runs on demand.
         # The planner already routes each query to academic or web sources, so web
         # search is left to the queries that asked for it; corrective retrieval
         # below still forces it when the routed evidence falls short.
-        if not candidate_documents:
+        if query_plan.queries and (planned_by_llm or not candidate_documents):
             try:
-                candidate_documents = self._retrieve_scientific_sources(
+                expanded_documents = self._retrieve_scientific_sources(
                     research_goal,
                     query_plan,
                 )
-                expanded_retrieval_attempted = True
             except Exception as exc:
                 logger.error(
                     "Expanded RAG retrieval failed: %s",
                     exc,
                     exc_info=True,
                 )
-                error = f"Expanded RAG retrieval failed: {exc}"
-                context.last_generation_diagnostics["evidence_retrieval"] = {
-                    "status": "failed",
-                    "source_count": 0,
-                    "detail": redact_secrets(error),
-                }
-                return [], [error]
+                if not candidate_documents:
+                    error = f"Expanded RAG retrieval failed: {exc}"
+                    context.last_generation_diagnostics["evidence_retrieval"] = {
+                        "status": "failed",
+                        "source_count": 0,
+                        "detail": redact_secrets(error),
+                    }
+                    return [], [error]
+            else:
+                candidate_documents = self._merge_retrieved_documents(
+                    candidate_documents,
+                    expanded_documents,
+                )
+                expanded_retrieval_attempted = True
 
         retrieved_documents = []
         coverage = None

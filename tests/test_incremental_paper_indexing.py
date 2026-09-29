@@ -152,6 +152,38 @@ def test_arxiv_versions_share_canonical_identity_and_reuse_unchanged_embeddings(
     assert library.verify_indexed_source("arXiv:2608.12345v2").ok is True
 
 
+def test_superseded_source_id_reads_the_current_versions_chunks(tmp_path, monkeypatch):
+    # A saved hypothesis keeps the v1 ID after a later run indexes v2.
+    library = _library(tmp_path, RecordingEmbeddings())
+    extracted_versions = iter(
+        (
+            _extracted(("Methods", "Stable method."), ("Results", "Original result.")),
+            _extracted(("Methods", "Stable method."), ("Results", "Revised result.")),
+        )
+    )
+
+    def download(_url: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"%PDF-" + destination.name.encode())
+
+    monkeypatch.setattr(library, "_download_pdf", download)
+    monkeypatch.setattr(library, "_extract_pages", lambda _path: next(extracted_versions))
+    assert library.ensure_indexed(
+        _document("arXiv:2608.12345v1", arxiv_id="2608.12345v1", updated_at="2026-08-01T00:00:00+00:00")
+    )
+    assert library.ensure_indexed(
+        _document("arXiv:2608.12345v2", arxiv_id="2608.12345v2", updated_at="2026-08-10T00:00:00+00:00")
+    )
+    assert library.get_index_status("arXiv:2608.12345v1") == "SUPERSEDED"
+
+    for stale_source_id in ("arXiv:2608.12345v1", "arXiv:2608.12345"):
+        chunks = library.get_source_chunks(stale_source_id)
+        assert {chunk.source_id for chunk in chunks} == {"arXiv:2608.12345v2"}
+        assert "Revised result." in " ".join(chunk.text for chunk in chunks)
+
+    assert library.get_source_chunks("arXiv:9999.00000") == []
+
+
 def test_updated_revision_incrementally_reuses_moves_and_deletes_chunks(tmp_path, monkeypatch):
     embeddings = RecordingEmbeddings()
     library = _library(tmp_path, embeddings)

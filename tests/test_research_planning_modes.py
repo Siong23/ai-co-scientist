@@ -238,6 +238,165 @@ def test_exploratory_planner_repairs_missing_hypotheses():
     assert "primary, alternative, and null provisional hypothesis" in llm.call_args_list[1].args[0]
 
 
+def test_hypotheses_quoting_the_whole_long_goal_are_kept():
+    # Captured from a qwen3.8-27b run: every hypothesis quoted the 21-word goal,
+    # the 16-word limit rejected all three, and the planner failed twice.
+    goal = (
+        "Investigate whether AI-driven traffic prediction can enable proactive network-slice "
+        "resource allocation and reduce SLA violations in 5G networks."
+    )
+    query_payload = json.loads(_query_payload(goal, with_hypothesis_ids=True))
+    query_payload["explicit_requirements"][0]["goal_quote"] = "AI-driven traffic prediction"
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            _planner_payload("hypothesis_testing", goal, hypotheses=_hypotheses(goal)),
+            json.dumps(query_payload),
+        ],
+    ) as llm:
+        plan, error = call_llm_for_search_queries(goal, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None
+    assert plan is not None
+    assert llm.call_count == 2
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == ["primary", "alternative", "null"]
+    assert all(len(hypothesis.goal_quote.split()) == 16 for hypothesis in plan.provisional_hypotheses)
+    assert all(hypothesis.goal_quote in goal for hypothesis in plan.provisional_hypotheses)
+
+
+def test_planner_repair_prompt_names_why_each_hypothesis_was_rejected():
+    goal = "Assess target evidence"
+    paraphrased = _hypotheses(goal)
+    paraphrased[0]["goal_quote"] = "Evaluate the evidence for the target"
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[
+            _planner_payload("hypothesis_testing", goal, hypotheses=paraphrased),
+            _planner_payload("hypothesis_testing", goal, hypotheses=_hypotheses(goal)),
+            _query_payload(goal, with_hypothesis_ids=True),
+        ],
+    ) as llm:
+        plan, error = call_llm_for_search_queries(goal, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None and plan is not None
+    assert "primary_hypothesis (goal_quote is not copied from the research goal)" in llm.call_args_list[1].args[0]
+
+
+_COMPOSITE_GOAL = (
+    "Develop an AI-driven self-optimizing 5G network architecture capable of dynamically adjusting "
+    "radio resources, network slices, handover policies, and energy-saving mechanisms according to "
+    "changing network conditions."
+)
+
+
+def _query_payload_with_requirements(requirements: list[dict[str, str]]) -> str:
+    payload = json.loads(_query_payload(_COMPOSITE_GOAL, with_hypothesis_ids=True))
+    payload["explicit_requirements"] = requirements
+    for query in payload["queries"]:
+        query["evidence_requirement_id"] = requirements[0]["id"]
+    return json.dumps(payload)
+
+
+def _composite_rewrite_responses(repair_requirements: list[dict[str, str]]) -> list[str]:
+    # Captured shape: every per-domain requirement quoted the same 19-word
+    # clause, so all of them were dropped while the plan still looked valid.
+    clause = (
+        "capable of dynamically adjusting radio resources, network slices, handover policies, "
+        "and energy-saving mechanisms according to changing network conditions."
+    )
+    first = _query_payload_with_requirements(
+        [
+            {"id": "architecture", "goal_quote": "AI-driven self-optimizing 5G network architecture"},
+            {"id": "handover", "goal_quote": clause, "evidence_need": "Handover policy optimization"},
+            {"id": "energy", "goal_quote": clause, "evidence_need": "Base-station energy saving"},
+        ]
+    )
+    return [
+        _planner_payload("hypothesis_testing", _COMPOSITE_GOAL, hypotheses=_hypotheses(_COMPOSITE_GOAL)),
+        first,
+        _query_payload_with_requirements(repair_requirements),
+    ]
+
+
+def test_query_plan_that_dropped_requirements_asks_once_for_atomic_quotes():
+    responses = _composite_rewrite_responses(
+        [
+            {"id": "architecture", "goal_quote": "AI-driven self-optimizing 5G network architecture"},
+            {"id": "handover", "goal_quote": "handover policies", "evidence_need": "Handover policy optimization"},
+            {"id": "energy", "goal_quote": "energy-saving mechanisms", "evidence_need": "Base-station energy saving"},
+        ]
+    )
+    with patch("app.agents.call_llm", side_effect=responses) as llm:
+        plan, error = call_llm_for_search_queries(_COMPOSITE_GOAL, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None and plan is not None
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["architecture", "handover", "energy"]
+    assert llm.call_count == 3
+    assert "2 explicit requirement(s) were dropped" in llm.call_args_list[2].args[0]
+
+
+def test_query_plan_repair_that_comes_back_worse_keeps_the_first_plan():
+    # The repair invents its only quote, so it has no valid requirement at all.
+    responses = _composite_rewrite_responses([{"id": "handover", "goal_quote": "improves handover success"}])
+    with patch("app.agents.call_llm", side_effect=responses):
+        plan, error = call_llm_for_search_queries(_COMPOSITE_GOAL, research_type="hypothesis_testing", query_count=3)
+
+    assert error is None and plan is not None
+    assert [aspect.aspect_id for aspect in plan.explicit_requirements] == ["architecture"]
+
+
+def test_exploratory_plan_without_missing_evidence_uses_its_listed_gaps():
+    goal = "Assess target evidence"
+    payload = json.loads(_planner_payload("exploratory", goal, hypotheses=_hypotheses(goal)))
+    del payload["missing_evidence"]
+    del payload["search_strategy"]
+    payload["literature_gaps"] = ["No long-term field measurements"]
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[json.dumps(payload), _query_payload(goal, with_hypothesis_ids=True)],
+    ) as llm:
+        plan, error = call_llm_for_search_queries(goal, research_type="exploratory", query_count=3)
+
+    assert error is None
+    assert plan is not None and plan.research_plan is not None
+    assert plan.research_plan.missing_evidence == ("No long-term field measurements",)
+    assert plan.research_plan.search_strategy == ""
+    assert llm.call_count == 2
+
+
+def test_planner_repair_keeps_fields_the_first_answer_had():
+    goal = "Assess target evidence"
+    first = json.loads(_planner_payload("exploratory", goal))
+    repair = {"provisional_hypotheses": _hypotheses(goal)}
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[json.dumps(first), json.dumps(repair), _query_payload(goal, with_hypothesis_ids=True)],
+    ):
+        plan, error = call_llm_for_search_queries(goal, research_type="exploratory", query_count=3)
+
+    assert error is None
+    assert plan is not None and plan.research_plan is not None
+    assert plan.research_plan.topic_dimensions == ("mechanisms", "boundary conditions")
+    assert [hypothesis.role for hypothesis in plan.provisional_hypotheses] == ["primary", "alternative", "null"]
+
+
+def test_query_plan_with_only_paraphrased_quotes_keeps_its_queries():
+    goal = "Assess target evidence"
+    query_payload = json.loads(_query_payload(goal, with_hypothesis_ids=True))
+    query_payload["explicit_requirements"][0]["goal_quote"] = "Can the target be assessed accurately?"
+    paraphrased = json.dumps(query_payload)
+    with patch(
+        "app.agents.call_llm",
+        side_effect=[_planner_payload("exploratory", goal, hypotheses=_hypotheses(goal)), paraphrased, paraphrased],
+    ):
+        plan, error = call_llm_for_search_queries(goal, research_type="exploratory", query_count=3)
+
+    assert error is None
+    assert plan is not None
+    assert [(aspect.aspect_id, aspect.goal_quote) for aspect in plan.explicit_requirements] == [("goal_scope", goal)]
+    assert plan.queries[0].query == f"{goal} empirical supporting evidence"
+
+
 def _complete_evidence_mode(context: ContextMemory, mode: str = "exploratory") -> None:
     context.research_type = mode
     context.research_plan = {
