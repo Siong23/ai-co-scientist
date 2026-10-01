@@ -629,6 +629,55 @@ def test_experiment_runner_handles_dependency_install_timeout(
 # ============================================================
 
 
+def test_experiment_runner_passes_execution_result_to_code_repair_agent(
+    tmp_path,
+    monkeypatch,
+):
+    from app.agents_modules import code_generation_agent
+
+    captured = {}
+    generated_code_path = tmp_path / "generated.py"
+    generated_code_path.write_text("raise RuntimeError('failure')\n", encoding="utf-8")
+    execution_result = {
+        "return_code": 1,
+        "stdout": "partial output",
+        "stderr": "RuntimeError: failure",
+    }
+    repaired_code = "print('repaired')\n"
+
+    class FakeCodeGenerationAgent:
+        def repair_generated_code(
+            self,
+            specification,
+            generated_code,
+            execution_result,
+        ):
+            captured["specification"] = specification
+            captured["generated_code"] = generated_code
+            captured["execution_result"] = execution_result
+            return {
+                "success": True,
+                "pytorch_code": repaired_code,
+            }
+
+    monkeypatch.setattr(
+        code_generation_agent,
+        "CodeGenerationAgent",
+        FakeCodeGenerationAgent,
+    )
+
+    runner = ExperimentRunner()
+    result = runner._repair_experiment_with_llm(
+        generated_code_path=generated_code_path,
+        generated_result={"execution": execution_result},
+        run_dir=tmp_path,
+    )
+
+    assert result == repaired_code
+    assert captured["generated_code"] == "raise RuntimeError('failure')\n"
+    assert captured["execution_result"] == execution_result
+
+
 def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
     tmp_path,
     monkeypatch,

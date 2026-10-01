@@ -828,29 +828,25 @@ class ExperimentRunner:
                 )
                 return None
 
-            repaired_code = repair_method(
-                current_code=current_code,
-                experiment_specification=specification,
-                error_context=generated_result.get(
+            repair_result = repair_method(
+                specification=specification,
+                generated_code=current_code,
+                execution_result=generated_result.get(
                     "execution",
                     {},
                 ),
             )
 
-        except TypeError:
-            # Compatibility fallback for versions of CodeGenerationAgent
-            # whose repair method accepts fewer arguments.
-            try:
-                repaired_code = repair_method(
-                    current_code,
-                    specification,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "LLM experiment repair failed: %s",
-                    exc,
-                )
-                return None
+            if isinstance(repair_result, dict):
+                if not repair_result.get("success", False):
+                    logger.warning(
+                        "LLM experiment repair returned failure: %s",
+                        repair_result.get("errors", "no error details"),
+                    )
+                    return None
+                repaired_code = repair_result.get("pytorch_code")
+            else:
+                repaired_code = repair_result
 
         except Exception as exc:
             logger.warning(
