@@ -2312,30 +2312,16 @@ Do not return explanations or commentary.
         if fenced is not None:
             return fenced
 
-        source_start = response.find(
-            "import torch"
+        import_statement = re.search(
+            r"(?m)^[ \t]*(?:from\s+[\w.]+\s+import\b|import\s+[\w.*]+)",
+            response,
         )
 
-        if source_start == -1:
-            source_start = response.find(
-                "from torch"
-            )
-
-        if source_start == -1:
-            source_start = response.find(
-                "import os"
-            )
-
-        if source_start == -1:
-            source_start = response.find(
-                "import "
-            )
-
-        if source_start == -1:
+        if import_statement is None:
             return None
 
         code = response[
-            source_start:
+            import_statement.start():
         ].strip()
 
         if not code:
@@ -4055,6 +4041,16 @@ The repaired experiment must calculate its own results.
 
 Return ONLY the complete corrected Python source code.
 """.strip()
+
+        repair_prompt += """
+
+TRACEBACK-DRIVEN IMPORT CHECK
+Compare every traceback-reported missing name or module against the complete
+source. Preserve imports and definitions that are already present. Add an
+import only when it resolves the reported failure and is an appropriate
+dependency for the experiment. Do not remove code that depends on a missing
+name or install/substitute an unrelated package.
+"""
 
         repaired: Dict[str, Any] = {}
 

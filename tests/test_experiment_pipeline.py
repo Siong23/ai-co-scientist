@@ -185,6 +185,22 @@ def test_code_generation_agent_extracts_fenced_python_response():
     assert result["pytorch_code"] == ("import torch\nprint('ok')")
 
 
+def test_code_generation_agent_preserves_imports_before_torch_in_raw_python():
+    source = (
+        "import os\n"
+        "import warnings\n"
+        "import numpy as np\n"
+        "import pandas as pd\n"
+        "import torch\n"
+        "print(os.getcwd(), np.__version__, pd.__version__, torch.__version__)\n"
+    )
+
+    result = CodeGenerationAgent.extract_python_source(source)
+
+    assert result is not None
+    assert result["pytorch_code"] == source.strip()
+
+
 def test_code_generation_agent_preserves_escaped_fstring_newlines():
     source = (
         'import torch\n'
@@ -369,6 +385,7 @@ def test_code_repair_prompt_is_bounded(monkeypatch):
     # The bound holds a full-length experiment plus both bounded logs, so the
     # repair model sees the whole file instead of its tail.
     assert len(captured["prompt"]) < 90000
+    assert "TRACEBACK-DRIVEN IMPORT CHECK" in captured["prompt"]
     # The configured code_generation budget takes precedence over the class fallback.
     assert captured["kwargs"]["max_tokens"] == _output_token_limit("code_generation", agent.REPAIR_MAX_TOKENS)
 
