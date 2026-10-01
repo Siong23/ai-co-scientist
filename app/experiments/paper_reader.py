@@ -1432,7 +1432,6 @@ PAPER TEXT:
 
         value_type = str(
             normalized.get("value_type")
-            or definition.get("value_type")
             or "unknown"
         ).strip().lower()
 
@@ -1661,7 +1660,6 @@ PAPER TEXT:
             "datasets_or_testbeds": [],
             "baselines": [],
             "configurations": [],
-            "primary_metrics": [],
             "metrics": [],
             "metric_definitions": {},
             "hyperparameters": {},
@@ -1765,44 +1763,6 @@ PAPER TEXT:
 
         details["reference_conditions"] = reference_conditions
 
-        # Configuration-valued references describe test conditions, not
-        # measured outcomes. Preserve them separately using their semantics.
-        for metric_name, reference_value in list(reference_metrics.items()):
-            if reference_value.get("value_type") != "configuration":
-                continue
-
-            reference_conditions.setdefault(
-                metric_name,
-                {
-                    "value": reference_value.get("value"),
-                    "unit": reference_value.get("unit"),
-                    "value_type": "configuration",
-                    "source_text": reference_value.get("source_text", ""),
-                },
-            )
-            reference_metrics.pop(metric_name)
-
-        raw_primary_metrics = details.get("primary_metrics", [])
-        if isinstance(raw_primary_metrics, str):
-            raw_primary_metrics = [raw_primary_metrics]
-
-        primary_metrics: List[str] = []
-        seen_primary_metrics = set()
-        if isinstance(raw_primary_metrics, list):
-            for metric in raw_primary_metrics:
-                if isinstance(metric, dict):
-                    metric = (
-                        metric.get("name")
-                        or metric.get("metric")
-                        or metric.get("metric_name")
-                    )
-                normalized_name = cls._normalise_metric_name(metric)
-                if normalized_name and normalized_name not in seen_primary_metrics:
-                    primary_metrics.append(normalized_name)
-                    seen_primary_metrics.add(normalized_name)
-
-        details["primary_metrics"] = primary_metrics
-
         # Normalize the list of metric names.
         metric_names: List[str] = []
 
@@ -1831,18 +1791,8 @@ PAPER TEXT:
                         normalized_name
                     )
 
-        configuration_names = set(reference_conditions)
-        metric_names = [
-            name for name in metric_names
-            if name not in configuration_names
-        ]
-
         # Every reference metric is also a metric.
         for metric_name in reference_metrics:
-            if metric_name not in metric_names:
-                metric_names.append(metric_name)
-
-        for metric_name in primary_metrics:
             if metric_name not in metric_names:
                 metric_names.append(metric_name)
 
@@ -1968,7 +1918,6 @@ Use exactly this structure:
   "datasets_or_testbeds": [],
   "baselines": [],
   "configurations": [],
-    "primary_metrics": [],
   "metrics": [],
   "metric_definitions": {{}},
   "hyperparameters": {{}},
@@ -1993,15 +1942,6 @@ Use exactly this structure:
   "results": [],
   "experiment_notes": []
 }}
-
-============================================================
-PRIMARY METRICS
-============================================================
-
-Populate "primary_metrics" only when the paper explicitly identifies a
-metric as primary, main, or as the metric used to select/tune models. Do
-not infer a primary metric by looking at which reported number is largest.
-Each primary metric must also appear in "metrics".
 
 ============================================================
 METRICS

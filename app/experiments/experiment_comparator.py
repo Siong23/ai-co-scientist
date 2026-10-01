@@ -1791,23 +1791,16 @@ Do not calculate, estimate, infer, or fabricate missing values.
                         "source_type",
                         "scientific_paper",
                     ),
-                    "models": (
-                        details.get("models")
-                        or details.get("models_or_systems")
-                        or []
-                    ),
-                    "datasets": (
-                        details.get("datasets")
-                        or details.get("datasets_or_testbeds")
-                        or []
-                    ),
-                    "baselines": details.get("baselines", []),
-                    "metrics": details.get(
-                        "metrics",
+                    "models": details.get(
+                        "models",
                         [],
                     ),
-                    "primary_metrics": details.get(
-                        "primary_metrics",
+                    "datasets": details.get(
+                        "datasets",
+                        [],
+                    ),
+                    "metrics": details.get(
+                        "metrics",
                         [],
                     ),
                     "hyperparameters": details.get(

@@ -652,7 +652,6 @@ class CodeGenerationAgent:
         """
         result: Dict[str, Any] = {
             "metrics": [],
-            "primary_metrics": [],
             "metric_definitions": {},
             "reference_metrics": {},
             "reference_conditions": {},
@@ -676,14 +675,6 @@ class CodeGenerationAgent:
             return result
 
         seen_metrics = set()
-        seen_primary_metrics = set()
-
-        def normalize_metric_name(name: Any) -> str:
-            return re.sub(
-                r"[^a-z0-9]+",
-                "_",
-                str(name).strip().lower(),
-            ).strip("_")
 
         for source in sources:
             if not isinstance(
@@ -707,31 +698,6 @@ class CodeGenerationAgent:
                 "metrics",
                 [],
             )
-
-            conditions = details.get("reference_conditions", {})
-            if isinstance(conditions, dict):
-                for name, value in conditions.items():
-                    if isinstance(name, str) and name.strip():
-                        result["reference_conditions"].setdefault(
-                            name.strip(),
-                            CodeGenerationAgent._json_safe(value),
-                        )
-
-            primary_metrics = details.get("primary_metrics", [])
-            if isinstance(primary_metrics, str):
-                primary_metrics = [primary_metrics]
-            if isinstance(primary_metrics, list):
-                for metric in primary_metrics:
-                    if not isinstance(metric, str) or not metric.strip():
-                        continue
-                    metric = metric.strip()
-                    key = normalize_metric_name(metric)
-                    if key and key not in seen_primary_metrics:
-                        result["primary_metrics"].append(metric)
-                        seen_primary_metrics.add(key)
-                    if key and key not in seen_metrics:
-                        result["metrics"].append(metric)
-                        seen_metrics.add(key)
 
             if isinstance(
                 metrics,
@@ -798,17 +764,6 @@ class CodeGenerationAgent:
                     ):
                         continue
 
-                    if (
-                        isinstance(value, dict)
-                        and str(value.get("value_type", "")).strip().lower()
-                        == "configuration"
-                    ):
-                        result["reference_conditions"].setdefault(
-                            name,
-                            value,
-                        )
-                        continue
-
                     if name not in result[
                         "reference_metrics"
                     ]:
@@ -816,20 +771,18 @@ class CodeGenerationAgent:
                             "reference_metrics"
                         ][name] = value
 
-        condition_keys = {
-            normalize_metric_name(name)
-            for name in result["reference_conditions"]
-        }
-        result["metrics"] = [
-            metric
-            for metric in result["metrics"]
-            if normalize_metric_name(metric) not in condition_keys
-        ]
-        result["primary_metrics"] = [
-            metric
-            for metric in result["primary_metrics"]
-            if normalize_metric_name(metric) not in condition_keys
-        ]
+            reference_conditions = details.get(
+                "reference_conditions",
+                {},
+            )
+
+            if isinstance(reference_conditions, dict):
+                for name, value in reference_conditions.items():
+                    if not isinstance(name, str):
+                        continue
+
+                    if name not in result["reference_conditions"]:
+                        result["reference_conditions"][name] = value
 
         return result
 
@@ -856,13 +809,9 @@ class CodeGenerationAgent:
         if not requested:
             return {
                 "metrics": [],
-                "primary_metrics": [],
                 "metric_definitions": {},
                 "reference_metrics": {},
-                "reference_conditions": guidance.get(
-                    "reference_conditions",
-                    {},
-                ),
+                "reference_conditions": {},
             }
 
         def matches(name: str) -> bool:
@@ -896,21 +845,11 @@ class CodeGenerationAgent:
             if isinstance(name, str) and matches(name)
         }
 
-        primary_metrics = [
-            metric
-            for metric in guidance.get("primary_metrics", [])
-            if isinstance(metric, str) and matches(metric)
-        ]
-
         return {
             "metrics": metrics,
-            "primary_metrics": primary_metrics,
             "metric_definitions": definitions,
             "reference_metrics": reference_metrics,
-            "reference_conditions": guidance.get(
-                "reference_conditions",
-                {},
-            ),
+            "reference_conditions": {},
         }
 
     # ========================================================
@@ -1173,18 +1112,13 @@ When the supporting paper reports explicit evaluation metrics:
 3. Prefer the SAME metrics for the Rank #1 experiment when they are
    scientifically compatible with the Rank #1 hypothesis.
 
-4. If `primary_metrics` explicitly identifies a metric as primary in the
-    paper, prioritize that metric when it is reproducible for this experiment.
-    Do not infer a primary metric from which reported result is numerically
-    highest. Keep any `reference_conditions` separate from measured metrics.
+4. Preserve the original metric definition.
 
-5. Preserve the original metric definition.
+5. Preserve the original unit.
 
-6. Preserve the original unit.
+6. Preserve the direction of improvement when known.
 
-7. Preserve the direction of improvement when known.
-
-8. Preserve the semantic type of every reference value.
+7. Preserve the semantic type of every reference value.
 
    A reference value may be:
 
@@ -1195,7 +1129,7 @@ When the supporting paper reports explicit evaluation metrics:
    - qualitative_result
    - unknown
 
-9. Preserve the relation associated with a reference value when known.
+8. Preserve the relation associated with a reference value when known.
 
    Possible relations include:
 
@@ -1207,7 +1141,7 @@ When the supporting paper reports explicit evaluation metrics:
    - range
    - none
 
-10. A reference upper or lower bound is a comparison constraint,
+9. A reference upper or lower bound is a comparison constraint,
    NOT an exact experiment result.
 
    Example:
@@ -1226,23 +1160,23 @@ When the supporting paper reports explicit evaluation metrics:
 
        experiment latency = 80 ms
 
-11. A reference range must remain a range.
+10. A reference range must remain a range.
 
     Do not replace a range with its midpoint, minimum, maximum,
     or another invented single value.
 
-12. A qualitative reference result must remain qualitative.
+11. A qualitative reference result must remain qualitative.
 
     Do not convert qualitative statements into invented numerical
     measurements.
 
-13. Calculate every automated-experiment metric independently from
+12. Calculate every automated-experiment metric independently from
     the actual experiment execution.
 
-14. NEVER copy a reference-paper numerical result into the automated
+13. NEVER copy a reference-paper numerical result into the automated
     experiment result.
 
-15. NEVER use a reference-paper numerical result as:
+14. NEVER use a reference-paper numerical result as:
 
     - simulated input
     - calibration value
@@ -1252,12 +1186,12 @@ When the supporting paper reports explicit evaluation metrics:
     - generated measurement
     - random sampling boundary
 
-16. NEVER estimate an automated-experiment result from a paper result.
+15. NEVER estimate an automated-experiment result from a paper result.
 
-17. Every reported automated-experiment measurement must originate
+16. Every reported automated-experiment measurement must originate
     from an operation actually performed by the generated experiment.
 
-18. If the local environment cannot independently perform the
+17. If the local environment cannot independently perform the
     measurement required for a reference metric, report that metric
     as:
 
@@ -1269,13 +1203,13 @@ When the supporting paper reports explicit evaluation metrics:
 
     together with the reason.
 
-19. A proxy may be used only when scientifically justified and MUST
+18. A proxy may be used only when scientifically justified and MUST
     be explicitly labelled as a proxy.
 
-20. A proxy MUST NOT be presented as equivalent to the original
+19. A proxy MUST NOT be presented as equivalent to the original
     reference measurement.
 
-21. Reference metrics are comparison guidance only. They must remain
+20. Reference metrics are comparison guidance only. They must remain
     separate from the automated experiment's measured results.
 
 Do not force accuracy, precision, recall, or F1 merely because the
@@ -1811,12 +1745,8 @@ Do NOT return explanations outside the JSON object.
             "experiment_type",
             "task",
             "models",
-            "models_or_systems",
             "datasets",
-            "datasets_or_testbeds",
-            "baselines",
             "metrics",
-            "primary_metrics",
             "metric_definitions",
             "reference_metrics",
             "reference_conditions",
@@ -1850,9 +1780,6 @@ Do NOT return explanations outside the JSON object.
                 "experiment_details": compact_details,
                 "evaluation_guidance": {
                     "metrics": compact_details.get("metrics", []),
-                    "primary_metrics": compact_details.get(
-                        "primary_metrics", []
-                    ),
                     "metric_definitions": compact_details.get(
                         "metric_definitions", {}
                     ),

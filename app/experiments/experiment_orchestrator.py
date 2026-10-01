@@ -567,10 +567,8 @@ class ExperimentOrchestrator:
 
         result: Dict[str, Any] = {
             "metrics": [],
-            "primary_metrics": [],
             "metric_definitions": {},
             "reference_metrics": {},
-            "reference_conditions": {},
         }
 
         if not isinstance(reference_experiment, dict):
@@ -585,7 +583,6 @@ class ExperimentOrchestrator:
             return result
 
         seen_metrics = set()
-        seen_primary_metrics = set()
 
         for source in sources:
             if not isinstance(source, dict):
@@ -625,31 +622,6 @@ class ExperimentOrchestrator:
                     if key and key not in seen_metrics:
                         result["metrics"].append(metric)
                         seen_metrics.add(key)
-
-            primary_metrics = details.get("primary_metrics", [])
-            if isinstance(primary_metrics, str):
-                primary_metrics = [primary_metrics]
-            if isinstance(primary_metrics, list):
-                for metric in primary_metrics:
-                    if not isinstance(metric, str) or not metric.strip():
-                        continue
-                    metric = metric.strip()
-                    key = cls._normalise_metric_name(metric)
-                    if key and key not in seen_primary_metrics:
-                        result["primary_metrics"].append(metric)
-                        seen_primary_metrics.add(key)
-                    if key and key not in seen_metrics:
-                        result["metrics"].append(metric)
-                        seen_metrics.add(key)
-
-            reference_conditions = details.get("reference_conditions", {})
-            if isinstance(reference_conditions, dict):
-                for name, value in reference_conditions.items():
-                    if isinstance(name, str) and name.strip():
-                        result["reference_conditions"].setdefault(
-                            name.strip(),
-                            cls._json_safe(value),
-                        )
 
             # ------------------------------------------------
             # Metric definitions
@@ -715,17 +687,6 @@ class ExperimentOrchestrator:
                         name
                     )
 
-                    if (
-                        isinstance(value, dict)
-                        and str(value.get("value_type", "")).strip().lower()
-                        == "configuration"
-                    ):
-                        result["reference_conditions"].setdefault(
-                            name,
-                            cls._json_safe(value),
-                        )
-                        continue
-
                     existing_keys = {
                         cls._normalise_metric_name(existing)
                         for existing in result[
@@ -739,21 +700,6 @@ class ExperimentOrchestrator:
                         ][name] = cls._json_safe(
                             value
                         )
-
-        condition_keys = {
-            cls._normalise_metric_name(name)
-            for name in result["reference_conditions"]
-        }
-        result["metrics"] = [
-            metric
-            for metric in result["metrics"]
-            if cls._normalise_metric_name(metric) not in condition_keys
-        ]
-        result["primary_metrics"] = [
-            metric
-            for metric in result["primary_metrics"]
-            if cls._normalise_metric_name(metric) not in condition_keys
-        ]
 
         return result
 
@@ -793,16 +739,6 @@ class ExperimentOrchestrator:
         evidence_metrics = reference_guidance.get(
             "metrics",
             [],
-        )
-
-        primary_metrics = reference_guidance.get(
-            "primary_metrics",
-            [],
-        )
-
-        reference_conditions = reference_guidance.get(
-            "reference_conditions",
-            {},
         )
 
         definitions = {}
@@ -889,19 +825,8 @@ class ExperimentOrchestrator:
             )
         )
 
-        primary_metric_keys = {
-            cls._normalise_metric_name(metric)
-            for metric in primary_metrics
-        }
-        primary_reproducible_metrics = [
-            metric
-            for metric in reproducible_metrics
-            if cls._normalise_metric_name(metric) in primary_metric_keys
-        ]
-
         preferred_comparison_metrics = (
             cls._merge_metric_names(
-                primary_reproducible_metrics,
                 explicit_metrics,
                 reproducible_metrics,
             )
@@ -914,14 +839,6 @@ class ExperimentOrchestrator:
 
             "evidence_metrics": cls._json_safe(
                 evidence_metrics
-            ),
-
-            "primary_metrics": cls._json_safe(
-                primary_metrics
-            ),
-
-            "primary_directly_reproducible_metrics": cls._json_safe(
-                primary_reproducible_metrics
             ),
 
             "directly_reproducible_metrics": cls._json_safe(
@@ -947,10 +864,6 @@ class ExperimentOrchestrator:
 
             "reference_metrics": reference_metrics,
 
-            "reference_conditions": cls._json_safe(
-                reference_conditions
-            ),
-
             "metric_roles": cls._json_safe(
                 metric_classification.get(
                     "metric_roles",
@@ -966,7 +879,6 @@ class ExperimentOrchestrator:
                 "require_proxy_label": True,
                 "reference_only_metrics_are_not_required": True,
                 "conditional_metrics_require_protocol_compatibility": True,
-                "paper_primary_metrics_are_prioritized_when_reproducible": True,
             },
         }
     
@@ -2736,16 +2648,6 @@ class ExperimentOrchestrator:
             )
         )
 
-        primary_metrics = reference_metric_guidance.get(
-            "primary_metrics",
-            [],
-        )
-
-        reference_conditions = reference_metric_guidance.get(
-            "reference_conditions",
-            {},
-        )
-
         metric_definitions = (
             reference_metric_guidance.get(
                 "metric_definitions",
@@ -2816,16 +2718,6 @@ class ExperimentOrchestrator:
             )
         )
 
-        primary_metric_keys = {
-            self._normalise_metric_name(metric)
-            for metric in primary_metrics
-        }
-        primary_reproducible_metrics = [
-            metric
-            for metric in directly_reproducible_metrics
-            if self._normalise_metric_name(metric) in primary_metric_keys
-        ]
-
         # ----------------------------------------------------
         # Only hypothesis metrics + directly reproducible
         # evidence metrics become experiment evaluation metrics.
@@ -2836,7 +2728,6 @@ class ExperimentOrchestrator:
 
         evaluation_metrics = (
             self._merge_metric_names(
-                primary_reproducible_metrics,
                 hypothesis_metrics,
                 directly_reproducible_metrics,
             )
@@ -2881,10 +2772,6 @@ class ExperimentOrchestrator:
                 reference_experiment
             ),
 
-            "reference_conditions": self._json_safe(
-                reference_conditions
-            ),
-
             # NEW:
             # Explicitly expose the metric information instead
             # of making CodeGenerationAgent rediscover it.
@@ -2896,14 +2783,6 @@ class ExperimentOrchestrator:
                 # All metrics reported/extracted from the paper.
                 "evidence_metrics": self._json_safe(
                     evidence_metrics
-                ),
-
-                "primary_metrics": self._json_safe(
-                    primary_metrics
-                ),
-
-                "primary_directly_reproducible_metrics": self._json_safe(
-                    primary_reproducible_metrics
                 ),
 
                 # Metrics that the current experiment can actually
@@ -2943,10 +2822,6 @@ class ExperimentOrchestrator:
                     reference_metrics
                 ),
 
-                "reference_conditions": self._json_safe(
-                    reference_conditions
-                ),
-
                 "metric_roles": self._json_safe(
                     metric_classification.get(
                         "metric_roles",
@@ -2971,7 +2846,6 @@ class ExperimentOrchestrator:
                     "require_proxy_label": True,
                     "reference_only_metrics_are_not_required": True,
                     "conditional_metrics_require_protocol_compatibility": True,
-                    "paper_primary_metrics_are_prioritized_when_reproducible": True,
                 },
             },
 
