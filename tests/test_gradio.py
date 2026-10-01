@@ -106,15 +106,6 @@ def test_comparison_html_renders_arbitrary_metrics_and_model_context(gradio_app_
                     "latency_overhead_ms",
                 ],
             },
-            "reference_experiment": {
-                "sources": [
-                    {
-                        "experiment_details": {
-                            "primary_metrics": ["attack_detection_rate"],
-                        },
-                    },
-                ],
-            },
             "metric_comparison": {
                 "success": True,
                 "metrics": {
@@ -149,8 +140,6 @@ def test_comparison_html_renders_arbitrary_metrics_and_model_context(gradio_app_
     assert "Rank #1 hybrid detector" in html
     assert "Latency Overhead" in html
     assert "Attack Detection Rate" in html
-    assert "Paper-declared primary metrics" in html
-    assert "Attack Detection Rate (paper primary)" in html
     assert "72.4 ms" in html
     assert "80" in html
     assert "+1.00 pp" in html

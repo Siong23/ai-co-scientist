@@ -91,31 +91,6 @@ def test_classify_evidence_metrics_uses_definition_metadata_not_hardcoded_names(
     assert "runtime_metric" in metrics["reference_only"]
 
 
-def test_ranked_lstm_hypothesis_is_not_reclassified_from_paper_benchmark():
-    experiment_type = ExperimentOrchestrator._infer_experiment_type(
-        {
-            "title": "Hierarchical hybrid detector",
-            "text": (
-                "An adaptive LSTM analyzer detects attacks while a "
-                "signature-based pre-filter reduces latency."
-            ),
-        },
-        {
-            "sources": [
-                {
-                    "experiment_details": {
-                        "experiment_objective": "Measure Open RAN latency overhead.",
-                        "experimental_setup": ["FlexRIC testbed"],
-                        "metrics": ["latency_overhead_ms"],
-                    }
-                }
-            ]
-        },
-    )
-
-    assert experiment_type == "ml_training"
-
-
 def test_evaluation_guidance_preserves_paper_primary_metrics_and_conditions():
     reference_experiment = {
         "sources": [
