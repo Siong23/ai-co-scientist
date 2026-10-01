@@ -142,13 +142,38 @@ def test_code_generation_agent_generates_valid_experiment(monkeypatch):
 
     agent = CodeGenerationAgent(model="qwen/qwen3.8-27b")
 
-    result = agent.generate(VALID_SPECIFICATION)
+    specification = {
+        **VALID_SPECIFICATION,
+        "experiment_design": {
+            "checkpoint_required": False,
+        },
+        "code_generation_requirements": {
+            "include_checkpoint": False,
+        },
+    }
+
+    result = agent.generate(specification)
 
     assert result["success"] is True
     assert result["model_recommendation"]["name"] == "lstm"
     assert "class TinyLSTM" in result["pytorch_code"]
+    assert result["experiment_design"] == specification["experiment_design"]
+    assert result["code_generation_requirements"] == specification["code_generation_requirements"]
     assert calls
     assert calls[0]["reasoning"] == "off"
+
+
+def test_design_validator_does_not_treat_missing_checkpoint_requirement_as_false():
+    CodeGenerationAgent.validate_experiment_design_compliance(
+        {"experiment_design": {}},
+        "torch.save(model.state_dict(), 'best_model.pt')\n",
+    )
+
+    with pytest.raises(ValueError, match="checkpoint_required=false"):
+        CodeGenerationAgent.validate_experiment_design_compliance(
+            {"experiment_design": {"checkpoint_required": False}},
+            "torch.save(model.state_dict(), 'best_model.pt')\n",
+        )
 
 
 def test_code_generation_agent_extracts_fenced_python_response():
@@ -669,13 +694,27 @@ def test_experiment_runner_passes_execution_result_to_code_repair_agent(
     runner = ExperimentRunner()
     result = runner._repair_experiment_with_llm(
         generated_code_path=generated_code_path,
-        generated_result={"execution": execution_result},
+        generated_result={
+            "execution": execution_result,
+            "experiment_design": {"checkpoint_required": False},
+            "code_generation_requirements": {"include_checkpoint": False},
+        },
         run_dir=tmp_path,
     )
 
     assert result == repaired_code
     assert captured["generated_code"] == "raise RuntimeError('failure')\n"
     assert captured["execution_result"] == execution_result
+    assert captured["specification"]["experiment_design"] == {
+        "checkpoint_required": False,
+    }
+    assert captured["specification"]["code_generation_requirements"] == {
+        "include_checkpoint": False,
+    }
+    assert any(
+        "checkpoint_required is false" in requirement
+        for requirement in captured["specification"]["repair_requirements"]
+    )
 
 
 def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(

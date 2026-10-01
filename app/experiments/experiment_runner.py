@@ -724,6 +724,25 @@ class ExperimentRunner:
         if not isinstance(experiment_plan, dict):
             experiment_plan = {}
 
+        experiment_design = generated_result.get(
+            "experiment_design",
+            {},
+        )
+        if not isinstance(experiment_design, dict):
+            experiment_design = {}
+
+        code_generation_requirements = generated_result.get(
+            "code_generation_requirements",
+            {},
+        )
+        if not isinstance(code_generation_requirements, dict):
+            code_generation_requirements = {}
+
+        checkpoint_setting = experiment_design.get(
+            "checkpoint_required",
+            code_generation_requirements.get("include_checkpoint"),
+        )
+
         selected_hypothesis = (
             generated_result.get("selected_hypothesis")
             or generated_result.get("hypothesis")
@@ -772,6 +791,39 @@ class ExperimentRunner:
             or ""
         )
 
+        repair_requirements = [
+            (
+                "Fix the execution failure without silently changing "
+                "the selected hypothesis."
+            ),
+            (
+                "Preserve the intended dataset, target variable, "
+                "model architecture, and methodology whenever possible."
+            ),
+            (
+                "Preserve the evidence-derived evaluation metrics. "
+                "Do not replace them with generic accuracy, precision, "
+                "recall, or F1 unless those metrics are actually part "
+                "of the experiment requirements."
+            ),
+            "Do not fabricate scientific results or metric values.",
+            (
+                "If a requested metric cannot be computed from the "
+                "available experiment, report it as unavailable rather "
+                "than inventing a value."
+            ),
+            "Keep generated outputs compatible with ExperimentRunner and ExperimentComparator.",
+        ]
+
+        if checkpoint_setting is False:
+            repair_requirements.append(
+                "Do not save or reference checkpoints; checkpoint_required is false."
+            )
+        elif checkpoint_setting is True:
+            repair_requirements.append(
+                "Preserve checkpoint saving because checkpoint_required is true."
+            )
+
         # Preserve all evidence-derived scientific requirements.
         specification = {
             "research_goal": research_goal,
@@ -782,34 +834,9 @@ class ExperimentRunner:
             "evaluation_metrics": evaluation_metrics,
             "metric_definitions": metric_definitions,
             "experiment_plan": experiment_plan,
-            "repair_requirements": [
-                (
-                    "Fix the execution failure without silently changing "
-                    "the selected hypothesis."
-                ),
-                (
-                    "Preserve the intended dataset, target variable, "
-                    "model architecture, and methodology whenever possible."
-                ),
-                (
-                    "Preserve the evidence-derived evaluation metrics. "
-                    "Do not replace them with generic accuracy, precision, "
-                    "recall, or F1 unless those metrics are actually part "
-                    "of the experiment requirements."
-                ),
-                (
-                    "Do not fabricate scientific results or metric values."
-                ),
-                (
-                    "If a requested metric cannot be computed from the "
-                    "available experiment, report it as unavailable rather "
-                    "than inventing a value."
-                ),
-                (
-                    "Keep generated outputs compatible with "
-                    "ExperimentRunner and ExperimentComparator."
-                ),
-            ],
+            "experiment_design": experiment_design,
+            "code_generation_requirements": code_generation_requirements,
+            "repair_requirements": repair_requirements,
         }
 
         try:

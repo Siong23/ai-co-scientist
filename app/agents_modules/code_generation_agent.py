@@ -2571,11 +2571,22 @@ Do not return explanations or commentary.
             )
         )
 
-        checkpoint_required = bool(
-            experiment_design.get(
-                "checkpoint_required",
-                False,
-            )
+        code_generation_requirements = specification.get(
+            "code_generation_requirements",
+            {},
+        )
+
+        if not isinstance(code_generation_requirements, dict):
+            code_generation_requirements = {}
+
+        checkpoint_setting = experiment_design.get(
+            "checkpoint_required",
+            code_generation_requirements.get("include_checkpoint"),
+        )
+        checkpoint_required = (
+            None
+            if checkpoint_setting is None
+            else bool(checkpoint_setting)
         )
 
         training_history_required = bool(
@@ -2627,7 +2638,7 @@ Do not return explanations or commentary.
         # Checkpoint constraint
         # ----------------------------------------------------
 
-        if not checkpoint_required:
+        if checkpoint_required is False:
             checkpoint_patterns = (
                 "best_model.pt",
                 "torch.save(",
@@ -3683,6 +3694,14 @@ Dataset:
                     "evidence_metric_guidance": (
                         reference_metric_guidance
                     ),
+                    "experiment_design": specification.get(
+                        "experiment_design",
+                        {},
+                    ),
+                    "code_generation_requirements": specification.get(
+                        "code_generation_requirements",
+                        {},
+                    ),
                     "reference_experiment": (
                         self._compact_reference_experiment(
                             specification.get(
@@ -3874,6 +3893,10 @@ Dataset:
                 "code_generation_requirements",
                 {},
             ),
+            "repair_requirements": specification.get(
+                "repair_requirements",
+                [],
+            ),
             "evaluation_metrics": specification.get(
                 "evaluation_metrics",
                 [],
@@ -3958,7 +3981,9 @@ IMPORTANT:
     experiment.
 19. Preserve train/validation/test evaluation design ONLY when it is
     applicable to the selected experiment type.
-20. Preserve checkpoint generation when model training requires it.
+20. Follow experiment_design.checkpoint_required exactly. When it is false,
+    remove checkpoint saving and references, including torch.save, best_model.pt,
+    and checkpoint artifacts. When true, preserve required checkpoint behavior.
 21. Preserve training-history generation when training history is
     scientifically applicable.
 22. Preserve required visualization generation when scientifically
