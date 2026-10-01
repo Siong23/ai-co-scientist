@@ -300,6 +300,42 @@ def test_code_generation_agent_uses_dedicated_model_by_default(monkeypatch):
     assert agent.model == "code-model"
 
 
+def test_code_repair_retries_once_when_llm_returns_unchanged_source(monkeypatch):
+    prompts = []
+    responses = [
+        "import torch\nprint('before')\n",
+        "import torch\nprint('after')\n",
+    ]
+
+    def fake_call_llm(prompt, **kwargs):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        "app.agents_modules.code_generation_agent._call_llm",
+        fake_call_llm,
+    )
+
+    agent = CodeGenerationAgent(model="test-model")
+    result = agent.repair_generated_code(
+        specification={
+            "experiment_design": {"checkpoint_required": False},
+            "code_generation_requirements": {"include_checkpoint": False},
+        },
+        generated_code="import torch\nprint('before')\n",
+        execution_result={
+            "return_code": 1,
+            "stderr": "NameError: name 'undefined_value' is not defined",
+        },
+    )
+
+    assert result["success"] is True
+    assert result["pytorch_code"] == "import torch\nprint('after')"
+    assert len(prompts) == 2
+    assert "previous repair response was identical" in prompts[1]
+    assert "NameError: name 'undefined_value' is not defined" in prompts[1]
+
+
 def test_code_repair_prompt_is_bounded(monkeypatch):
     captured = {}
 

@@ -137,6 +137,7 @@ class CodeGenerationAgent:
 
     MAX_REPAIR_SOURCE_CHARS = 50000
     MAX_REPAIR_LOG_CHARS = 5000
+    MAX_NOOP_REPAIR_RETRIES = 1
 
     # A complete experiment can exceed a single response budget.
     # The agent continues the unfinished file instead of regenerating it.
@@ -4055,115 +4056,76 @@ The repaired experiment must calculate its own results.
 Return ONLY the complete corrected Python source code.
 """.strip()
 
-        # ----------------------------------------------------
-        # Call LLM.
-        # ----------------------------------------------------
+        repaired: Dict[str, Any] = {}
 
-        response = _call_llm(
-            repair_prompt,
-            temperature=0.0,
-            model=self.model,
-            system_prompt=self.REPAIR_SYSTEM_PROMPT,
-            max_tokens=_output_token_limit(
-                "code_generation",
-                self.REPAIR_MAX_TOKENS,
-            ),
-            reasoning="medium",
-        )
+        def request_repair_candidate(prompt: str) -> str:
+            nonlocal repaired
 
-        if not isinstance(
-            response,
-            str,
-        ):
-            response = str(
-                response
+            response = _call_llm(
+                prompt,
+                temperature=0.0,
+                model=self.model,
+                system_prompt=self.REPAIR_SYSTEM_PROMPT,
+                max_tokens=_output_token_limit(
+                    "code_generation",
+                    self.REPAIR_MAX_TOKENS,
+                ),
+                reasoning="medium",
             )
 
-        if response.startswith(
-            "Error:"
-        ):
-            raise RuntimeError(
-                response
-            )
+            if not isinstance(response, str):
+                response = str(response)
 
-        # ----------------------------------------------------
-        # Extract Python source.
-        # ----------------------------------------------------
+            if response.startswith("Error:"):
+                raise RuntimeError(response)
 
-        repaired = self.extract_python_source(
-            response
-        )
+            repaired = self.extract_python_source(response)
+            if repaired is None:
+                try:
+                    repaired = self.extract_json(response)
+                except ValueError as error:
+                    raise ValueError(
+                        "LLM repair response did not contain "
+                        "valid Python source code."
+                    ) from error
 
-        if repaired is None:
-            try:
-                repaired = self.extract_json(
-                    response
+            repaired_source = repaired.get("pytorch_code")
+            if isinstance(repaired_source, str) and repaired_source.strip():
+                repaired["pytorch_code"] = (
+                    self._normalise_escaped_python_source(repaired_source)
                 )
-            except ValueError as error:
-                raise ValueError(
-                    "LLM repair response did not contain "
-                    "valid Python source code."
-                ) from error
 
-        # ----------------------------------------------------
-        # Complete a repair that stopped at token limit.
-        # ----------------------------------------------------
-
-        repaired_source = repaired.get(
-            "pytorch_code"
-        )
-
-        if isinstance(
-            repaired_source,
-            str,
-        ) and repaired_source.strip():
-
-            repaired_source = (
-                self._normalise_escaped_python_source(
-                    repaired_source
-                )
+            self.validate_generated_response(repaired)
+            self.validate_experiment_design_compliance(
+                specification,
+                repaired["pytorch_code"],
             )
 
-            repaired[
-                "pytorch_code"
-            ] = repaired_source
+            repaired_code = repaired.get("pytorch_code")
+            if not isinstance(repaired_code, str) or not repaired_code.strip():
+                raise ValueError("LLM repair returned empty Python code.")
 
-        # ----------------------------------------------------
-        # Validate repaired experiment.
-        # ----------------------------------------------------
+            return repaired_code
 
-        self.validate_generated_response(
-            repaired
-        )
-        
-        self.validate_experiment_design_compliance(
-            specification,
-            repaired["pytorch_code"],
-        )
+        repaired_code = ""
+        for repair_attempt in range(self.MAX_NOOP_REPAIR_RETRIES + 1):
+            prompt = repair_prompt
+            if repair_attempt:
+                prompt += """
 
-        repaired_code = repaired.get(
-            "pytorch_code"
-        )
+NO-OP RETRY FEEDBACK
+The previous repair response was identical to the current source and was
+rejected. Re-examine the execution result and traceback above, identify the
+specific cause, and make the smallest concrete source change that addresses
+it. Do not make arbitrary changes. Return the complete corrected Python file.
+"""
 
-        if not isinstance(
-            repaired_code,
-            str,
-        ) or not repaired_code.strip():
+            repaired_code = request_repair_candidate(prompt)
+            if repaired_code.strip() != generated_code.strip():
+                break
+        else:
             raise ValueError(
-                "LLM repair returned empty Python code."
-            )
-
-        # ----------------------------------------------------
-        # Prevent useless repair loops.
-        # ----------------------------------------------------
-
-        if (
-            repaired_code.strip()
-            == generated_code.strip()
-        ):
-            raise ValueError(
-                "LLM returned the same code without making "
-                "a repair."
+                "LLM returned unchanged code after the bounded no-op repair retry."
             )
 
         # ----------------------------------------------------
