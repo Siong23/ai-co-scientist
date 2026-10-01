@@ -705,6 +705,8 @@ def test_experiment_runner_passes_execution_result_to_code_repair_agent(
     assert result == repaired_code
     assert captured["generated_code"] == "raise RuntimeError('failure')\n"
     assert captured["execution_result"] == execution_result
+    assert generated_code_path.read_text(encoding="utf-8") == repaired_code
+    assert not (tmp_path / "generated_experiment_repaired.py").exists()
     assert captured["specification"]["experiment_design"] == {
         "checkpoint_required": False,
     }
@@ -834,8 +836,13 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
 
     assert len(result["attempts"]) == 2
     assert len(result["repairs"]) == 1
+    assert [attempt["code_path"] for attempt in result["attempts"]] == [
+        str(code_path),
+        str(code_path),
+    ]
 
     assert len(repair_calls) == 1
+    assert not (run_directory / "generated_experiment_repaired.py").exists()
 
     repaired_file = code_path.read_text(encoding="utf-8")
 

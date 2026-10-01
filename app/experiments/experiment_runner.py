@@ -903,18 +903,17 @@ class ExperimentRunner:
             )
             return None
 
-        repaired_path = run_dir / "generated_experiment_repaired.py"
-
         try:
-            repaired_path.write_text(
+            generated_code_path.write_text(
                 repaired_code,
                 encoding="utf-8",
             )
         except Exception as exc:
             logger.warning(
-                "Could not save repaired experiment code: %s",
+                "Could not replace generated experiment code: %s",
                 exc,
             )
+            return None
 
         return repaired_code
 
@@ -1155,17 +1154,11 @@ class ExperimentRunner:
                     repaired_code = repaired_code_text
 
                 if repaired_code and isinstance(repaired_code, str):
-                    repaired_path = (
-                        run_dir / "generated_experiment_repaired.py"
-                    )
-
-                    current_code_path = repaired_path
-
                     repairs.append(
                         {
                             "attempt": attempt_number,
                             "status": "repaired",
-                            "code_path": str(repaired_path),
+                            "code_path": str(current_code_path),
                             "duration_seconds": repair_duration,
                         }
                     )
