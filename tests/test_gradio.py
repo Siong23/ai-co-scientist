@@ -69,10 +69,81 @@ def test_experiment_results_format_metrics_to_two_decimals(gradio_app_module):
 
     assert "0.999978" not in html
     assert "0.995" not in html
-    assert "Accuracy:</strong> 1.00" in html
-    assert "Weighted Precision:</strong> 0.99" in html
-    assert "Weighted Recall:</strong> 0.90" in html
-    assert "Weighted F1 Score:</strong> 0.12" in html
+    assert "Accuracy" in html
+    assert "Precision Weighted" in html
+    assert "Recall Weighted" in html
+    assert "F1 Weighted" in html
+    assert "<td>1.00</td>" in html
+    assert "<td>0.99</td>" in html
+    assert "<td>0.90</td>" in html
+    assert "<td>0.12</td>" in html
+
+
+def test_comparison_html_renders_arbitrary_metrics_and_model_context(gradio_app_module):
+    html = gradio_app_module.format_comparison_html(
+        {
+            "success": True,
+            "status": "completed",
+            "paper_result": {
+                "metrics": {
+                    "latency_overhead_ms": 80.0,
+                    "attack_detection_rate": 0.98,
+                },
+            },
+            "experiment_result": {
+                "metrics": {
+                    "latency_overhead_ms": 72.4,
+                    "attack_detection_rate": 0.99,
+                },
+            },
+            "comparability": {
+                "paper_model": "Published detector",
+                "experiment_model": "Rank #1 hybrid detector",
+                "paper_dataset": "5G-NIDD",
+                "experiment_dataset": "5G-NIDD",
+                "common_metrics": [
+                    "attack_detection_rate",
+                    "latency_overhead_ms",
+                ],
+            },
+            "metric_comparison": {
+                "success": True,
+                "metrics": {
+                    "attack_detection_rate": {
+                        "paper": 0.98,
+                        "experiment": 0.99,
+                        "difference": 0.01,
+                        "difference_percentage_points": 1.0,
+                        "reference_unit": "%",
+                        "reference_value_type": "measured_value",
+                    },
+                    "latency_overhead_ms": {
+                        "paper": 80.0,
+                        "experiment": 72.4,
+                        "difference": -7.6,
+                        "reference_unit": "ms",
+                        "reference_value_type": "upper_bound",
+                        "reference_relation": "less_than",
+                        "constraint_satisfied": True,
+                        "comparison_interpretation": "Measured latency is below the reported upper bound.",
+                    },
+                },
+            },
+            "explanation": {
+                "overall_assessment": "The experiment met the reported latency bound.",
+            },
+            "errors": [],
+        }
+    )
+
+    assert "Published detector" in html
+    assert "Rank #1 hybrid detector" in html
+    assert "Latency Overhead" in html
+    assert "Attack Detection Rate" in html
+    assert "72.4 ms" in html
+    assert "80" in html
+    assert "+1.00 pp" in html
+    assert "below the reported upper bound" in html
 
 
 def test_run_history_loads_existing_runs_and_delete_controls(gradio_app_module, monkeypatch, tmp_path):
