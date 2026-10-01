@@ -66,6 +66,31 @@ VALID_SPECIFICATION = {
 }
 
 
+def test_classify_evidence_metrics_uses_definition_metadata_not_hardcoded_names():
+    metrics = ExperimentOrchestrator._classify_evidence_metrics(
+        experiment_type="ml_training",
+        evidence_metrics=[
+            "custom_metric",
+            "runtime_metric",
+        ],
+        metric_definitions={
+            "custom_metric": {
+                "kind": "model_quality",
+                "calculation": "average absolute error on held-out predictions",
+                "unit": "score",
+            },
+            "runtime_metric": {
+                "family": "system",
+                "kind": "network_overhead",
+                "unit": "ms",
+            },
+        },
+    )
+
+    assert "custom_metric" in metrics["directly_reproducible"]
+    assert "runtime_metric" in metrics["reference_only"]
+
+
 # ============================================================
 # CodeGenerationAgent - Offline Tests
 # ============================================================
@@ -133,6 +158,19 @@ def test_code_generation_agent_extracts_fenced_python_response():
 
     assert result is not None
     assert result["pytorch_code"] == ("import torch\nprint('ok')")
+
+
+def test_code_generation_agent_preserves_escaped_fstring_newlines():
+    source = (
+        'import torch\n'
+        'value = 3\n'
+        'print(f"Label distribution:\\n{value}")\n'
+    )
+
+    normalised = CodeGenerationAgent()._normalise_escaped_python_source(source)
+
+    assert normalised.rstrip() == source.rstrip()
+    ast.parse(normalised)
 
 
 def test_code_generation_agent_recovers_unterminated_fenced_python():

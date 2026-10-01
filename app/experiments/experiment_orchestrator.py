@@ -198,6 +198,8 @@ class ExperimentOrchestrator:
         dataset_path: Optional[str] = None,
         device: str = "cuda",
         python_executable: Optional[str] = None,
+        dataset_url: Optional[str] = None,
+        cache_dir: Optional[str] = None,
     ) -> None:
         """
         Initialize the experiment orchestrator.
@@ -223,6 +225,8 @@ class ExperimentOrchestrator:
         self.dataset_manager = DatasetManager(
             dataset_name=dataset_name,
             dataset_path=dataset_path,
+            dataset_url=dataset_url,
+            cache_dir=cache_dir,
         )
 
         self.dataset_path = Path(
@@ -393,6 +397,149 @@ class ExperimentOrchestrator:
             str(metric_name).strip().lower(),
         ).strip("_")
 
+    @staticmethod
+    def _flatten_metric_definition(value: Any) -> str:
+        """
+        Collapse nested metric metadata into a searchable string.
+
+        The goal is to let metric semantics come from the actual metric
+        definition, not from a fixed built-in list of metric names.
+        """
+
+        if value is None:
+            return ""
+
+        if isinstance(value, (str, int, float, bool)):
+            return str(value).lower()
+
+        if isinstance(value, (list, tuple, set)):
+            return " ".join(
+                ExperimentOrchestrator._flatten_metric_definition(item)
+                for item in value
+            )
+
+        if isinstance(value, dict):
+            parts = []
+            for key, item in value.items():
+                parts.append(str(key).lower())
+                parts.append(
+                    ExperimentOrchestrator._flatten_metric_definition(item)
+                )
+            return " ".join(parts)
+
+        return str(value).lower()
+
+    @classmethod
+    def _metric_semantic_signal(
+        cls,
+        metric_name: str,
+        definition: Any,
+    ) -> str:
+        """
+        Build a semantic signal from metric name + metadata.
+
+        This is intentionally broader than a hard-coded metric-name list and
+        allows custom metrics with scientifically meaningful definitions to be
+        classified by their actual semantics.
+        """
+
+        text = " ".join(
+            part for part in (
+                str(metric_name).lower(),
+                cls._flatten_metric_definition(definition),
+            )
+            if part
+        )
+
+        return re.sub(r"[^a-z0-9_\s]+", " ", text)
+
+    @classmethod
+    def _looks_like_model_metric(
+        cls,
+        metric_name: str,
+        definition: Any,
+    ) -> bool:
+        """
+        Return True when a metric is likely a model-quality or prediction
+        metric rather than a system benchmark metric.
+        """
+
+        signal = cls._metric_semantic_signal(metric_name, definition)
+
+        if not signal:
+            return False
+
+        performance_tokens = (
+            "score",
+            "error",
+            "loss",
+            "quality",
+            "prediction",
+            "classification",
+            "detection",
+            "regression",
+            "accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "auc",
+            "mcc",
+            "sensitivity",
+            "specificity",
+            "balanced",
+            "reward",
+            "risk",
+            "confidence",
+            "calibration",
+            "hit",
+            "match",
+            "rate",
+        )
+
+        return any(token in signal for token in performance_tokens)
+
+    @classmethod
+    def _looks_like_system_metric(
+        cls,
+        metric_name: str,
+        definition: Any,
+    ) -> bool:
+        """
+        Return True when a metric describes runtime/system behavior rather than
+        the model's predictive quality.
+        """
+
+        signal = cls._metric_semantic_signal(metric_name, definition)
+
+        if not signal:
+            return False
+
+        system_tokens = (
+            "latency",
+            "delay",
+            "throughput",
+            "bandwidth",
+            "runtime",
+            "execution",
+            "response",
+            "overhead",
+            "resource",
+            "cpu",
+            "gpu",
+            "memory",
+            "energy",
+            "time",
+            "cost",
+            "traffic",
+            "packet",
+            "message",
+            "processing",
+            "network",
+            "storage",
+        )
+
+        return any(token in signal for token in system_tokens)
+
     @classmethod
     def _extract_reference_metric_requirements(
         cls,
@@ -562,19 +709,14 @@ class ExperimentOrchestrator:
         specification: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Build the complete evaluation guidance passed to
-        CodeGenerationAgent.
+        Build evaluation guidance for CodeGenerationAgent.
 
-        Precedence:
+        Evidence metrics are classified according to whether they
+        are directly reproducible, conditionally comparable, or
+        reference-only for the current experiment.
 
-            1. Explicit experiment specification metrics
-            2. Metrics required by the selected hypothesis
-            3. Metrics reported by supporting evidence
-            4. Additional standard metrics only when scientifically
-               appropriate
-
-        Reference numerical values are retained separately and must
-        never be copied into experiment output.
+        Paper reference values remain separate from experiment
+        evaluation metrics.
         """
 
         explicit_metrics = specification.get(
@@ -585,10 +727,12 @@ class ExperimentOrchestrator:
         if not isinstance(explicit_metrics, list):
             explicit_metrics = []
 
-        reference_guidance = cls._extract_reference_metric_requirements(
-            specification.get(
-                "reference_experiment",
-                {},
+        reference_guidance = (
+            cls._extract_reference_metric_requirements(
+                specification.get(
+                    "reference_experiment",
+                    {},
+                )
             )
         )
 
@@ -639,17 +783,105 @@ class ExperimentOrchestrator:
             )
         )
 
+        experiment_type = specification.get(
+            "experiment_design",
+            {},
+        ).get(
+            "experiment_type",
+            specification.get(
+                "experiment",
+                {},
+            ).get(
+                "experiment_type",
+                "general_experiment",
+            ),
+        )
+
+        metric_classification = (
+            cls._classify_evidence_metrics(
+                experiment_type=experiment_type,
+                evidence_metrics=evidence_metrics,
+                metric_definitions=definitions,
+                reference_metrics=reference_metrics,
+            )
+        )
+
+        # --------------------------------------------------------
+        # Only directly reproducible evidence metrics become
+        # automatic evaluation candidates.
+        # --------------------------------------------------------
+
+        reproducible_metrics = (
+            metric_classification.get(
+                "directly_reproducible",
+                [],
+            )
+        )
+
+        conditional_metrics = (
+            metric_classification.get(
+                "conditionally_comparable",
+                [],
+            )
+        )
+
+        preferred_comparison_metrics = (
+            cls._merge_metric_names(
+                explicit_metrics,
+                reproducible_metrics,
+            )
+        )
+
         return {
             "required_by_specification": cls._json_safe(
                 explicit_metrics
             ),
+
             "evidence_metrics": cls._json_safe(
                 evidence_metrics
             ),
-            "metric_definitions": definitions,
-            "reference_metrics": reference_metrics,
-        }
 
+            "directly_reproducible_metrics": cls._json_safe(
+                reproducible_metrics
+            ),
+
+            "conditionally_comparable_metrics": cls._json_safe(
+                conditional_metrics
+            ),
+
+            "reference_only_metrics": cls._json_safe(
+                metric_classification.get(
+                    "reference_only",
+                    [],
+                )
+            ),
+
+            "preferred_comparison_metrics": cls._json_safe(
+                preferred_comparison_metrics
+            ),
+
+            "metric_definitions": definitions,
+
+            "reference_metrics": reference_metrics,
+
+            "metric_roles": cls._json_safe(
+                metric_classification.get(
+                    "metric_roles",
+                    {},
+                )
+            ),
+
+            "policy": {
+                "same_metrics_preferred": True,
+                "never_copy_reference_values": True,
+                "never_fabricate_metrics": True,
+                "allow_proxy_metrics": True,
+                "require_proxy_label": True,
+                "reference_only_metrics_are_not_required": True,
+                "conditional_metrics_require_protocol_compatibility": True,
+            },
+        }
+    
     # ========================================================
     # Experiment ID
     # ========================================================
@@ -1549,6 +1781,247 @@ class ExperimentOrchestrator:
                     seen.add(key)
 
         return merged
+
+    @classmethod
+    def _classify_evidence_metrics(
+        cls,
+        experiment_type: str,
+        evidence_metrics: Any,
+        metric_definitions: Any = None,
+        reference_metrics: Any = None,
+    ) -> Dict[str, Any]:
+        """
+        Classify evidence-derived metrics according to whether they
+        are appropriate for the current automated experiment.
+
+        The paper's metrics remain scientific reference information.
+        Only metrics that can reasonably be measured by the current
+        experiment are promoted to evaluation metrics.
+
+        Returns
+        -------
+        dict
+            {
+                "directly_reproducible": [...],
+                "conditionally_comparable": [...],
+                "reference_only": [...],
+                "metric_roles": {...}
+            }
+
+        Important:
+        - This function does not copy paper reference values.
+        - A metric being reported by a paper does not automatically
+          make it an evaluation requirement.
+        - Conditional metrics require an explicit proxy/comparability
+          explanation downstream.
+        """
+
+        if not isinstance(evidence_metrics, list):
+            evidence_metrics = []
+
+        if not isinstance(metric_definitions, dict):
+            metric_definitions = {}
+
+        if not isinstance(reference_metrics, dict):
+            reference_metrics = {}
+
+        directly_reproducible: List[str] = []
+        conditionally_comparable: List[str] = []
+        reference_only: List[str] = []
+
+        metric_roles: Dict[str, Dict[str, Any]] = {}
+
+        for metric in evidence_metrics:
+
+            if not isinstance(metric, str):
+                continue
+
+            name = metric.strip()
+
+            if not name:
+                continue
+
+            normalized = cls._normalise_metric_name(
+                name
+            )
+
+            definition = {}
+
+            for definition_name, definition_value in (
+                metric_definitions.items()
+            ):
+                if (
+                    cls._normalise_metric_name(
+                        definition_name
+                    )
+                    == normalized
+                ):
+                    definition = definition_value
+                    break
+
+            metric_text = (
+                cls._metric_semantic_signal(
+                    metric_name=name,
+                    definition=definition,
+                )
+            )
+
+            has_ml_semantics = cls._looks_like_model_metric(
+                metric_name=name,
+                definition=definition,
+            )
+
+            has_system_semantics = cls._looks_like_system_metric(
+                metric_name=name,
+                definition=definition,
+            )
+
+            # ----------------------------------------------------
+            # ML training experiment
+            # ----------------------------------------------------
+
+            if experiment_type == "ml_training":
+                # Detection rate is potentially comparable, but its
+                # definition must match the paper's detection setup.
+                if (
+                    normalized == "detection_rate"
+                    or normalized.startswith(
+                        "detection_rate_"
+                    )
+                ):
+                    conditionally_comparable.append(name)
+
+                    metric_roles[name] = {
+                        "role": "conditionally_comparable",
+                        "reason": (
+                            "Detection rate can be computed from the "
+                            "automated experiment, but direct comparison "
+                            "requires compatible attack definitions, "
+                            "labels, and evaluation protocol."
+                        ),
+                    }
+
+                # Standard ML metrics can be measured directly.
+                elif has_ml_semantics and not has_system_semantics:
+                    directly_reproducible.append(name)
+
+                    metric_roles[name] = {
+                        "role": "directly_reproducible",
+                        "reason": (
+                            "The metric represents ML model "
+                            "classification or detection performance "
+                            "and can be computed from model predictions."
+                        ),
+                    }
+
+                # Runtime/system measurements are not automatically
+                # reproducible by a dataset-based PyTorch experiment.
+                elif has_system_semantics:
+                    reference_only.append(name)
+
+                    metric_roles[name] = {
+                        "role": "reference_only",
+                        "reason": (
+                            "The metric describes system/runtime "
+                            "performance rather than the ML model's "
+                            "predictive performance."
+                        ),
+                    }
+
+                else:
+                    reference_only.append(name)
+
+                    metric_roles[name] = {
+                        "role": "reference_only",
+                        "reason": (
+                            "The metric cannot be established as "
+                            "directly reproducible from the current "
+                            "experiment specification."
+                        ),
+                    }
+
+            # ----------------------------------------------------
+            # Measurement benchmark
+            # ----------------------------------------------------
+
+            elif experiment_type == "measurement_benchmark":
+                if has_system_semantics:
+                    directly_reproducible.append(name)
+
+                    metric_roles[name] = {
+                        "role": "directly_reproducible",
+                        "reason": (
+                            "The metric describes a system or runtime "
+                            "measurement appropriate for a benchmark."
+                        ),
+                    }
+
+                else:
+                    reference_only.append(name)
+
+                    metric_roles[name] = {
+                        "role": "reference_only",
+                        "reason": (
+                            "The metric is not established as a "
+                            "directly measurable benchmark metric."
+                        ),
+                    }
+
+            # ----------------------------------------------------
+            # Unknown/general experiment
+            # ----------------------------------------------------
+
+            else:
+
+                reference_only.append(name)
+
+                metric_roles[name] = {
+                    "role": "reference_only",
+                    "reason": (
+                        "The current experiment type does not establish "
+                        "a reliable reproduction method for this metric."
+                    ),
+                }
+
+        # --------------------------------------------------------
+        # Reference values are intentionally kept separate.
+        # --------------------------------------------------------
+
+        reference_only_set = {
+            cls._normalise_metric_name(metric)
+            for metric in reference_only
+        }
+
+        conditionally_comparable_set = {
+            cls._normalise_metric_name(metric)
+            for metric in conditionally_comparable
+        }
+
+        directly_reproducible_set = {
+            cls._normalise_metric_name(metric)
+            for metric in directly_reproducible
+        }
+
+        return {
+            "directly_reproducible": directly_reproducible,
+            "conditionally_comparable": conditionally_comparable,
+            "reference_only": reference_only,
+            "metric_roles": metric_roles,
+            "reference_values": cls._json_safe(
+                reference_metrics
+            ),
+            "counts": {
+                "directly_reproducible": len(
+                    directly_reproducible_set
+                ),
+                "conditionally_comparable": len(
+                    conditionally_comparable_set
+                ),
+                "reference_only": len(
+                    reference_only_set
+                ),
+            },
+        }
     
     @classmethod
     def _infer_experiment_type(
@@ -1557,38 +2030,87 @@ class ExperimentOrchestrator:
         reference_experiment: Dict[str, Any],
     ) -> str:
         """
-        Infer the experiment type from the selected hypothesis and
-        supporting evidence.
+        Infer the primary experiment type.
 
-        This does not invent a methodology. It only identifies the
-        broad experimental form needed by the evidence.
+        Scientific precedence:
+            1. Selected hypothesis
+            2. Supporting evidence
+
+        Evidence must not override the primary experimental
+        objective defined by the selected Rank #1 hypothesis.
         """
 
-        text_parts: List[str] = []
+        hypothesis_text = cls._safe_string(
+            cls._get_hypothesis_value(
+                hypothesis,
+                "text",
+                "",
+            )
+        ).lower()
 
-        hypothesis_text = cls._get_hypothesis_value(
-            hypothesis,
-            "text",
-            "",
+        hypothesis_title = cls._safe_string(
+            cls._get_hypothesis_value(
+                hypothesis,
+                "title",
+                "",
+            )
+        ).lower()
+
+        hypothesis_text_combined = (
+            f"{hypothesis_title} {hypothesis_text}"
         )
 
-        hypothesis_title = cls._get_hypothesis_value(
-            hypothesis,
-            "title",
-            "",
+        # --------------------------------------------------------
+        # 1. Determine the primary experiment type from the
+        #    selected hypothesis FIRST.
+        # --------------------------------------------------------
+
+        ml_keywords = (
+            "classification",
+            "intrusion detection",
+            "anomaly detection",
+            "anomaly detector",
+            "classifier",
+            "machine learning",
+            "deep learning",
+            "neural network",
+            "lstm",
+            "bilstm",
+            "gru",
+            "transformer",
+            "pytorch",
+            "train",
+            "training",
+            "prediction",
+            "predict",
+            "detect",
+            "detector",
         )
 
-        if isinstance(hypothesis_text, str):
-            text_parts.append(hypothesis_text)
+        if any(
+            keyword in hypothesis_text_combined
+            for keyword in ml_keywords
+        ):
+            return "ml_training"
 
-        if isinstance(hypothesis_title, str):
-            text_parts.append(hypothesis_title)
+        # --------------------------------------------------------
+        # 2. Only if the hypothesis is not clearly an ML task,
+        #    inspect the supporting evidence for a benchmark.
+        # --------------------------------------------------------
 
-        for source in reference_experiment.get("sources", []):
+        evidence_text_parts: List[str] = []
+
+        for source in reference_experiment.get(
+            "sources",
+            [],
+        ):
             if not isinstance(source, dict):
                 continue
 
-            details = source.get("experiment_details", {})
+            details = source.get(
+                "experiment_details",
+                {},
+            )
 
             if not isinstance(details, dict):
                 continue
@@ -1603,18 +2125,23 @@ class ExperimentOrchestrator:
                 value = details.get(field)
 
                 if isinstance(value, str):
-                    text_parts.append(value)
+                    evidence_text_parts.append(value)
 
                 elif isinstance(value, list):
-                    text_parts.extend(
+                    evidence_text_parts.extend(
                         str(item)
                         for item in value
                         if item is not None
                     )
 
-        text = " ".join(text_parts).lower()
+        evidence_text = " ".join(
+            evidence_text_parts
+        ).lower()
 
-        # Measurement / benchmarking experiments
+        # --------------------------------------------------------
+        # 3. Evidence-based measurement benchmark.
+        # --------------------------------------------------------
+
         measurement_keywords = (
             "latency",
             "delay",
@@ -1628,33 +2155,13 @@ class ExperimentOrchestrator:
             "stability",
             "benchmark",
             "performance measurement",
-            "pqc",
-            "ml-kem",
-            "ipsec",
         )
 
         if any(
-            keyword in text
+            keyword in evidence_text
             for keyword in measurement_keywords
         ):
             return "measurement_benchmark"
-
-        # ML training experiments
-        classification_keywords = (
-            "classification",
-            "intrusion detection",
-            "anomaly detection",
-            "classifier",
-            "train",
-            "training",
-            "prediction",
-        )
-
-        if any(
-            keyword in text
-            for keyword in classification_keywords
-        ):
-            return "ml_training"
 
         return "general_experiment"
 
@@ -1702,6 +2209,365 @@ class ExperimentOrchestrator:
             "training_history_required": False,
             "training_required": False,
         }
+    
+    @classmethod
+    def _validate_experiment_specification_consistency(
+        cls,
+        specification: Dict[str, Any],
+    ) -> List[str]:
+        """
+        Validate that the experiment specification is internally
+        consistent with the inferred experiment type.
+
+        This is a structural validation layer. It does not judge
+        whether the scientific hypothesis itself is correct.
+
+        Returns
+        -------
+        list[str]
+            Validation errors. An empty list means the specification
+            is internally consistent.
+        """
+
+        errors: List[str] = []
+
+        if not isinstance(specification, dict):
+            return [
+                "Experiment specification must be a dictionary."
+            ]
+
+        experiment = specification.get(
+            "experiment",
+            {},
+        )
+
+        if not isinstance(experiment, dict):
+            experiment = {}
+
+        experiment_design = specification.get(
+            "experiment_design",
+            {},
+        )
+
+        if not isinstance(experiment_design, dict):
+            errors.append(
+                "experiment_design must be a dictionary."
+            )
+            experiment_design = {}
+
+        code_generation_requirements = specification.get(
+            "code_generation_requirements",
+            {},
+        )
+
+        if not isinstance(
+            code_generation_requirements,
+            dict,
+        ):
+            errors.append(
+                "code_generation_requirements must be a dictionary."
+            )
+            code_generation_requirements = {}
+
+        dataset = specification.get(
+            "dataset",
+            {},
+        )
+
+        if not isinstance(dataset, dict):
+            errors.append(
+                "dataset must be a dictionary."
+            )
+            dataset = {}
+
+        experiment_type = experiment_design.get(
+            "experiment_type"
+        )
+
+        code_generation_type = (
+            code_generation_requirements.get(
+                "experiment_type"
+            )
+        )
+
+        # ----------------------------------------------------
+        # Experiment type consistency
+        # ----------------------------------------------------
+
+        if not experiment_type:
+            errors.append(
+                "experiment_design.experiment_type is missing."
+            )
+
+        if (
+            code_generation_type
+            and experiment_type
+            and code_generation_type != experiment_type
+        ):
+            errors.append(
+                "experiment_type is inconsistent between "
+                "experiment_design and code_generation_requirements."
+            )
+
+        # ----------------------------------------------------
+        # ML training consistency
+        # ----------------------------------------------------
+
+        if experiment_type == "ml_training":
+
+            required_training_fields = {
+                "preprocessing_required": True,
+                "train_validation_test_split": True,
+                "checkpoint_required": True,
+                "training_history_required": True,
+                "training_required": True,
+            }
+
+            for field, expected in (
+                required_training_fields.items()
+            ):
+
+                actual = experiment_design.get(
+                    field
+                )
+
+                if actual is not expected:
+                    errors.append(
+                        f"ml_training requires "
+                        f"experiment_design.{field}={expected}."
+                    )
+
+            # Code-generation requirements must reflect the
+            # same training configuration.
+
+            code_generation_requirements_expected = {
+                "include_preprocessing": True,
+                "include_train_validation_test": True,
+                "include_checkpoint": True,
+                "include_training_history": True,
+                "include_training": True,
+            }
+
+            for field, expected in (
+                code_generation_requirements_expected.items()
+            ):
+
+                actual = code_generation_requirements.get(
+                    field
+                )
+
+                if actual is not expected:
+                    errors.append(
+                        f"ml_training requires "
+                        f"code_generation_requirements.{field}="
+                        f"{expected}."
+                    )
+
+            # The dataset used by an ML experiment must be the
+            # actual experiment dataset, not merely reference data.
+
+            dataset_role = dataset.get(
+                "role"
+            )
+
+            if dataset_role != "experiment_dataset":
+                errors.append(
+                    "ml_training requires dataset.role="
+                    "'experiment_dataset'."
+                )
+
+        # ----------------------------------------------------
+        # Measurement benchmark consistency
+        # ----------------------------------------------------
+
+        elif experiment_type == "measurement_benchmark":
+
+            forbidden_training_fields = {
+                "preprocessing_required": False,
+                "train_validation_test_split": False,
+                "checkpoint_required": False,
+                "training_history_required": False,
+                "training_required": False,
+            }
+
+            for field, expected in (
+                forbidden_training_fields.items()
+            ):
+
+                actual = experiment_design.get(
+                    field
+                )
+
+                if actual is not expected:
+                    errors.append(
+                        f"measurement_benchmark requires "
+                        f"experiment_design.{field}={expected}."
+                    )
+
+            code_generation_requirements_expected = {
+                "include_preprocessing": False,
+                "include_train_validation_test": False,
+                "include_checkpoint": False,
+                "include_training_history": False,
+                "include_training": False,
+            }
+
+            for field, expected in (
+                code_generation_requirements_expected.items()
+            ):
+
+                actual = code_generation_requirements.get(
+                    field
+                )
+
+                if actual is not expected:
+                    errors.append(
+                        f"measurement_benchmark requires "
+                        f"code_generation_requirements.{field}="
+                        f"{expected}."
+                    )
+
+        # ----------------------------------------------------
+        # General experiment consistency
+        # ----------------------------------------------------
+
+        elif experiment_type == "general_experiment":
+
+            if experiment_design.get(
+                "training_required",
+                False,
+            ):
+                errors.append(
+                    "general_experiment must not require training "
+                    "unless explicitly supported by the experiment type."
+                )
+
+        # ----------------------------------------------------
+        # Evaluation metric consistency
+        # ----------------------------------------------------
+
+        evaluation_metrics = specification.get(
+            "evaluation_metrics",
+            [],
+        )
+
+        if not isinstance(
+            evaluation_metrics,
+            list,
+        ):
+            errors.append(
+                "evaluation_metrics must be a list."
+            )
+            evaluation_metrics = []
+
+        evaluation_guidance = specification.get(
+            "evaluation_guidance",
+            {},
+        )
+
+        if not isinstance(
+            evaluation_guidance,
+            dict,
+        ):
+            errors.append(
+                "evaluation_guidance must be a dictionary."
+            )
+            evaluation_guidance = {}
+
+        preferred_metrics = evaluation_guidance.get(
+            "preferred_comparison_metrics",
+            [],
+        )
+
+        if not isinstance(
+            preferred_metrics,
+            list,
+        ):
+            errors.append(
+                "evaluation_guidance.preferred_comparison_metrics "
+                "must be a list."
+            )
+            preferred_metrics = []
+
+        # The top-level evaluation metrics and the metrics that
+        # CodeGenerationAgent is told to implement must agree.
+
+        if (
+            cls._merge_metric_names(
+                evaluation_metrics
+            )
+            != cls._merge_metric_names(
+                preferred_metrics
+            )
+        ):
+            errors.append(
+                "evaluation_metrics must match "
+                "evaluation_guidance.preferred_comparison_metrics."
+            )
+
+        # ----------------------------------------------------
+        # Reference-only metrics must not become experiment
+        # evaluation requirements.
+        # ----------------------------------------------------
+
+        reference_only_metrics = evaluation_guidance.get(
+            "reference_only_metrics",
+            [],
+        )
+
+        if not isinstance(
+            reference_only_metrics,
+            list,
+        ):
+            reference_only_metrics = []
+
+        evaluation_metric_keys = {
+            cls._normalise_metric_name(metric)
+            for metric in evaluation_metrics
+        }
+
+        reference_only_keys = {
+            cls._normalise_metric_name(metric)
+            for metric in reference_only_metrics
+        }
+
+        overlap = (
+            evaluation_metric_keys
+            & reference_only_keys
+        )
+
+        if overlap:
+            errors.append(
+                "Reference-only metrics must not appear in "
+                "evaluation_metrics."
+            )
+
+        # ----------------------------------------------------
+        # Reference values must remain separate.
+        # ----------------------------------------------------
+
+        if not evaluation_guidance.get(
+            "reference_values_are_not_experiment_results",
+            False,
+        ):
+            errors.append(
+                "Reference metric values must explicitly be marked "
+                "as separate from experiment results."
+            )
+
+        if not evaluation_guidance.get(
+            "policy",
+            {},
+        ).get(
+            "never_copy_reference_values",
+            False,
+        ):
+            errors.append(
+                "Metric policy must prevent copying paper reference "
+                "values into experiment results."
+            )
+
+        return errors
 
     # ========================================================
     # Build Experiment Specification
@@ -1802,12 +2668,11 @@ class ExperimentOrchestrator:
             )
         )
 
-        evaluation_metrics = (
-            self._merge_metric_names(
-                hypothesis_metrics,
-                evidence_metrics,
-            )
-        )
+        # ----------------------------------------------------
+        # Determine experiment type FIRST.
+        #
+        # The selected hypothesis defines WHAT is being tested.
+        # ----------------------------------------------------
 
         experiment_type = self._infer_experiment_type(
             hypothesis,
@@ -1816,6 +2681,56 @@ class ExperimentOrchestrator:
 
         experiment_design = self._build_experiment_design(
             experiment_type,
+        )
+
+        # ----------------------------------------------------
+        # Classify evidence-derived metrics according to the
+        # actual experiment type.
+        # ----------------------------------------------------
+
+        metric_classification = (
+            self._classify_evidence_metrics(
+                experiment_type=experiment_type,
+                evidence_metrics=evidence_metrics,
+                metric_definitions=metric_definitions,
+                reference_metrics=reference_metrics,
+            )
+        )
+
+        directly_reproducible_metrics = (
+            metric_classification.get(
+                "directly_reproducible",
+                [],
+            )
+        )
+
+        conditionally_comparable_metrics = (
+            metric_classification.get(
+                "conditionally_comparable",
+                [],
+            )
+        )
+
+        reference_only_metrics = (
+            metric_classification.get(
+                "reference_only",
+                [],
+            )
+        )
+
+        # ----------------------------------------------------
+        # Only hypothesis metrics + directly reproducible
+        # evidence metrics become experiment evaluation metrics.
+        #
+        # Reference-only paper metrics are NOT passed as
+        # requirements for the generated experiment.
+        # ----------------------------------------------------
+
+        evaluation_metrics = (
+            self._merge_metric_names(
+                hypothesis_metrics,
+                directly_reproducible_metrics,
+            )
         )
 
         # ----------------------------------------------------
@@ -1833,7 +2748,7 @@ class ExperimentOrchestrator:
                 ),
                 "task": None,
                 "role": (
-                    "training_dataset"
+                    "experiment_dataset"
                     if experiment_type == "ml_training"
                     else "supporting_or_reference_dataset"
                 ),
@@ -1843,6 +2758,10 @@ class ExperimentOrchestrator:
                 "device": self.device,
                 "framework": "PyTorch",
                 "language": "Python",
+                "experiment_type": experiment_type,
+                "training_required": experiment_design[
+                    "training_required"
+                ],
             },
 
             "research_goal": research_goal_data,
@@ -1860,25 +2779,73 @@ class ExperimentOrchestrator:
                 "hypothesis_metrics": self._json_safe(
                     hypothesis_metrics
                 ),
+
+                # All metrics reported/extracted from the paper.
                 "evidence_metrics": self._json_safe(
                     evidence_metrics
                 ),
+
+                # Metrics that the current experiment can actually
+                # calculate directly.
+                "directly_reproducible_metrics": self._json_safe(
+                    directly_reproducible_metrics
+                ),
+
+                # Metrics that could potentially be compared, but
+                # only when the experimental protocol is compatible.
+                "conditionally_comparable_metrics": self._json_safe(
+                    conditionally_comparable_metrics
+                ),
+
+                # Paper metrics retained for scientific reference
+                # but not required from the generated experiment.
+                "reference_only_metrics": self._json_safe(
+                    reference_only_metrics
+                ),
+
+                # Actual metrics that CodeGenerationAgent should
+                # implement/evaluate.
+                "experiment_evaluation_metrics": self._json_safe(
+                    evaluation_metrics
+                ),
+
                 "preferred_comparison_metrics": self._json_safe(
                     evaluation_metrics
                 ),
+
                 "metric_definitions": self._json_safe(
                     metric_definitions
                 ),
+
+                # Paper values remain reference information only.
                 "reference_metrics": self._json_safe(
                     reference_metrics
                 ),
+
+                "metric_roles": self._json_safe(
+                    metric_classification.get(
+                        "metric_roles",
+                        {},
+                    )
+                ),
+
+                "metric_counts": self._json_safe(
+                    metric_classification.get(
+                        "counts",
+                        {},
+                    )
+                ),
+
                 "reference_values_are_not_experiment_results": True,
+
                 "policy": {
                     "same_metrics_preferred": True,
                     "never_copy_reference_values": True,
                     "never_fabricate_metrics": True,
                     "allow_proxy_metrics": True,
                     "require_proxy_label": True,
+                    "reference_only_metrics_are_not_required": True,
+                    "conditional_metrics_require_protocol_compatibility": True,
                 },
             },
 
@@ -1946,7 +2913,20 @@ class ExperimentOrchestrator:
                     "selected_hypothesis",
                     "supporting_evidence",
                     "experiment_type",
+                    "metric_reproducibility_classification",
                 ],
+
+                "directly_reproducible_metrics": self._json_safe(
+                    directly_reproducible_metrics
+                ),
+
+                "conditionally_comparable_metrics": self._json_safe(
+                    conditionally_comparable_metrics
+                ),
+
+                "reference_only_metrics": self._json_safe(
+                    reference_only_metrics
+                ),
 
                 "reference_metrics_must_not_be_copied": True,
 
@@ -1970,6 +2950,12 @@ class ExperimentOrchestrator:
                 else None
             ),
 
+            "dataset_role": (
+                "experiment_dataset"
+                if experiment_type == "ml_training"
+                else "supporting_or_reference_dataset"
+            ),
+
             "device": self.device,
 
             "experiment_type": experiment_type,
@@ -1980,6 +2966,10 @@ class ExperimentOrchestrator:
 
             "include_train_validation_test": experiment_design[
                 "train_validation_test_split"
+            ],
+
+            "include_training": experiment_design[
+                "training_required"
             ],
 
             "include_checkpoint": experiment_design[
@@ -2001,6 +2991,22 @@ class ExperimentOrchestrator:
             "do_not_copy_reference_metric_values": True,
 
             "record_unreproducible_metrics": True,
+
+            "directly_reproducible_metrics": self._json_safe(
+                directly_reproducible_metrics
+            ),
+
+            "conditionally_comparable_metrics": self._json_safe(
+                conditionally_comparable_metrics
+            ),
+
+            "reference_only_metrics": self._json_safe(
+                reference_only_metrics
+            ),
+
+            "do_not_implement_reference_only_metrics": True,
+
+            "conditional_metrics_require_protocol_check": True,
         },
 
             # ------------------------------------------------
@@ -2086,6 +3092,22 @@ class ExperimentOrchestrator:
                     )
                 ),
             }
+
+        # ----------------------------------------------------
+        # Validate specification consistency before returning.
+        # ----------------------------------------------------
+
+        consistency_errors = (
+            self._validate_experiment_specification_consistency(
+                specification
+            )
+        )
+
+        if consistency_errors:
+            raise ValueError(
+                "Experiment specification is internally inconsistent: "
+                + "; ".join(consistency_errors)
+            )
 
         return self._json_safe(
             specification
