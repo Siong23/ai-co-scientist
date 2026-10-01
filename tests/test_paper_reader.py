@@ -129,3 +129,42 @@ def test_metric_keywords_match_whole_words_only():
     assert PaperReader._infer_value_type("threefold_reduction") == "factor"
     assert PaperReader._normalise_metric_value("accuracy", 95) == 0.95
     assert PaperReader._normalise_metric_value("throughput_improvement_vs_pf_percent", 2.4) == 0.024
+
+
+def test_primary_metrics_are_preserved_and_configurations_are_not_metrics():
+    details = PaperReader._validate_and_normalise_details(
+        {
+            "metrics": ["latency", "deployment_scale"],
+            "primary_metrics": ["Latency"],
+            "metric_definitions": {
+                "latency": {
+                    "unit": "ms",
+                    "value_type": "measurement",
+                },
+                "deployment_scale": {
+                    "unit": "UEs",
+                    "value_type": "configuration",
+                },
+            },
+            "reference_metrics": {
+                "latency": {
+                    "value": 72.4,
+                    "unit": "ms",
+                    "value_type": "measured_value",
+                    "relation": "exact",
+                },
+                "deployment_scale": {
+                    "value": 500,
+                    "unit": "UEs",
+                    "value_type": "configuration",
+                    "relation": "none",
+                },
+            },
+        },
+        raw_text="Latency was measured at 72.4 ms with 500 UEs.",
+    )
+
+    assert details["primary_metrics"] == ["latency"]
+    assert details["metrics"] == ["latency"]
+    assert "deployment_scale" not in details["reference_metrics"]
+    assert details["reference_conditions"]["deployment_scale"]["value"] == 500

@@ -167,6 +167,40 @@ def test_extract_experiment_results():
     )
 
 
+def test_extract_reference_results_maps_paper_reader_model_and_testbed_fields():
+    comparator = ExperimentComparator()
+    reference_experiment = {
+        "available": True,
+        "sources": [
+            {
+                "experiment_details": {
+                    "models_or_systems": ["Proposed adaptive detector"],
+                    "datasets_or_testbeds": ["Open RAN FlexRIC testbed"],
+                    "baselines": ["Single-layer LSTM"],
+                    "metrics": ["latency_overhead_ms"],
+                    "reference_metrics": {
+                        "latency_overhead_ms": {
+                            "value": 72.4,
+                            "unit": "ms",
+                            "value_type": "measured_value",
+                            "relation": "exact",
+                        },
+                    },
+                },
+            },
+        ],
+    }
+
+    result = comparator._extract_results_from_reference_experiment(
+        reference_experiment
+    )
+
+    assert result["success"] is True
+    assert result["models"] == ["Proposed adaptive detector"]
+    assert result["datasets"] == ["Open RAN FlexRIC testbed"]
+    assert result["sources"][0]["baselines"] == ["Single-layer LSTM"]
+
+
 # ============================================================
 # Metric Comparison
 # ============================================================

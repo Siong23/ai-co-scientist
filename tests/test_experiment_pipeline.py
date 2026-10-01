@@ -91,6 +91,118 @@ def test_classify_evidence_metrics_uses_definition_metadata_not_hardcoded_names(
     assert "runtime_metric" in metrics["reference_only"]
 
 
+def test_ranked_lstm_hypothesis_is_not_reclassified_from_paper_benchmark():
+    experiment_type = ExperimentOrchestrator._infer_experiment_type(
+        {
+            "title": "Hierarchical hybrid detector",
+            "text": (
+                "An adaptive LSTM analyzer detects attacks while a "
+                "signature-based pre-filter reduces latency."
+            ),
+        },
+        {
+            "sources": [
+                {
+                    "experiment_details": {
+                        "experiment_objective": "Measure Open RAN latency overhead.",
+                        "experimental_setup": ["FlexRIC testbed"],
+                        "metrics": ["latency_overhead_ms"],
+                    }
+                }
+            ]
+        },
+    )
+
+    assert experiment_type == "ml_training"
+
+
+def test_evaluation_guidance_preserves_paper_primary_metrics_and_conditions():
+    reference_experiment = {
+        "sources": [
+            {
+                "experiment_details": {
+                    "metrics": ["latency_ms", "deployment_scale"],
+                    "primary_metrics": ["latency_ms"],
+                    "metric_definitions": {
+                        "latency_ms": {
+                            "unit": "ms",
+                            "value_type": "measurement",
+                        },
+                        "deployment_scale": {
+                            "unit": "UEs",
+                            "value_type": "configuration",
+                        },
+                    },
+                    "reference_metrics": {
+                        "latency_ms": {
+                            "value": 72.4,
+                            "unit": "ms",
+                            "value_type": "measured_value",
+                        },
+                        "deployment_scale": {
+                            "value": 500,
+                            "unit": "UEs",
+                            "value_type": "configuration",
+                        },
+                    },
+                }
+            }
+        ]
+    }
+
+    guidance = ExperimentOrchestrator._build_evaluation_guidance(
+        {
+            "evaluation_metrics": [],
+            "experiment_design": {
+                "experiment_type": "measurement_benchmark",
+            },
+            "reference_experiment": reference_experiment,
+        }
+    )
+
+    assert guidance["primary_metrics"] == ["latency_ms"]
+    assert "latency_ms" in guidance["directly_reproducible_metrics"]
+    assert "deployment_scale" not in guidance["evidence_metrics"]
+    assert guidance["reference_conditions"]["deployment_scale"]["value"] == 500
+
+
+def test_code_generation_guidance_keeps_primary_metrics_separate_from_conditions():
+    guidance = CodeGenerationAgent._extract_reference_metric_requirements(
+        {
+            "sources": [
+                {
+                    "experiment_details": {
+                        "metrics": ["latency_ms", "deployment_scale"],
+                        "primary_metrics": ["latency_ms"],
+                        "reference_metrics": {
+                            "latency_ms": {
+                                "value": 72.4,
+                                "unit": "ms",
+                                "value_type": "measured_value",
+                            },
+                            "deployment_scale": {
+                                "value": 500,
+                                "unit": "UEs",
+                                "value_type": "configuration",
+                            },
+                        },
+                        "reference_conditions": {},
+                    }
+                }
+            ]
+        }
+    )
+    selected = CodeGenerationAgent._select_prompt_metric_guidance(
+        guidance,
+        ["latency_ms"],
+    )
+
+    assert selected["primary_metrics"] == ["latency_ms"]
+    assert "deployment_scale" not in selected["metrics"]
+    assert "deployment_scale" not in selected["reference_metrics"]
+    assert selected["reference_conditions"]["deployment_scale"]["value"] == 500
+
+
 # ============================================================
 # CodeGenerationAgent - Offline Tests
 # ============================================================

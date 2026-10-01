@@ -105,6 +105,46 @@ def test_get_latest_dataset_raises_when_dataset_does_not_exist(
         manager.get_latest_dataset()
 
 
+def test_get_latest_dataset_downloads_remote_dataset_url(
+    tmp_path,
+    monkeypatch,
+):
+    dataset_url = "https://example.com/5g_nidd.csv"
+    manager = DatasetManager(
+        dataset_name="5G-NIDD",
+        dataset_url=dataset_url,
+        cache_dir=str(tmp_path),
+    )
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self.payload
+
+    def fake_urlopen(request, timeout=30):
+        assert request.full_url == dataset_url
+        return FakeResponse(b"feature,label\n1,0\n")
+
+    monkeypatch.setattr(
+        "app.data.dataset_manager.urlopen",
+        fake_urlopen,
+    )
+
+    result = manager.get_latest_dataset()
+
+    assert Path(result).exists()
+    assert Path(result).suffix == ".csv"
+    assert "5g_nidd" in Path(result).name.lower()
+
+
 def test_get_latest_dataset_raises_when_path_is_directory(
     tmp_path,
 ):

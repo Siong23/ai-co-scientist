@@ -601,6 +601,29 @@ def format_comparison_html(
     if not isinstance(experiment_metrics, dict):
         experiment_metrics = {}
 
+    primary_metrics = set()
+    reference_experiment = comparison_result.get("reference_experiment", {})
+    if isinstance(reference_experiment, dict):
+        sources = reference_experiment.get("sources", [])
+        if isinstance(sources, list):
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                details = source.get("experiment_details", {})
+                if not isinstance(details, dict):
+                    continue
+                source_primary_metrics = details.get("primary_metrics", [])
+                if isinstance(source_primary_metrics, str):
+                    source_primary_metrics = [source_primary_metrics]
+                if isinstance(source_primary_metrics, list):
+                    primary_metrics.update(
+                        re.sub(r"[^a-z0-9]+", "_", str(metric).lower()).strip("_")
+                        for metric in source_primary_metrics
+                        if isinstance(metric, str) and metric.strip()
+                    )
+
+    primary_metric_display = ", ".join(sorted(primary_metrics))
+
     metric_comparison = comparison_result.get("metric_comparison", {})
     comparison_metrics = (
         metric_comparison.get("metrics", {})
@@ -685,9 +708,18 @@ def format_comparison_html(
         else:
             difference_text = "Not comparable"
 
+        normalized_name = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(name).lower(),
+        ).strip("_")
+        display_name = str(name).replace("_", " ").title()
+        if normalized_name in primary_metrics:
+            display_name += " (paper primary)"
+
         comparison_rows.append(
             "<tr>"
-            f"<td>{html_lib.escape(str(name).replace('_', ' ').title())}</td>"
+            f"<td>{html_lib.escape(display_name)}</td>"
             f"<td>{paper_text}</td>"
             f"<td>{experiment_text}</td>"
             f"<td>{html_lib.escape(str(difference_text))}</td>"
@@ -703,6 +735,7 @@ def format_comparison_html(
     <div style="margin-top: 20px; padding: 20px; border: 2px solid #6f42c1; border-radius: 8px;">
         <h2>Paper vs Automated Experiment</h2>
         <p><strong>Status:</strong> {html_lib.escape(status_label)}</p>
+        {f'<p><strong>Paper-declared primary metrics:</strong> {html_lib.escape(primary_metric_display)}</p>' if primary_metric_display else ''}
         {''.join(model_rows)}
         <h3>Metric Comparison</h3>
         <table>

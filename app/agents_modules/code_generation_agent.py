@@ -135,7 +135,7 @@ class CodeGenerationAgent:
     DEFAULT_MAX_TOKENS = 5000
     REPAIR_MAX_TOKENS = 5000
 
-    MAX_REPAIR_SOURCE_CHARS = 50000
+    MAX_REPAIR_SOURCE_CHARS = 30000
     MAX_REPAIR_LOG_CHARS = 5000
     MAX_NOOP_REPAIR_RETRIES = 1
 
@@ -143,8 +143,10 @@ class CodeGenerationAgent:
     # The agent continues the unfinished file instead of regenerating it.
     MAX_CONTINUATION_ATTEMPTS = 3
     MAX_CONTINUATION_REWIND_LINES = 400
-    MAX_CONTINUATION_SOURCE_CHARS = 50000
+    MAX_CONTINUATION_SOURCE_CHARS = 24000
+    MAX_CONTINUATION_TAIL_CHARS = 12000
     MIN_TRUNCATION_LINES = 40
+    CONTINUATION_MAX_TOKENS = 8000
 
     TRUNCATION_SYNTAX_MARKERS = (
         "unterminated string literal",
@@ -194,6 +196,8 @@ class CodeGenerationAgent:
         "do not generate that block again.\n"
         "The continuation must form valid Python when appended directly "
         "to the existing source.\n"
+        "Do NOT use backslash-based line continuation; use parentheses "
+        "for multi-line expressions.\n"
         "Do NOT add Markdown fences, JSON, explanations, commentary, or "
         "natural-language text.\n"
         "The completed program must remain compatible with the "
@@ -231,6 +235,8 @@ class CodeGenerationAgent:
         "Do not fabricate measurements using random sampling.\n"
         "Only fix syntax errors, incomplete code, missing required "
         "sections, or genuine implementation errors.\n"
+        "Do NOT use backslash-based line continuation; use parentheses "
+        "for multi-line expressions.\n"
         "The repaired program must remain compatible with the "
         "ExperimentRunner artifact contract.\n"
         "Return the complete corrected Python source code only.\n"
@@ -646,6 +652,7 @@ class CodeGenerationAgent:
         """
         result: Dict[str, Any] = {
             "metrics": [],
+            "primary_metrics": [],
             "metric_definitions": {},
             "reference_metrics": {},
             "reference_conditions": {},
@@ -669,6 +676,14 @@ class CodeGenerationAgent:
             return result
 
         seen_metrics = set()
+        seen_primary_metrics = set()
+
+        def normalize_metric_name(name: Any) -> str:
+            return re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(name).strip().lower(),
+            ).strip("_")
 
         for source in sources:
             if not isinstance(
@@ -692,6 +707,31 @@ class CodeGenerationAgent:
                 "metrics",
                 [],
             )
+
+            conditions = details.get("reference_conditions", {})
+            if isinstance(conditions, dict):
+                for name, value in conditions.items():
+                    if isinstance(name, str) and name.strip():
+                        result["reference_conditions"].setdefault(
+                            name.strip(),
+                            CodeGenerationAgent._json_safe(value),
+                        )
+
+            primary_metrics = details.get("primary_metrics", [])
+            if isinstance(primary_metrics, str):
+                primary_metrics = [primary_metrics]
+            if isinstance(primary_metrics, list):
+                for metric in primary_metrics:
+                    if not isinstance(metric, str) or not metric.strip():
+                        continue
+                    metric = metric.strip()
+                    key = normalize_metric_name(metric)
+                    if key and key not in seen_primary_metrics:
+                        result["primary_metrics"].append(metric)
+                        seen_primary_metrics.add(key)
+                    if key and key not in seen_metrics:
+                        result["metrics"].append(metric)
+                        seen_metrics.add(key)
 
             if isinstance(
                 metrics,
@@ -758,6 +798,17 @@ class CodeGenerationAgent:
                     ):
                         continue
 
+                    if (
+                        isinstance(value, dict)
+                        and str(value.get("value_type", "")).strip().lower()
+                        == "configuration"
+                    ):
+                        result["reference_conditions"].setdefault(
+                            name,
+                            value,
+                        )
+                        continue
+
                     if name not in result[
                         "reference_metrics"
                     ]:
@@ -765,20 +816,102 @@ class CodeGenerationAgent:
                             "reference_metrics"
                         ][name] = value
 
-            reference_conditions = details.get(
-                "reference_conditions",
-                {},
-            )
-
-            if isinstance(reference_conditions, dict):
-                for name, value in reference_conditions.items():
-                    if not isinstance(name, str):
-                        continue
-
-                    if name not in result["reference_conditions"]:
-                        result["reference_conditions"][name] = value
+        condition_keys = {
+            normalize_metric_name(name)
+            for name in result["reference_conditions"]
+        }
+        result["metrics"] = [
+            metric
+            for metric in result["metrics"]
+            if normalize_metric_name(metric) not in condition_keys
+        ]
+        result["primary_metrics"] = [
+            metric
+            for metric in result["primary_metrics"]
+            if normalize_metric_name(metric) not in condition_keys
+        ]
 
         return result
+
+    @staticmethod
+    def _select_prompt_metric_guidance(
+        guidance: Dict[str, Any],
+        required_metrics: Any,
+    ) -> Dict[str, Any]:
+        """
+        Keep only evidence metrics relevant to the metrics explicitly
+        requested by the current experiment specification.
+
+        Paper reference values remain comparison-only.
+        """
+        if not isinstance(guidance, dict):
+            return {}
+
+        requested = set()
+        if isinstance(required_metrics, list):
+            for metric in required_metrics:
+                if isinstance(metric, str) and metric.strip():
+                    requested.add(metric.strip().lower())
+
+        if not requested:
+            return {
+                "metrics": [],
+                "primary_metrics": [],
+                "metric_definitions": {},
+                "reference_metrics": {},
+                "reference_conditions": guidance.get(
+                    "reference_conditions",
+                    {},
+                ),
+            }
+
+        def matches(name: str) -> bool:
+            normalized = name.strip().lower()
+            normalized_compact = normalized.replace(" ", "_")
+            return any(
+                normalized == item
+                or normalized_compact == item.replace(" ", "_")
+                for item in requested
+            )
+
+        metrics = [
+            metric
+            for metric in guidance.get("metrics", [])
+            if isinstance(metric, str) and matches(metric)
+        ]
+
+        definitions = {
+            name: value
+            for name, value in (
+                guidance.get("metric_definitions", {}) or {}
+            ).items()
+            if isinstance(name, str) and matches(name)
+        }
+
+        reference_metrics = {
+            name: value
+            for name, value in (
+                guidance.get("reference_metrics", {}) or {}
+            ).items()
+            if isinstance(name, str) and matches(name)
+        }
+
+        primary_metrics = [
+            metric
+            for metric in guidance.get("primary_metrics", [])
+            if isinstance(metric, str) and matches(metric)
+        ]
+
+        return {
+            "metrics": metrics,
+            "primary_metrics": primary_metrics,
+            "metric_definitions": definitions,
+            "reference_metrics": reference_metrics,
+            "reference_conditions": guidance.get(
+                "reference_conditions",
+                {},
+            ),
+        }
 
     # ========================================================
     # Prompt Construction
@@ -1040,13 +1173,18 @@ When the supporting paper reports explicit evaluation metrics:
 3. Prefer the SAME metrics for the Rank #1 experiment when they are
    scientifically compatible with the Rank #1 hypothesis.
 
-4. Preserve the original metric definition.
+4. If `primary_metrics` explicitly identifies a metric as primary in the
+    paper, prioritize that metric when it is reproducible for this experiment.
+    Do not infer a primary metric from which reported result is numerically
+    highest. Keep any `reference_conditions` separate from measured metrics.
 
-5. Preserve the original unit.
+5. Preserve the original metric definition.
 
-6. Preserve the direction of improvement when known.
+6. Preserve the original unit.
 
-7. Preserve the semantic type of every reference value.
+7. Preserve the direction of improvement when known.
+
+8. Preserve the semantic type of every reference value.
 
    A reference value may be:
 
@@ -1057,7 +1195,7 @@ When the supporting paper reports explicit evaluation metrics:
    - qualitative_result
    - unknown
 
-8. Preserve the relation associated with a reference value when known.
+9. Preserve the relation associated with a reference value when known.
 
    Possible relations include:
 
@@ -1069,7 +1207,7 @@ When the supporting paper reports explicit evaluation metrics:
    - range
    - none
 
-9. A reference upper or lower bound is a comparison constraint,
+10. A reference upper or lower bound is a comparison constraint,
    NOT an exact experiment result.
 
    Example:
@@ -1088,23 +1226,23 @@ When the supporting paper reports explicit evaluation metrics:
 
        experiment latency = 80 ms
 
-10. A reference range must remain a range.
+11. A reference range must remain a range.
 
     Do not replace a range with its midpoint, minimum, maximum,
     or another invented single value.
 
-11. A qualitative reference result must remain qualitative.
+12. A qualitative reference result must remain qualitative.
 
     Do not convert qualitative statements into invented numerical
     measurements.
 
-12. Calculate every automated-experiment metric independently from
+13. Calculate every automated-experiment metric independently from
     the actual experiment execution.
 
-13. NEVER copy a reference-paper numerical result into the automated
+14. NEVER copy a reference-paper numerical result into the automated
     experiment result.
 
-14. NEVER use a reference-paper numerical result as:
+15. NEVER use a reference-paper numerical result as:
 
     - simulated input
     - calibration value
@@ -1114,12 +1252,12 @@ When the supporting paper reports explicit evaluation metrics:
     - generated measurement
     - random sampling boundary
 
-15. NEVER estimate an automated-experiment result from a paper result.
+16. NEVER estimate an automated-experiment result from a paper result.
 
-16. Every reported automated-experiment measurement must originate
+17. Every reported automated-experiment measurement must originate
     from an operation actually performed by the generated experiment.
 
-17. If the local environment cannot independently perform the
+18. If the local environment cannot independently perform the
     measurement required for a reference metric, report that metric
     as:
 
@@ -1131,13 +1269,13 @@ When the supporting paper reports explicit evaluation metrics:
 
     together with the reason.
 
-18. A proxy may be used only when scientifically justified and MUST
+19. A proxy may be used only when scientifically justified and MUST
     be explicitly labelled as a proxy.
 
-19. A proxy MUST NOT be presented as equivalent to the original
+20. A proxy MUST NOT be presented as equivalent to the original
     reference measurement.
 
-20. Reference metrics are comparison guidance only. They must remain
+21. Reference metrics are comparison guidance only. They must remain
     separate from the automated experiment's measured results.
 
 Do not force accuracy, precision, recall, or F1 merely because the
@@ -1650,90 +1788,81 @@ Do NOT return explanations outside the JSON object.
         reference_experiment: Any,
     ) -> Dict[str, Any]:
         """
-        Reduce the reference experiment to the scientifically relevant
-        information needed for code generation.
+        Reduce PaperReader output to the small, structured subset needed
+        for code generation.
 
-        Large extracted text fields are intentionally excluded because
-        the structured experiment details already contain the relevant
-        methodology, metrics, configurations, and reported results.
+        Large extracted text, raw results prose, and provenance blobs are
+        deliberately excluded. Reference results remain comparison-only.
         """
-        if not isinstance(
-            reference_experiment,
-            dict,
-        ):
+        if not isinstance(reference_experiment, dict):
             return {}
 
         compact: Dict[str, Any] = {
-            "available": reference_experiment.get(
-                "available",
-                True,
-            ),
-            "source_count": reference_experiment.get(
-                "source_count",
-                0,
-            ),
+            "available": reference_experiment.get("available", True),
+            "source_count": reference_experiment.get("source_count", 0),
             "sources": [],
         }
 
-        sources = reference_experiment.get(
-            "sources",
-            [],
-        )
-
-        if not isinstance(
-            sources,
-            list,
-        ):
+        sources = reference_experiment.get("sources", [])
+        if not isinstance(sources, list):
             return compact
 
+        allowed_detail_keys = (
+            "experiment_type",
+            "task",
+            "models",
+            "models_or_systems",
+            "datasets",
+            "datasets_or_testbeds",
+            "baselines",
+            "metrics",
+            "primary_metrics",
+            "metric_definitions",
+            "reference_metrics",
+            "reference_conditions",
+            "hyperparameters",
+            "training_details",
+            "experimental_setup",
+            "methodology",
+            "evaluation",
+            "hardware",
+            "deployment",
+        )
+
         for source in sources:
-            if not isinstance(
-                source,
-                dict,
-            ):
+            if not isinstance(source, dict):
                 continue
 
-            experiment_details = source.get(
-                "experiment_details",
-                {},
-            )
+            details = source.get("experiment_details", {})
+            if not isinstance(details, dict):
+                details = {}
 
-            if not isinstance(
-                experiment_details,
-                dict,
-            ):
-                experiment_details = {}
+            compact_details: Dict[str, Any] = {}
+            for key in allowed_detail_keys:
+                value = details.get(key)
+                if value not in (None, "", [], {}):
+                    compact_details[key] = value
 
             compact_source = {
-                "source_url": source.get(
-                    "source_url"
-                ),
-                "source_id": source.get(
-                    "source_id"
-                ),
-                "source_type": source.get(
-                    "source_type"
-                ),
-                "experiment_details": experiment_details,
+                "source_url": source.get("source_url"),
+                "source_id": source.get("source_id"),
+                "source_type": source.get("source_type"),
+                "experiment_details": compact_details,
                 "evaluation_guidance": {
-                    "metrics": experiment_details.get(
-                        "metrics",
-                        [],
+                    "metrics": compact_details.get("metrics", []),
+                    "primary_metrics": compact_details.get(
+                        "primary_metrics", []
                     ),
-                    "metric_definitions": experiment_details.get(
-                        "metric_definitions",
-                        {},
+                    "metric_definitions": compact_details.get(
+                        "metric_definitions", {}
                     ),
-                    "reference_metrics": experiment_details.get(
-                        "reference_metrics",
-                        {},
+                    "reference_metrics": compact_details.get(
+                        "reference_metrics", {}
                     ),
                 },
             }
 
-            compact["sources"].append(
-                compact_source
-            )
+            compact["sources"].append(compact_source)
 
         return compact
 
@@ -1838,6 +1967,11 @@ Do NOT return explanations outside the JSON object.
             )
         )
 
+        prompt_metric_guidance = self._select_prompt_metric_guidance(
+            reference_metric_guidance,
+            specification.get("evaluation_metrics", []),
+        )
+
         compact_specification = {
             "dataset": specification.get(
                 "dataset",
@@ -1853,7 +1987,7 @@ Do NOT return explanations outside the JSON object.
             ),
             "selected_hypothesis": compact_hypothesis,
             "reference_experiment": compact_reference_experiment,
-            "evidence_metric_guidance": reference_metric_guidance,
+            "evidence_metric_guidance": prompt_metric_guidance,
             "experiment_design": specification.get(
                 "experiment_design",
                 {},
@@ -2346,8 +2480,13 @@ Do not return explanations or commentary.
         source: str,
     ) -> str:
         """
-        Normalize Python source when the LLM returns literal escaped
-        characters instead of normal Python source.
+        Normalize Python source when the model returns a JSON-escaped string
+        instead of plain Python source.
+
+        This function is intentionally conservative: valid Python must be left
+        alone. Converting escape sequences like ``\\n`` into real newlines inside
+        an existing Python source string literal is what creates invalid
+        ``f"...\n..."`` code, so we only decode a truly quoted-escaped payload.
         """
         if not isinstance(
             source,
@@ -2357,40 +2496,29 @@ Do not return explanations or commentary.
 
         source = source.strip()
 
-        has_literal_newlines = "\n" in source
-        has_escaped_newlines = "\\n" in source
-        has_escaped_quotes = '\\"' in source
+        if not source:
+            return source
 
-        looks_like_python = (
-            source.startswith("import ")
-            or source.startswith("from ")
-            or source.startswith("#")
-            or "import " in source[:500]
-            or "from " in source[:500]
-        )
+        try:
+            ast.parse(source)
+            return source
+        except SyntaxError:
+            pass
 
-        if looks_like_python and (
-            has_escaped_newlines
-            or has_escaped_quotes
-        ):
-            source = source.replace(
-                "\\r\\n",
-                "\n",
-            )
-            source = source.replace(
-                "\\n",
-                "\n",
-            )
-            source = source.replace(
-                "\\t",
-                "\t",
-            )
+        # Only decode a whole quoted payload that looks like JSON-escaped
+        # Python source, not an already valid Python file.
+        if len(source) >= 2 and source[0] == source[-1] and source[0] in {'"', "'"}:
+            try:
+                decoded = ast.literal_eval(source)
+            except (SyntaxError, ValueError):
+                decoded = None
 
-            # Convert escaped double quotes back to normal quotes.
-            source = source.replace(
-                '\\"',
-                '"',
-            )
+            if isinstance(decoded, str):
+                try:
+                    ast.parse(decoded)
+                    return decoded
+                except SyntaxError:
+                    pass
 
         return source
 
@@ -2763,30 +2891,38 @@ Do not return explanations or commentary.
             or ""
         ).lower()
 
-        for marker in cls.TRUNCATION_SYNTAX_MARKERS:
-            if marker in message:
-                return True
-
-        line_number = getattr(
-            error,
-            "lineno",
-            None,
+        # A syntax error on the final line is not enough evidence of
+        # truncation. Errors such as unexpected indent, invalid syntax,
+        # and line-continuation errors must go through repair instead.
+        return any(
+            marker in message
+            for marker in cls.TRUNCATION_SYNTAX_MARKERS
         )
 
-        if not isinstance(
-            line_number,
-            int,
-        ):
+    @classmethod
+    def _is_truncation_validation_error(
+        cls,
+        code: str,
+        validation_error: Exception,
+    ) -> bool:
+        """
+        Decide whether validation failure should use continuation.
+
+        Continuation is reserved for genuinely truncated Python. All other
+        syntax/design errors use the normal repair path.
+        """
+        if not isinstance(code, str) or not code.strip():
             return False
 
-        total_lines = len(
-            code.splitlines()
-        )
+        try:
+            ast.parse(code)
+        except SyntaxError as syntax_error:
+            return cls.syntax_error_is_truncation(
+                code,
+                syntax_error,
+            )
 
-        if total_lines < cls.MIN_TRUNCATION_LINES:
-            return False
-
-        return line_number >= total_lines - 1
+        return False
 
     @classmethod
     def longest_parsable_prefix(
@@ -2838,7 +2974,7 @@ Do not return explanations or commentary.
         Ask the model to finish an experiment that was cut off.
         """
         bounded_prefix = prefix[
-            -self.MAX_CONTINUATION_SOURCE_CHARS:
+            -self.MAX_CONTINUATION_TAIL_CHARS:
         ]
 
         return f"""
@@ -2953,9 +3089,12 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
                 temperature=0.0,
                 model=self.model,
                 system_prompt=self.CONTINUATION_SYSTEM_PROMPT,
-                max_tokens=_output_token_limit(
-                    "code_generation",
-                    self.DEFAULT_MAX_TOKENS,
+                max_tokens=max(
+                    self.CONTINUATION_MAX_TOKENS,
+                    _output_token_limit(
+                        "code_generation",
+                        self.DEFAULT_MAX_TOKENS,
+                    ),
                 ),
                 reasoning="off",
             )
@@ -3622,21 +3761,30 @@ Dataset:
             # ------------------------------------------------
 
             try:
-                self.validate_generated_response(
-                    generated
-                )
-
+                self.validate_generated_response(generated)
                 self.validate_experiment_design_compliance(
                     specification,
                     generated["pytorch_code"],
                 )
-
             except ValueError as code_error:
-                generated = self.recover_incomplete_generation(
-                    specification,
-                    generated,
+                if self._is_truncation_validation_error(
+                    generated.get("pytorch_code", ""),
                     code_error,
-                )
+                ):
+                    generated = self.recover_incomplete_generation(
+                        specification,
+                        generated,
+                        code_error,
+                    )
+                else:
+                    generated = self.repair_generated_code(
+                        specification,
+                        generated["pytorch_code"],
+                        {
+                            "success": False,
+                            "errors": [str(code_error)],
+                        },
+                    )
 
             # ------------------------------------------------
             # Preserve evidence-derived evaluation information
