@@ -135,15 +135,18 @@ class CodeGenerationAgent:
     DEFAULT_MAX_TOKENS = 5000
     REPAIR_MAX_TOKENS = 5000
 
-    MAX_REPAIR_SOURCE_CHARS = 50000
+    MAX_REPAIR_SOURCE_CHARS = 30000
     MAX_REPAIR_LOG_CHARS = 5000
+    MAX_NOOP_REPAIR_RETRIES = 1
 
     # A complete experiment can exceed a single response budget.
     # The agent continues the unfinished file instead of regenerating it.
     MAX_CONTINUATION_ATTEMPTS = 3
     MAX_CONTINUATION_REWIND_LINES = 400
-    MAX_CONTINUATION_SOURCE_CHARS = 50000
+    MAX_CONTINUATION_SOURCE_CHARS = 24000
+    MAX_CONTINUATION_TAIL_CHARS = 12000
     MIN_TRUNCATION_LINES = 40
+    CONTINUATION_MAX_TOKENS = 8000
 
     TRUNCATION_SYNTAX_MARKERS = (
         "unterminated string literal",
@@ -193,6 +196,8 @@ class CodeGenerationAgent:
         "do not generate that block again.\n"
         "The continuation must form valid Python when appended directly "
         "to the existing source.\n"
+        "Do NOT use backslash-based line continuation; use parentheses "
+        "for multi-line expressions.\n"
         "Do NOT add Markdown fences, JSON, explanations, commentary, or "
         "natural-language text.\n"
         "The completed program must remain compatible with the "
@@ -230,6 +235,8 @@ class CodeGenerationAgent:
         "Do not fabricate measurements using random sampling.\n"
         "Only fix syntax errors, incomplete code, missing required "
         "sections, or genuine implementation errors.\n"
+        "Do NOT use backslash-based line continuation; use parentheses "
+        "for multi-line expressions.\n"
         "The repaired program must remain compatible with the "
         "ExperimentRunner artifact contract.\n"
         "Return the complete corrected Python source code only.\n"
@@ -639,15 +646,15 @@ class CodeGenerationAgent:
         Important:
             - `metrics` describes metrics evaluated/discussed by the paper.
             - `metric_definitions` describes meaning, units, and direction.
-            - `reference_metrics` contains only explicitly extracted
-              numerical paper results.
-            - No reference result is copied into generated experiment
-              results.
+            - `reference_metrics` contains explicitly extracted paper results together with their semantic value types.
+            - `reference_conditions` contains experimental configuration/setup information and is not itself an evaluation result.
+            - No reference result is copied into generated experiment results.
         """
         result: Dict[str, Any] = {
             "metrics": [],
             "metric_definitions": {},
             "reference_metrics": {},
+            "reference_conditions": {},
         }
 
         if not isinstance(
@@ -764,7 +771,86 @@ class CodeGenerationAgent:
                             "reference_metrics"
                         ][name] = value
 
+            reference_conditions = details.get(
+                "reference_conditions",
+                {},
+            )
+
+            if isinstance(reference_conditions, dict):
+                for name, value in reference_conditions.items():
+                    if not isinstance(name, str):
+                        continue
+
+                    if name not in result["reference_conditions"]:
+                        result["reference_conditions"][name] = value
+
         return result
+
+    @staticmethod
+    def _select_prompt_metric_guidance(
+        guidance: Dict[str, Any],
+        required_metrics: Any,
+    ) -> Dict[str, Any]:
+        """
+        Keep only evidence metrics relevant to the metrics explicitly
+        requested by the current experiment specification.
+
+        Paper reference values remain comparison-only.
+        """
+        if not isinstance(guidance, dict):
+            return {}
+
+        requested = set()
+        if isinstance(required_metrics, list):
+            for metric in required_metrics:
+                if isinstance(metric, str) and metric.strip():
+                    requested.add(metric.strip().lower())
+
+        if not requested:
+            return {
+                "metrics": [],
+                "metric_definitions": {},
+                "reference_metrics": {},
+                "reference_conditions": {},
+            }
+
+        def matches(name: str) -> bool:
+            normalized = name.strip().lower()
+            normalized_compact = normalized.replace(" ", "_")
+            return any(
+                normalized == item
+                or normalized_compact == item.replace(" ", "_")
+                for item in requested
+            )
+
+        metrics = [
+            metric
+            for metric in guidance.get("metrics", [])
+            if isinstance(metric, str) and matches(metric)
+        ]
+
+        definitions = {
+            name: value
+            for name, value in (
+                guidance.get("metric_definitions", {}) or {}
+            ).items()
+            if isinstance(name, str) and matches(name)
+        }
+
+        reference_metrics = {
+            name: value
+            for name, value in (
+                guidance.get("reference_metrics", {}) or {}
+            ).items()
+            if isinstance(name, str) and matches(name)
+        }
+
+        return {
+            "metrics": metrics,
+            "metric_definitions": definitions,
+            "reference_metrics": reference_metrics,
+            "reference_conditions": {},
+        }
 
     # ========================================================
     # Prompt Construction
@@ -909,61 +995,222 @@ The reference model/approach should be preserved as reference
 metadata for downstream ExperimentComparator.
 
 ============================================================
+REFERENCE METRICS VS REFERENCE CONDITIONS
+============================================================
+
+The reference experiment may contain two different types of
+information.
+
+1. REFERENCE METRICS
+
+`reference_metrics` contains quantities reported by the supporting
+paper that may be used for downstream scientific comparison.
+
+Reference metrics may represent:
+
+- measured_value
+- upper_bound
+- lower_bound
+- range
+- qualitative_result
+- unknown
+
+Reference metrics MUST preserve their semantic structure, including
+when available:
+
+- value
+- unit
+- value_type
+- relation
+- source_text
+
+Do not flatten a structured reference metric into a plain number.
+
+For example:
+
+{
+    "value": 80,
+    "unit": "ms",
+    "value_type": "upper_bound",
+    "relation": "less_than"
+}
+
+means:
+
+    latency < 80 ms
+
+It does NOT mean:
+
+    latency = 80 ms
+
+
+2. REFERENCE CONDITIONS
+
+`reference_conditions` describes the conditions under which the
+reference experiment was performed.
+
+Examples include:
+
+- number of users
+- number of User Equipment (UEs)
+- batch size
+- number of epochs
+- hardware
+- traffic load
+- network configuration
+- testbed configuration
+- dataset size
+- deployment configuration
+
+Reference conditions are NOT automatically evaluation metrics.
+
+For example:
+
+{
+    "value": 500,
+    "unit": "UEs",
+    "value_type": "configuration"
+}
+
+means that the reference experiment was conducted with 500 UEs.
+
+It does NOT mean that:
+
+    num_user_equipment = 500
+
+is an automated-experiment performance measurement.
+
+Reference conditions may be used to understand or reproduce the
+reference setup when the local environment supports them.
+
+Do not fabricate unavailable infrastructure, network load, users,
+hardware, or measurements merely to reproduce a reference condition.
+
+Reference metrics and reference conditions MUST remain separate from
+the automated experiment's measured results.
+
+============================================================
 4. COMPARABLE EVALUATION METRICS
 ============================================================
 
-The evaluation metrics should be selected to support a fair
-comparison between the reference paper and the Rank #1 hypothesis
-experiment.
+The evaluation metrics should be selected to support a scientifically
+meaningful comparison between the reference paper and the Rank #1
+hypothesis experiment where such comparison is possible.
+
+The selected Rank #1 hypothesis remains authoritative for the
+automated experiment.
 
 When the supporting paper reports explicit evaluation metrics:
 
-1. Extract the paper's metrics from `evidence_metric_guidance`.
+1. Use the paper's `metrics`, `metric_definitions`, and structured
+   `reference_metrics` from the evidence-derived reference experiment.
 
-2. Prefer the SAME metrics for the Rank #1 experiment when they are
+2. Use `evidence_metric_guidance` as additional guidance when
+   determining which metrics are scientifically compatible with the
+   Rank #1 hypothesis.
+
+3. Prefer the SAME metrics for the Rank #1 experiment when they are
    scientifically compatible with the Rank #1 hypothesis.
 
-3. Preserve the original metric definition.
+4. Preserve the original metric definition.
 
-4. Preserve the original unit.
+5. Preserve the original unit.
 
-5. Preserve the direction of improvement when known.
+6. Preserve the direction of improvement when known.
 
-6. Calculate the metric independently from the automated experiment.
+7. Preserve the semantic type of every reference value.
 
-7. NEVER copy the paper's numerical result into the experiment.
+   A reference value may be:
 
-8. NEVER use the paper's numerical result as simulated input to
-   produce the experiment result.
+   - measured_value
+   - upper_bound
+   - lower_bound
+   - range
+   - qualitative_result
+   - unknown
 
-9. NEVER estimate the experiment result from the paper result.
+8. Preserve the relation associated with a reference value when known.
 
-10. If the metric cannot actually be measured in the available
-    environment, report it as:
+   Possible relations include:
 
-        unavailable
+   - exact
+   - less_than
+   - less_than_or_equal
+   - greater_than
+   - greater_than_or_equal
+   - range
+   - none
+
+9. A reference upper or lower bound is a comparison constraint,
+   NOT an exact experiment result.
+
+   Example:
+
+       paper:
+       latency < 80 ms
+
+       means:
+
+       value = 80
+       unit = ms
+       value_type = upper_bound
+       relation = less_than
+
+       It does NOT mean:
+
+       experiment latency = 80 ms
+
+10. A reference range must remain a range.
+
+    Do not replace a range with its midpoint, minimum, maximum,
+    or another invented single value.
+
+11. A qualitative reference result must remain qualitative.
+
+    Do not convert qualitative statements into invented numerical
+    measurements.
+
+12. Calculate every automated-experiment metric independently from
+    the actual experiment execution.
+
+13. NEVER copy a reference-paper numerical result into the automated
+    experiment result.
+
+14. NEVER use a reference-paper numerical result as:
+
+    - simulated input
+    - calibration value
+    - seed value
+    - target value
+    - hard-coded measurement
+    - generated measurement
+    - random sampling boundary
+
+15. NEVER estimate an automated-experiment result from a paper result.
+
+16. Every reported automated-experiment measurement must originate
+    from an operation actually performed by the generated experiment.
+
+17. If the local environment cannot independently perform the
+    measurement required for a reference metric, report that metric
+    as:
+
+    unavailable
 
     or:
 
-        not_directly_comparable
+    not_directly_comparable
 
     together with the reason.
 
-11. A proxy may be used only when scientifically justified and it
-    MUST be explicitly labelled as a proxy.
+18. A proxy may be used only when scientifically justified and MUST
+    be explicitly labelled as a proxy.
 
-12. A proxy must NOT be presented as equivalent to the paper's
-    original measurement.
+19. A proxy MUST NOT be presented as equivalent to the original
+    reference measurement.
 
-The objective is:
-
-    SAME METRIC
-        +
-    SAME SCIENTIFIC DEFINITION
-        +
-    INDEPENDENT MEASUREMENT
-        =
-    FAIR COMPARISON
+20. Reference metrics are comparison guidance only. They must remain
+    separate from the automated experiment's measured results.
 
 Do not force accuracy, precision, recall, or F1 merely because the
 available dataset is a classification dataset.
@@ -1475,90 +1722,74 @@ Do NOT return explanations outside the JSON object.
         reference_experiment: Any,
     ) -> Dict[str, Any]:
         """
-        Reduce the reference experiment to the scientifically relevant
-        information needed for code generation.
+        Reduce PaperReader output to the small, structured subset needed
+        for code generation.
 
-        Large extracted text fields are intentionally excluded because
-        the structured experiment details already contain the relevant
-        methodology, metrics, configurations, and reported results.
+        Large extracted text, raw results prose, and provenance blobs are
+        deliberately excluded. Reference results remain comparison-only.
         """
-        if not isinstance(
-            reference_experiment,
-            dict,
-        ):
+        if not isinstance(reference_experiment, dict):
             return {}
 
         compact: Dict[str, Any] = {
-            "available": reference_experiment.get(
-                "available",
-                True,
-            ),
-            "source_count": reference_experiment.get(
-                "source_count",
-                0,
-            ),
+            "available": reference_experiment.get("available", True),
+            "source_count": reference_experiment.get("source_count", 0),
             "sources": [],
         }
 
-        sources = reference_experiment.get(
-            "sources",
-            [],
-        )
-
-        if not isinstance(
-            sources,
-            list,
-        ):
+        sources = reference_experiment.get("sources", [])
+        if not isinstance(sources, list):
             return compact
 
+        allowed_detail_keys = (
+            "experiment_type",
+            "task",
+            "models",
+            "datasets",
+            "metrics",
+            "metric_definitions",
+            "reference_metrics",
+            "reference_conditions",
+            "hyperparameters",
+            "training_details",
+            "experimental_setup",
+            "methodology",
+            "evaluation",
+            "hardware",
+            "deployment",
+        )
+
         for source in sources:
-            if not isinstance(
-                source,
-                dict,
-            ):
+            if not isinstance(source, dict):
                 continue
 
-            experiment_details = source.get(
-                "experiment_details",
-                {},
-            )
+            details = source.get("experiment_details", {})
+            if not isinstance(details, dict):
+                details = {}
 
-            if not isinstance(
-                experiment_details,
-                dict,
-            ):
-                experiment_details = {}
+            compact_details: Dict[str, Any] = {}
+            for key in allowed_detail_keys:
+                value = details.get(key)
+                if value not in (None, "", [], {}):
+                    compact_details[key] = value
 
             compact_source = {
-                "source_url": source.get(
-                    "source_url"
-                ),
-                "source_id": source.get(
-                    "source_id"
-                ),
-                "source_type": source.get(
-                    "source_type"
-                ),
-                "experiment_details": experiment_details,
+                "source_url": source.get("source_url"),
+                "source_id": source.get("source_id"),
+                "source_type": source.get("source_type"),
+                "experiment_details": compact_details,
                 "evaluation_guidance": {
-                    "metrics": experiment_details.get(
-                        "metrics",
-                        [],
+                    "metrics": compact_details.get("metrics", []),
+                    "metric_definitions": compact_details.get(
+                        "metric_definitions", {}
                     ),
-                    "metric_definitions": experiment_details.get(
-                        "metric_definitions",
-                        {},
-                    ),
-                    "reference_metrics": experiment_details.get(
-                        "reference_metrics",
-                        {},
+                    "reference_metrics": compact_details.get(
+                        "reference_metrics", {}
                     ),
                 },
             }
 
-            compact["sources"].append(
-                compact_source
-            )
+            compact["sources"].append(compact_source)
 
         return compact
 
@@ -1663,6 +1894,11 @@ Do NOT return explanations outside the JSON object.
             )
         )
 
+        prompt_metric_guidance = self._select_prompt_metric_guidance(
+            reference_metric_guidance,
+            specification.get("evaluation_metrics", []),
+        )
+
         compact_specification = {
             "dataset": specification.get(
                 "dataset",
@@ -1678,7 +1914,7 @@ Do NOT return explanations outside the JSON object.
             ),
             "selected_hypothesis": compact_hypothesis,
             "reference_experiment": compact_reference_experiment,
-            "evidence_metric_guidance": reference_metric_guidance,
+            "evidence_metric_guidance": prompt_metric_guidance,
             "experiment_design": specification.get(
                 "experiment_design",
                 {},
@@ -2137,30 +2373,16 @@ Do not return explanations or commentary.
         if fenced is not None:
             return fenced
 
-        source_start = response.find(
-            "import torch"
+        import_statement = re.search(
+            r"(?m)^[ \t]*(?:from\s+[\w.]+\s+import\b|import\s+[\w.*]+)",
+            response,
         )
 
-        if source_start == -1:
-            source_start = response.find(
-                "from torch"
-            )
-
-        if source_start == -1:
-            source_start = response.find(
-                "import os"
-            )
-
-        if source_start == -1:
-            source_start = response.find(
-                "import "
-            )
-
-        if source_start == -1:
+        if import_statement is None:
             return None
 
         code = response[
-            source_start:
+            import_statement.start():
         ].strip()
 
         if not code:
@@ -2185,8 +2407,13 @@ Do not return explanations or commentary.
         source: str,
     ) -> str:
         """
-        Normalize Python source when the LLM returns literal escaped
-        characters instead of normal Python source.
+        Normalize Python source when the model returns a JSON-escaped string
+        instead of plain Python source.
+
+        This function is intentionally conservative: valid Python must be left
+        alone. Converting escape sequences like ``\\n`` into real newlines inside
+        an existing Python source string literal is what creates invalid
+        ``f"...\n..."`` code, so we only decode a truly quoted-escaped payload.
         """
         if not isinstance(
             source,
@@ -2196,40 +2423,29 @@ Do not return explanations or commentary.
 
         source = source.strip()
 
-        has_literal_newlines = "\n" in source
-        has_escaped_newlines = "\\n" in source
-        has_escaped_quotes = '\\"' in source
+        if not source:
+            return source
 
-        looks_like_python = (
-            source.startswith("import ")
-            or source.startswith("from ")
-            or source.startswith("#")
-            or "import " in source[:500]
-            or "from " in source[:500]
-        )
+        try:
+            ast.parse(source)
+            return source
+        except SyntaxError:
+            pass
 
-        if looks_like_python and (
-            has_escaped_newlines
-            or has_escaped_quotes
-        ):
-            source = source.replace(
-                "\\r\\n",
-                "\n",
-            )
-            source = source.replace(
-                "\\n",
-                "\n",
-            )
-            source = source.replace(
-                "\\t",
-                "\t",
-            )
+        # Only decode a whole quoted payload that looks like JSON-escaped
+        # Python source, not an already valid Python file.
+        if len(source) >= 2 and source[0] == source[-1] and source[0] in {'"', "'"}:
+            try:
+                decoded = ast.literal_eval(source)
+            except (SyntaxError, ValueError):
+                decoded = None
 
-            # Convert escaped double quotes back to normal quotes.
-            source = source.replace(
-                '\\"',
-                '"',
-            )
+            if isinstance(decoded, str):
+                try:
+                    ast.parse(decoded)
+                    return decoded
+                except SyntaxError:
+                    pass
 
         return source
 
@@ -2397,11 +2613,22 @@ Do not return explanations or commentary.
             )
         )
 
-        checkpoint_required = bool(
-            experiment_design.get(
-                "checkpoint_required",
-                False,
-            )
+        code_generation_requirements = specification.get(
+            "code_generation_requirements",
+            {},
+        )
+
+        if not isinstance(code_generation_requirements, dict):
+            code_generation_requirements = {}
+
+        checkpoint_setting = experiment_design.get(
+            "checkpoint_required",
+            code_generation_requirements.get("include_checkpoint"),
+        )
+        checkpoint_required = (
+            None
+            if checkpoint_setting is None
+            else bool(checkpoint_setting)
         )
 
         training_history_required = bool(
@@ -2453,7 +2680,7 @@ Do not return explanations or commentary.
         # Checkpoint constraint
         # ----------------------------------------------------
 
-        if not checkpoint_required:
+        if checkpoint_required is False:
             checkpoint_patterns = (
                 "best_model.pt",
                 "torch.save(",
@@ -2591,30 +2818,38 @@ Do not return explanations or commentary.
             or ""
         ).lower()
 
-        for marker in cls.TRUNCATION_SYNTAX_MARKERS:
-            if marker in message:
-                return True
-
-        line_number = getattr(
-            error,
-            "lineno",
-            None,
+        # A syntax error on the final line is not enough evidence of
+        # truncation. Errors such as unexpected indent, invalid syntax,
+        # and line-continuation errors must go through repair instead.
+        return any(
+            marker in message
+            for marker in cls.TRUNCATION_SYNTAX_MARKERS
         )
 
-        if not isinstance(
-            line_number,
-            int,
-        ):
+    @classmethod
+    def _is_truncation_validation_error(
+        cls,
+        code: str,
+        validation_error: Exception,
+    ) -> bool:
+        """
+        Decide whether validation failure should use continuation.
+
+        Continuation is reserved for genuinely truncated Python. All other
+        syntax/design errors use the normal repair path.
+        """
+        if not isinstance(code, str) or not code.strip():
             return False
 
-        total_lines = len(
-            code.splitlines()
-        )
+        try:
+            ast.parse(code)
+        except SyntaxError as syntax_error:
+            return cls.syntax_error_is_truncation(
+                code,
+                syntax_error,
+            )
 
-        if total_lines < cls.MIN_TRUNCATION_LINES:
-            return False
-
-        return line_number >= total_lines - 1
+        return False
 
     @classmethod
     def longest_parsable_prefix(
@@ -2666,7 +2901,7 @@ Do not return explanations or commentary.
         Ask the model to finish an experiment that was cut off.
         """
         bounded_prefix = prefix[
-            -self.MAX_CONTINUATION_SOURCE_CHARS:
+            -self.MAX_CONTINUATION_TAIL_CHARS:
         ]
 
         return f"""
@@ -2781,9 +3016,12 @@ CONTINUE THE FILE FROM THE NEXT CHARACTER
                 temperature=0.0,
                 model=self.model,
                 system_prompt=self.CONTINUATION_SYSTEM_PROMPT,
-                max_tokens=_output_token_limit(
-                    "code_generation",
-                    self.DEFAULT_MAX_TOKENS,
+                max_tokens=max(
+                    self.CONTINUATION_MAX_TOKENS,
+                    _output_token_limit(
+                        "code_generation",
+                        self.DEFAULT_MAX_TOKENS,
+                    ),
                 ),
                 reasoning="off",
             )
@@ -3450,21 +3688,30 @@ Dataset:
             # ------------------------------------------------
 
             try:
-                self.validate_generated_response(
-                    generated
-                )
-
+                self.validate_generated_response(generated)
                 self.validate_experiment_design_compliance(
                     specification,
                     generated["pytorch_code"],
                 )
-
             except ValueError as code_error:
-                generated = self.recover_incomplete_generation(
-                    specification,
-                    generated,
+                if self._is_truncation_validation_error(
+                    generated.get("pytorch_code", ""),
                     code_error,
-                )
+                ):
+                    generated = self.recover_incomplete_generation(
+                        specification,
+                        generated,
+                        code_error,
+                    )
+                else:
+                    generated = self.repair_generated_code(
+                        specification,
+                        generated["pytorch_code"],
+                        {
+                            "success": False,
+                            "errors": [str(code_error)],
+                        },
+                    )
 
             # ------------------------------------------------
             # Preserve evidence-derived evaluation information
@@ -3508,6 +3755,14 @@ Dataset:
                     ),
                     "evidence_metric_guidance": (
                         reference_metric_guidance
+                    ),
+                    "experiment_design": specification.get(
+                        "experiment_design",
+                        {},
+                    ),
+                    "code_generation_requirements": specification.get(
+                        "code_generation_requirements",
+                        {},
                     ),
                     "reference_experiment": (
                         self._compact_reference_experiment(
@@ -3700,6 +3955,10 @@ Dataset:
                 "code_generation_requirements",
                 {},
             ),
+            "repair_requirements": specification.get(
+                "repair_requirements",
+                [],
+            ),
             "evaluation_metrics": specification.get(
                 "evaluation_metrics",
                 [],
@@ -3784,7 +4043,9 @@ IMPORTANT:
     experiment.
 19. Preserve train/validation/test evaluation design ONLY when it is
     applicable to the selected experiment type.
-20. Preserve checkpoint generation when model training requires it.
+20. Follow experiment_design.checkpoint_required exactly. When it is false,
+    remove checkpoint saving and references, including torch.save, best_model.pt,
+    and checkpoint artifacts. When true, preserve required checkpoint behavior.
 21. Preserve training-history generation when training history is
     scientifically applicable.
 22. Preserve required visualization generation when scientifically
@@ -3856,115 +4117,86 @@ The repaired experiment must calculate its own results.
 Return ONLY the complete corrected Python source code.
 """.strip()
 
-        # ----------------------------------------------------
-        # Call LLM.
-        # ----------------------------------------------------
+        repair_prompt += """
 
-        response = _call_llm(
-            repair_prompt,
-            temperature=0.0,
-            model=self.model,
-            system_prompt=self.REPAIR_SYSTEM_PROMPT,
-            max_tokens=_output_token_limit(
-                "code_generation",
-                self.REPAIR_MAX_TOKENS,
-            ),
-            reasoning="medium",
-        )
+TRACEBACK-DRIVEN IMPORT CHECK
+Compare every traceback-reported missing name or module against the complete
+source. Preserve imports and definitions that are already present. Add an
+import only when it resolves the reported failure and is an appropriate
+dependency for the experiment. Do not remove code that depends on a missing
+name or install/substitute an unrelated package.
+"""
 
-        if not isinstance(
-            response,
-            str,
-        ):
-            response = str(
-                response
+        repaired: Dict[str, Any] = {}
+
+        def request_repair_candidate(prompt: str) -> str:
+            nonlocal repaired
+
+            response = _call_llm(
+                prompt,
+                temperature=0.0,
+                model=self.model,
+                system_prompt=self.REPAIR_SYSTEM_PROMPT,
+                max_tokens=_output_token_limit(
+                    "code_generation",
+                    self.REPAIR_MAX_TOKENS,
+                ),
+                reasoning="medium",
             )
 
-        if response.startswith(
-            "Error:"
-        ):
-            raise RuntimeError(
-                response
-            )
+            if not isinstance(response, str):
+                response = str(response)
 
-        # ----------------------------------------------------
-        # Extract Python source.
-        # ----------------------------------------------------
+            if response.startswith("Error:"):
+                raise RuntimeError(response)
 
-        repaired = self.extract_python_source(
-            response
-        )
+            repaired = self.extract_python_source(response)
+            if repaired is None:
+                try:
+                    repaired = self.extract_json(response)
+                except ValueError as error:
+                    raise ValueError(
+                        "LLM repair response did not contain "
+                        "valid Python source code."
+                    ) from error
 
-        if repaired is None:
-            try:
-                repaired = self.extract_json(
-                    response
+            repaired_source = repaired.get("pytorch_code")
+            if isinstance(repaired_source, str) and repaired_source.strip():
+                repaired["pytorch_code"] = (
+                    self._normalise_escaped_python_source(repaired_source)
                 )
-            except ValueError as error:
-                raise ValueError(
-                    "LLM repair response did not contain "
-                    "valid Python source code."
-                ) from error
 
-        # ----------------------------------------------------
-        # Complete a repair that stopped at token limit.
-        # ----------------------------------------------------
-
-        repaired_source = repaired.get(
-            "pytorch_code"
-        )
-
-        if isinstance(
-            repaired_source,
-            str,
-        ) and repaired_source.strip():
-
-            repaired_source = (
-                self._normalise_escaped_python_source(
-                    repaired_source
-                )
+            self.validate_generated_response(repaired)
+            self.validate_experiment_design_compliance(
+                specification,
+                repaired["pytorch_code"],
             )
 
-            repaired[
-                "pytorch_code"
-            ] = repaired_source
+            repaired_code = repaired.get("pytorch_code")
+            if not isinstance(repaired_code, str) or not repaired_code.strip():
+                raise ValueError("LLM repair returned empty Python code.")
 
-        # ----------------------------------------------------
-        # Validate repaired experiment.
-        # ----------------------------------------------------
+            return repaired_code
 
-        self.validate_generated_response(
-            repaired
-        )
-        
-        self.validate_experiment_design_compliance(
-            specification,
-            repaired["pytorch_code"],
-        )
+        repaired_code = ""
+        for repair_attempt in range(self.MAX_NOOP_REPAIR_RETRIES + 1):
+            prompt = repair_prompt
+            if repair_attempt:
+                prompt += """
 
-        repaired_code = repaired.get(
-            "pytorch_code"
-        )
+NO-OP RETRY FEEDBACK
+The previous repair response was identical to the current source and was
+rejected. Re-examine the execution result and traceback above, identify the
+specific cause, and make the smallest concrete source change that addresses
+it. Do not make arbitrary changes. Return the complete corrected Python file.
+"""
 
-        if not isinstance(
-            repaired_code,
-            str,
-        ) or not repaired_code.strip():
+            repaired_code = request_repair_candidate(prompt)
+            if repaired_code.strip() != generated_code.strip():
+                break
+        else:
             raise ValueError(
-                "LLM repair returned empty Python code."
-            )
-
-        # ----------------------------------------------------
-        # Prevent useless repair loops.
-        # ----------------------------------------------------
-
-        if (
-            repaired_code.strip()
-            == generated_code.strip()
-        ):
-            raise ValueError(
-                "LLM returned the same code without making "
-                "a repair."
+                "LLM returned unchanged code after the bounded no-op repair retry."
             )
 
         # ----------------------------------------------------

@@ -430,6 +430,14 @@ def format_experiment_results_html(
     if not isinstance(metrics, dict):
         metrics = {}
 
+    metric_definitions = (
+        outputs.get("metric_definitions", {})
+        if isinstance(outputs, dict)
+        else {}
+    )
+    if not isinstance(metric_definitions, dict):
+        metric_definitions = {}
+
     def format_metric(value: Any) -> str:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return f"{value:.2f}"
@@ -444,25 +452,25 @@ def format_experiment_results_html(
 
     hypothesis_id = selected.get("hypothesis_id") or "Unknown"
 
-    accuracy = metrics.get(
-        "accuracy",
-        "Not available",
-    )
+    metric_rows = []
+    for name, value in metrics.items():
+        definition = metric_definitions.get(name, {})
+        unit = definition.get("unit") if isinstance(definition, dict) else None
+        displayed_value = format_metric(value)
+        if unit:
+            displayed_value = f"{displayed_value} {unit}"
+        display_name = str(name).replace("_", " ").title()
+        metric_rows.append(
+            "<tr>"
+            f"<td>{html_lib.escape(display_name)}</td>"
+            f"<td>{html_lib.escape(displayed_value)}</td>"
+            "</tr>"
+        )
 
-    precision = metrics.get(
-        "precision_weighted",
-        "Not available",
-    )
-
-    recall = metrics.get(
-        "recall_weighted",
-        "Not available",
-    )
-
-    f1_score = metrics.get(
-        "f1_weighted",
-        "Not available",
-    )
+    if not metric_rows:
+        metric_rows.append(
+            '<tr><td colspan="2">No experiment metrics were produced.</td></tr>'
+        )
 
     comparison_html = ""
 
@@ -497,12 +505,10 @@ def format_experiment_results_html(
 
         <h3>📊 Evaluation Metrics</h3>
 
-        <ul>
-            <li><strong>Accuracy:</strong> {html_lib.escape(format_metric(accuracy))}</li>
-            <li><strong>Weighted Precision:</strong> {html_lib.escape(format_metric(precision))}</li>
-            <li><strong>Weighted Recall:</strong> {html_lib.escape(format_metric(recall))}</li>
-            <li><strong>Weighted F1 Score:</strong> {html_lib.escape(format_metric(f1_score))}</li>
-        </ul>
+        <table>
+            <thead><tr><th>Metric</th><th>Experiment result</th></tr></thead>
+            <tbody>{''.join(metric_rows)}</tbody>
+        </table>
 
         <p>
             Generated code, checkpoints, metrics,
@@ -595,127 +601,156 @@ def format_comparison_html(
     if not isinstance(experiment_metrics, dict):
         experiment_metrics = {}
 
-    def format_metric(value: Any) -> str:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return f"{value:.2%}"
+    primary_metrics = set()
+    reference_experiment = comparison_result.get("reference_experiment", {})
+    if isinstance(reference_experiment, dict):
+        sources = reference_experiment.get("sources", [])
+        if isinstance(sources, list):
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                details = source.get("experiment_details", {})
+                if not isinstance(details, dict):
+                    continue
+                source_primary_metrics = details.get("primary_metrics", [])
+                if isinstance(source_primary_metrics, str):
+                    source_primary_metrics = [source_primary_metrics]
+                if isinstance(source_primary_metrics, list):
+                    primary_metrics.update(
+                        re.sub(r"[^a-z0-9]+", "_", str(metric).lower()).strip("_")
+                        for metric in source_primary_metrics
+                        if isinstance(metric, str) and metric.strip()
+                    )
 
-        return "Not available"
+    primary_metric_display = ", ".join(sorted(primary_metrics))
+
+    metric_comparison = comparison_result.get("metric_comparison", {})
+    comparison_metrics = (
+        metric_comparison.get("metrics", {})
+        if isinstance(metric_comparison, dict)
+        else {}
+    )
+    if not isinstance(comparison_metrics, dict):
+        comparison_metrics = {}
+
+    metric_names = sorted(
+        comparison_metrics
+        or set(paper_metrics).union(experiment_metrics)
+    )
+
+    def format_metric_value(value: Any, unit: Any = None, percentage: bool = False) -> str:
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return "Not available" if value is None else html_lib.escape(str(value))
+
+        number = float(value)
+        if percentage:
+            if abs(number) <= 1:
+                number *= 100
+            return f"{number:.2f}%"
+
+        formatted = f"{number:.4g}"
+        return f"{formatted} {unit}" if unit else formatted
+
+    def format_reference(value: Any, record: Dict[str, Any], unit: Any) -> str:
+        value_type = str(record.get("reference_value_type", "measured_value")).lower()
+        relation = str(record.get("reference_relation", "exact")).lower()
+        percentage = unit in {"%", "percent", "percentage", "percentage_point", "percentage_points"}
+        formatted = format_metric_value(value, unit, percentage)
+        if value_type == "upper_bound":
+            prefix = {"less_than": "< ", "less_than_or_equal": "<= "}.get(relation, "<= ")
+            return f"{prefix}{formatted}"
+        if value_type == "lower_bound":
+            prefix = {"greater_than": "> ", "greater_than_or_equal": ">= "}.get(relation, ">= ")
+            return f"{prefix}{formatted}"
+        return formatted
+
+    model_rows = []
+    for label, value in (
+        ("Published model/system", comparability.get("paper_model")),
+        ("Automated experiment model", comparability.get("experiment_model")),
+        ("Published dataset/testbed", comparability.get("paper_dataset")),
+        ("Experiment dataset", comparability.get("experiment_dataset")),
+    ):
+        if value:
+            model_rows.append(
+                f"<p><strong>{html_lib.escape(label)}:</strong> "
+                f"{html_lib.escape(str(value))}</p>"
+            )
+
+    comparison_rows = []
+    for name in metric_names:
+        record = comparison_metrics.get(name, {})
+        if not isinstance(record, dict):
+            record = {}
+
+        unit = record.get("reference_unit") or record.get("unit")
+        percentage = record.get("difference_percentage_points") is not None or unit in {
+            "%", "percent", "percentage", "percentage_point", "percentage_points"
+        }
+        paper_value = record.get("paper", paper_metrics.get(name))
+        experiment_value = record.get("experiment", experiment_metrics.get(name))
+        paper_text = format_reference(paper_value, record, unit)
+        experiment_text = format_metric_value(experiment_value, unit, percentage)
+
+        difference_pp = record.get("difference_percentage_points")
+        difference = record.get("difference")
+        value_type = str(record.get("reference_value_type", "measured_value")).lower()
+        if difference_pp is not None:
+            difference_text = f"{float(difference_pp):+.2f} pp"
+        elif value_type != "measured_value":
+            difference_text = record.get("comparison_interpretation") or "Compared with reported constraint"
+        elif difference is not None:
+            difference_text = format_metric_value(difference, unit, percentage)
+            if percentage:
+                difference_text = f"{float(difference) * 100:+.2f} pp"
+            elif float(difference) > 0:
+                difference_text = f"+{difference_text}"
+        else:
+            difference_text = "Not comparable"
+
+        normalized_name = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(name).lower(),
+        ).strip("_")
+        display_name = str(name).replace("_", " ").title()
+        if normalized_name in primary_metrics:
+            display_name += " (paper primary)"
+
+        comparison_rows.append(
+            "<tr>"
+            f"<td>{html_lib.escape(display_name)}</td>"
+            f"<td>{paper_text}</td>"
+            f"<td>{experiment_text}</td>"
+            f"<td>{html_lib.escape(str(difference_text))}</td>"
+            "</tr>"
+        )
+
+    if not comparison_rows:
+        comparison_rows.append(
+            '<tr><td colspan="4">No shared, comparable numerical metrics were available.</td></tr>'
+        )
 
     return f"""
-    <div style="
-        margin-top: 20px;
-        padding: 20px;
-        border: 2px solid #6f42c1;
-        border-radius: 8px;
-    ">
-
-        <h2>📊 Paper vs Automated Experiment</h2>
-
-        <h3>
-            Status:
-            {html_lib.escape(status_label)}
-        </h3>
-
-        <div style="
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        ">
-
-            <div style="
-                padding: 15px;
-                border: 1px solid #ccc;
-                border-radius: 8px;
-            ">
-                <h3>📄 Rank #1 / Published Evidence</h3>
-
-                <p>
-                    <strong>Accuracy:</strong>
-                    {html_lib.escape(
-                        format_metric(paper_metrics.get("accuracy"))
-                    )}
-                </p>
-
-                <p>
-                    <strong>Weighted Precision:</strong>
-                    {html_lib.escape(
-                        format_metric(
-                            paper_metrics.get("precision_weighted")
-                        )
-                    )}
-                </p>
-
-                <p>
-                    <strong>Weighted Recall:</strong>
-                    {html_lib.escape(
-                        format_metric(
-                            paper_metrics.get("recall_weighted")
-                        )
-                    )}
-                </p>
-
-                <p>
-                    <strong>Weighted F1:</strong>
-                    {html_lib.escape(
-                        format_metric(
-                            paper_metrics.get("f1_weighted")
-                        )
-                    )}
-                </p>
-            </div>
-
-            <div style="
-                padding: 15px;
-                border: 1px solid #ccc;
-                border-radius: 8px;
-            ">
-                <h3>🧪 Automated Experiment</h3>
-
-                <p>
-                    <strong>Accuracy:</strong>
-                    {html_lib.escape(
-                        format_metric(experiment_metrics.get("accuracy"))
-                    )}
-                </p>
-
-                <p>
-                    <strong>Weighted Precision:</strong>
-                    {html_lib.escape(
-                        format_metric(
-                            experiment_metrics.get("precision_weighted")
-                        )
-                    )}
-                </p>
-
-                <p>
-                    <strong>Weighted Recall:</strong>
-                    {html_lib.escape(
-                        format_metric(
-                            experiment_metrics.get("recall_weighted")
-                        )
-                    )}
-                </p>
-
-                <p>
-                    <strong>Weighted F1:</strong>
-                    {html_lib.escape(
-                        format_metric(
-                            experiment_metrics.get("f1_weighted")
-                        )
-                    )}
-                </p>
-            </div>
-
-        </div>
-
-        <hr>
-
-        <h3>📝 Comparison Conclusion</h3>
-
-        <p>
-            {html_lib.escape(str(conclusion))}
-        </p>
-
+    <div style="margin-top: 20px; padding: 20px; border: 2px solid #6f42c1; border-radius: 8px;">
+        <h2>Paper vs Automated Experiment</h2>
+        <p><strong>Status:</strong> {html_lib.escape(status_label)}</p>
+        {f'<p><strong>Paper-declared primary metrics:</strong> {html_lib.escape(primary_metric_display)}</p>' if primary_metric_display else ''}
+        {''.join(model_rows)}
+        <h3>Metric Comparison</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th>Published evidence</th>
+                    <th>Automated experiment</th>
+                    <th>Difference / interpretation</th>
+                </tr>
+            </thead>
+            <tbody>{''.join(comparison_rows)}</tbody>
+        </table>
+        <h3>Comparison Conclusion</h3>
+        <p>{html_lib.escape(str(conclusion))}</p>
     </div>
     """
 

@@ -724,6 +724,25 @@ class ExperimentRunner:
         if not isinstance(experiment_plan, dict):
             experiment_plan = {}
 
+        experiment_design = generated_result.get(
+            "experiment_design",
+            {},
+        )
+        if not isinstance(experiment_design, dict):
+            experiment_design = {}
+
+        code_generation_requirements = generated_result.get(
+            "code_generation_requirements",
+            {},
+        )
+        if not isinstance(code_generation_requirements, dict):
+            code_generation_requirements = {}
+
+        checkpoint_setting = experiment_design.get(
+            "checkpoint_required",
+            code_generation_requirements.get("include_checkpoint"),
+        )
+
         selected_hypothesis = (
             generated_result.get("selected_hypothesis")
             or generated_result.get("hypothesis")
@@ -772,6 +791,39 @@ class ExperimentRunner:
             or ""
         )
 
+        repair_requirements = [
+            (
+                "Fix the execution failure without silently changing "
+                "the selected hypothesis."
+            ),
+            (
+                "Preserve the intended dataset, target variable, "
+                "model architecture, and methodology whenever possible."
+            ),
+            (
+                "Preserve the evidence-derived evaluation metrics. "
+                "Do not replace them with generic accuracy, precision, "
+                "recall, or F1 unless those metrics are actually part "
+                "of the experiment requirements."
+            ),
+            "Do not fabricate scientific results or metric values.",
+            (
+                "If a requested metric cannot be computed from the "
+                "available experiment, report it as unavailable rather "
+                "than inventing a value."
+            ),
+            "Keep generated outputs compatible with ExperimentRunner and ExperimentComparator.",
+        ]
+
+        if checkpoint_setting is False:
+            repair_requirements.append(
+                "Do not save or reference checkpoints; checkpoint_required is false."
+            )
+        elif checkpoint_setting is True:
+            repair_requirements.append(
+                "Preserve checkpoint saving because checkpoint_required is true."
+            )
+
         # Preserve all evidence-derived scientific requirements.
         specification = {
             "research_goal": research_goal,
@@ -782,34 +834,9 @@ class ExperimentRunner:
             "evaluation_metrics": evaluation_metrics,
             "metric_definitions": metric_definitions,
             "experiment_plan": experiment_plan,
-            "repair_requirements": [
-                (
-                    "Fix the execution failure without silently changing "
-                    "the selected hypothesis."
-                ),
-                (
-                    "Preserve the intended dataset, target variable, "
-                    "model architecture, and methodology whenever possible."
-                ),
-                (
-                    "Preserve the evidence-derived evaluation metrics. "
-                    "Do not replace them with generic accuracy, precision, "
-                    "recall, or F1 unless those metrics are actually part "
-                    "of the experiment requirements."
-                ),
-                (
-                    "Do not fabricate scientific results or metric values."
-                ),
-                (
-                    "If a requested metric cannot be computed from the "
-                    "available experiment, report it as unavailable rather "
-                    "than inventing a value."
-                ),
-                (
-                    "Keep generated outputs compatible with "
-                    "ExperimentRunner and ExperimentComparator."
-                ),
-            ],
+            "experiment_design": experiment_design,
+            "code_generation_requirements": code_generation_requirements,
+            "repair_requirements": repair_requirements,
         }
 
         try:
@@ -828,29 +855,25 @@ class ExperimentRunner:
                 )
                 return None
 
-            repaired_code = repair_method(
-                current_code=current_code,
-                experiment_specification=specification,
-                error_context=generated_result.get(
+            repair_result = repair_method(
+                specification=specification,
+                generated_code=current_code,
+                execution_result=generated_result.get(
                     "execution",
                     {},
                 ),
             )
 
-        except TypeError:
-            # Compatibility fallback for versions of CodeGenerationAgent
-            # whose repair method accepts fewer arguments.
-            try:
-                repaired_code = repair_method(
-                    current_code,
-                    specification,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "LLM experiment repair failed: %s",
-                    exc,
-                )
-                return None
+            if isinstance(repair_result, dict):
+                if not repair_result.get("success", False):
+                    logger.warning(
+                        "LLM experiment repair returned failure: %s",
+                        repair_result.get("errors", "no error details"),
+                    )
+                    return None
+                repaired_code = repair_result.get("pytorch_code")
+            else:
+                repaired_code = repair_result
 
         except Exception as exc:
             logger.warning(
@@ -880,18 +903,17 @@ class ExperimentRunner:
             )
             return None
 
-        repaired_path = run_dir / "generated_experiment_repaired.py"
-
         try:
-            repaired_path.write_text(
+            generated_code_path.write_text(
                 repaired_code,
                 encoding="utf-8",
             )
         except Exception as exc:
             logger.warning(
-                "Could not save repaired experiment code: %s",
+                "Could not replace generated experiment code: %s",
                 exc,
             )
+            return None
 
         return repaired_code
 
@@ -1132,17 +1154,11 @@ class ExperimentRunner:
                     repaired_code = repaired_code_text
 
                 if repaired_code and isinstance(repaired_code, str):
-                    repaired_path = (
-                        run_dir / "generated_experiment_repaired.py"
-                    )
-
-                    current_code_path = repaired_path
-
                     repairs.append(
                         {
                             "attempt": attempt_number,
                             "status": "repaired",
-                            "code_path": str(repaired_path),
+                            "code_path": str(current_code_path),
                             "duration_seconds": repair_duration,
                         }
                     )

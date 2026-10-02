@@ -66,6 +66,31 @@ VALID_SPECIFICATION = {
 }
 
 
+def test_classify_evidence_metrics_uses_definition_metadata_not_hardcoded_names():
+    metrics = ExperimentOrchestrator._classify_evidence_metrics(
+        experiment_type="ml_training",
+        evidence_metrics=[
+            "custom_metric",
+            "runtime_metric",
+        ],
+        metric_definitions={
+            "custom_metric": {
+                "kind": "model_quality",
+                "calculation": "average absolute error on held-out predictions",
+                "unit": "score",
+            },
+            "runtime_metric": {
+                "family": "system",
+                "kind": "network_overhead",
+                "unit": "ms",
+            },
+        },
+    )
+
+    assert "custom_metric" in metrics["directly_reproducible"]
+    assert "runtime_metric" in metrics["reference_only"]
+
+
 # ============================================================
 # CodeGenerationAgent - Offline Tests
 # ============================================================
@@ -117,13 +142,38 @@ def test_code_generation_agent_generates_valid_experiment(monkeypatch):
 
     agent = CodeGenerationAgent(model="qwen/qwen3.8-27b")
 
-    result = agent.generate(VALID_SPECIFICATION)
+    specification = {
+        **VALID_SPECIFICATION,
+        "experiment_design": {
+            "checkpoint_required": False,
+        },
+        "code_generation_requirements": {
+            "include_checkpoint": False,
+        },
+    }
+
+    result = agent.generate(specification)
 
     assert result["success"] is True
     assert result["model_recommendation"]["name"] == "lstm"
     assert "class TinyLSTM" in result["pytorch_code"]
+    assert result["experiment_design"] == specification["experiment_design"]
+    assert result["code_generation_requirements"] == specification["code_generation_requirements"]
     assert calls
     assert calls[0]["reasoning"] == "off"
+
+
+def test_design_validator_does_not_treat_missing_checkpoint_requirement_as_false():
+    CodeGenerationAgent.validate_experiment_design_compliance(
+        {"experiment_design": {}},
+        "torch.save(model.state_dict(), 'best_model.pt')\n",
+    )
+
+    with pytest.raises(ValueError, match="checkpoint_required=false"):
+        CodeGenerationAgent.validate_experiment_design_compliance(
+            {"experiment_design": {"checkpoint_required": False}},
+            "torch.save(model.state_dict(), 'best_model.pt')\n",
+        )
 
 
 def test_code_generation_agent_extracts_fenced_python_response():
@@ -133,6 +183,35 @@ def test_code_generation_agent_extracts_fenced_python_response():
 
     assert result is not None
     assert result["pytorch_code"] == ("import torch\nprint('ok')")
+
+
+def test_code_generation_agent_preserves_imports_before_torch_in_raw_python():
+    source = (
+        "import os\n"
+        "import warnings\n"
+        "import numpy as np\n"
+        "import pandas as pd\n"
+        "import torch\n"
+        "print(os.getcwd(), np.__version__, pd.__version__, torch.__version__)\n"
+    )
+
+    result = CodeGenerationAgent.extract_python_source(source)
+
+    assert result is not None
+    assert result["pytorch_code"] == source.strip()
+
+
+def test_code_generation_agent_preserves_escaped_fstring_newlines():
+    source = (
+        'import torch\n'
+        'value = 3\n'
+        'print(f"Label distribution:\\n{value}")\n'
+    )
+
+    normalised = CodeGenerationAgent()._normalise_escaped_python_source(source)
+
+    assert normalised.rstrip() == source.rstrip()
+    ast.parse(normalised)
 
 
 def test_code_generation_agent_recovers_unterminated_fenced_python():
@@ -237,6 +316,42 @@ def test_code_generation_agent_uses_dedicated_model_by_default(monkeypatch):
     assert agent.model == "code-model"
 
 
+def test_code_repair_retries_once_when_llm_returns_unchanged_source(monkeypatch):
+    prompts = []
+    responses = [
+        "import torch\nprint('before')\n",
+        "import torch\nprint('after')\n",
+    ]
+
+    def fake_call_llm(prompt, **kwargs):
+        prompts.append(prompt)
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        "app.agents_modules.code_generation_agent._call_llm",
+        fake_call_llm,
+    )
+
+    agent = CodeGenerationAgent(model="test-model")
+    result = agent.repair_generated_code(
+        specification={
+            "experiment_design": {"checkpoint_required": False},
+            "code_generation_requirements": {"include_checkpoint": False},
+        },
+        generated_code="import torch\nprint('before')\n",
+        execution_result={
+            "return_code": 1,
+            "stderr": "NameError: name 'undefined_value' is not defined",
+        },
+    )
+
+    assert result["success"] is True
+    assert result["pytorch_code"] == "import torch\nprint('after')"
+    assert len(prompts) == 2
+    assert "previous repair response was identical" in prompts[1]
+    assert "NameError: name 'undefined_value' is not defined" in prompts[1]
+
+
 def test_code_repair_prompt_is_bounded(monkeypatch):
     captured = {}
 
@@ -270,6 +385,7 @@ def test_code_repair_prompt_is_bounded(monkeypatch):
     # The bound holds a full-length experiment plus both bounded logs, so the
     # repair model sees the whole file instead of its tail.
     assert len(captured["prompt"]) < 90000
+    assert "TRACEBACK-DRIVEN IMPORT CHECK" in captured["prompt"]
     # The configured code_generation budget takes precedence over the class fallback.
     assert captured["kwargs"]["max_tokens"] == _output_token_limit("code_generation", agent.REPAIR_MAX_TOKENS)
 
@@ -591,6 +707,71 @@ def test_experiment_runner_handles_dependency_install_timeout(
 # ============================================================
 
 
+def test_experiment_runner_passes_execution_result_to_code_repair_agent(
+    tmp_path,
+    monkeypatch,
+):
+    from app.agents_modules import code_generation_agent
+
+    captured = {}
+    generated_code_path = tmp_path / "generated.py"
+    generated_code_path.write_text("raise RuntimeError('failure')\n", encoding="utf-8")
+    execution_result = {
+        "return_code": 1,
+        "stdout": "partial output",
+        "stderr": "RuntimeError: failure",
+    }
+    repaired_code = "print('repaired')\n"
+
+    class FakeCodeGenerationAgent:
+        def repair_generated_code(
+            self,
+            specification,
+            generated_code,
+            execution_result,
+        ):
+            captured["specification"] = specification
+            captured["generated_code"] = generated_code
+            captured["execution_result"] = execution_result
+            return {
+                "success": True,
+                "pytorch_code": repaired_code,
+            }
+
+    monkeypatch.setattr(
+        code_generation_agent,
+        "CodeGenerationAgent",
+        FakeCodeGenerationAgent,
+    )
+
+    runner = ExperimentRunner()
+    result = runner._repair_experiment_with_llm(
+        generated_code_path=generated_code_path,
+        generated_result={
+            "execution": execution_result,
+            "experiment_design": {"checkpoint_required": False},
+            "code_generation_requirements": {"include_checkpoint": False},
+        },
+        run_dir=tmp_path,
+    )
+
+    assert result == repaired_code
+    assert captured["generated_code"] == "raise RuntimeError('failure')\n"
+    assert captured["execution_result"] == execution_result
+    assert generated_code_path.read_text(encoding="utf-8") == repaired_code
+    assert not (tmp_path / "generated_experiment_repaired.py").exists()
+    assert captured["specification"]["experiment_design"] == {
+        "checkpoint_required": False,
+    }
+    assert captured["specification"]["code_generation_requirements"] == {
+        "include_checkpoint": False,
+    }
+    assert any(
+        "checkpoint_required is false" in requirement
+        for requirement in captured["specification"]["repair_requirements"]
+    )
+
+
 def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
     tmp_path,
     monkeypatch,
@@ -708,8 +889,13 @@ def test_experiment_runner_automatically_repairs_failed_experiment_with_llm(
 
     assert len(result["attempts"]) == 2
     assert len(result["repairs"]) == 1
+    assert [attempt["code_path"] for attempt in result["attempts"]] == [
+        str(code_path),
+        str(code_path),
+    ]
 
     assert len(repair_calls) == 1
+    assert not (run_directory / "generated_experiment_repaired.py").exists()
 
     repaired_file = code_path.read_text(encoding="utf-8")
 

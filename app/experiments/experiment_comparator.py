@@ -66,8 +66,8 @@ class ExperimentComparator:
 
     Important design principle:
 
-        The paper's reported evaluation metrics are authoritative
-        for scientific comparison.
+        The paper's reported evaluation metrics define the reference
+        measurements or constraints used for scientific comparison.
 
     The comparator therefore does NOT restrict comparisons to a fixed
     list such as accuracy/precision/recall/F1. Any finite numerical
@@ -328,6 +328,96 @@ class ExperimentComparator:
             return number / 100.0
 
         return number
+
+    @staticmethod
+    def _normalise_reference_value(
+        value: Any,
+        metric_name: Optional[str] = None,
+        definition: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Normalize a structured reference metric while preserving
+        its scientific semantic meaning.
+        """
+
+        definition = (
+            definition
+            if isinstance(definition, dict)
+            else {}
+        )
+
+        if isinstance(value, dict):
+            normalized = dict(value)
+        else:
+            normalized = {
+                "value": value,
+            }
+
+        unit = (
+            normalized.get("unit")
+            or definition.get("unit")
+            or None
+        )
+
+        value_type = str(
+            normalized.get("value_type")
+            or definition.get("value_type")
+            or "measured_value"
+        ).strip().lower()
+
+        relation = str(
+            normalized.get("relation")
+            or definition.get("relation")
+            or "exact"
+        ).strip().lower()
+
+        allowed_value_types = {
+            "measured_value",
+            "upper_bound",
+            "lower_bound",
+            "range",
+            "qualitative_result",
+            "configuration",
+            "unknown",
+        }
+
+        allowed_relations = {
+            "exact",
+            "less_than",
+            "less_than_or_equal",
+            "greater_than",
+            "greater_than_or_equal",
+            "range",
+            "none",
+        }
+
+        if value_type not in allowed_value_types:
+            value_type = "unknown"
+
+        if relation not in allowed_relations:
+            relation = "none"
+
+        normalized["unit"] = unit
+        normalized["value_type"] = value_type
+        normalized["relation"] = relation
+
+        if "source_text" not in normalized:
+            normalized["source_text"] = (
+                definition.get("source_text", "")
+                or ""
+            )
+
+        # Preserve optional range information.
+        for field in (
+            "lower_value",
+            "upper_value",
+            "lower_unit",
+            "upper_unit",
+        ):
+            if field not in normalized and field in definition:
+                normalized[field] = definition[field]
+
+        return normalized
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
@@ -1428,6 +1518,12 @@ Do not calculate, estimate, infer, or fabricate missing values.
             }
 
         combined_metrics: Dict[str, float] = {}
+
+        combined_reference_metrics: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
+
         combined_definitions: Dict[
             str,
             Dict[str, Any],
@@ -1436,6 +1532,11 @@ Do not calculate, estimate, infer, or fabricate missing values.
         extracted_sources: List[
             Dict[str, Any]
         ] = []
+
+        combined_reference_conditions: Dict[
+            str,
+            Dict[str, Any],
+        ] = {}
 
         for source in reference_experiment.get(
             "sources",
@@ -1471,11 +1572,49 @@ Do not calculate, estimate, infer, or fabricate missing values.
                     reference_metrics
                 )
 
+            source_conditions = details.get(
+                "reference_conditions",
+                {},
+            )
+
+            if isinstance(
+                source_conditions,
+                dict,
+            ):
+                for condition_name, condition_value in (
+                    source_conditions.items()
+                ):
+                    normalized_condition_name = (
+                        self._canonical_metric_name(
+                            condition_name
+                        )
+                    )
+
+                    if not normalized_condition_name:
+                        continue
+
+                    if normalized_condition_name not in combined_reference_conditions:
+                        combined_reference_conditions[
+                            normalized_condition_name
+                        ] = condition_value
+
             # --------------------------------------------------------
             # Some PaperReader versions may store numerical metrics
             # directly inside "metrics".
             # --------------------------------------------------------
 
+            reference_condition_names = set()
+
+            if isinstance(
+                source_conditions,
+                dict,
+            ):
+                reference_condition_names = {
+                    self._canonical_metric_name(name)
+                    for name in source_conditions
+                    if self._canonical_metric_name(name)
+                }
+            
             experiment_metrics = details.get(
                 "metrics",
                 [],
@@ -1488,6 +1627,15 @@ Do not calculate, estimate, infer, or fabricate missing values.
                 for metric_name, value in (
                     experiment_metrics.items()
                 ):
+                    normalized_metric_name = (
+                        self._canonical_metric_name(
+                            metric_name
+                        )
+                    )
+
+                    if normalized_metric_name in reference_condition_names:
+                        continue
+
                     if metric_name not in source_metrics:
                         source_metrics[
                             metric_name
@@ -1554,42 +1702,81 @@ Do not calculate, estimate, infer, or fabricate missing values.
                 ):
                     definition = {}
 
-                safe_value = (
-                    self._normalise_metric_value(
+                reference_value = (
+                    self._normalise_reference_value(
                         value,
-                        unit=definition.get(
-                            "unit"
-                        ),
-                        value_type=definition.get(
-                            "value_type"
+                        metric_name=metric_name,
+                        definition=definition,
+                    )
+                )
+
+                reference_numeric_value = self._safe_float(
+                    reference_value.get("value")
+                )
+
+                value_type = reference_value.get(
+                    "value_type",
+                    "unknown",
+                )
+
+                # Configuration and qualitative statements are not numerical
+                # evaluation metrics.
+                if value_type in {
+                    "configuration",
+                    "qualitative_result",
+                    "unknown",
+                }:
+                    continue
+
+                if reference_numeric_value is None:
+                    continue
+
+                reference_value["value"] = (
+                    self._normalise_metric_value(
+                        reference_numeric_value,
+                        unit=reference_value.get("unit"),
+                        value_type=(
+                            definition.get("value_type")
+                            if definition
+                            else None
                         ),
                         metric_name=metric_name,
                     )
                 )
 
-                if safe_value is None:
+                if reference_value["value"] is None:
                     continue
 
                 normalized_source_metrics[
                     normalized_name
-                ] = safe_value
+                ] = reference_value
 
                 if definition:
                     normalized_source_definitions[
                         normalized_name
                     ] = definition
 
-                # Preserve the first explicitly reported value when
-                # multiple evidence sources report the same metric.
-                if normalized_name not in combined_metrics:
-                    combined_metrics[
+                # Keep `metrics` numeric for backward compatibility.
+                numeric_value = reference_value.get(
+                    "value"
+                )
+
+                # Preserve the structured semantic reference separately.
+                if normalized_name not in combined_reference_metrics:
+                    combined_reference_metrics[
                         normalized_name
-                    ] = safe_value
+                    ] = dict(reference_value)
 
                     if definition:
                         combined_definitions[
                             normalized_name
                         ] = definition
+
+                # Preserve the first explicitly reported numeric value.
+                if normalized_name not in combined_metrics:
+                    combined_metrics[
+                        normalized_name
+                    ] = numeric_value
 
             # --------------------------------------------------------
             # Preserve source-level metadata.
@@ -1625,6 +1812,10 @@ Do not calculate, estimate, infer, or fabricate missing values.
                         {},
                     ),
                     "reference_metrics": reference_metrics,
+                    "reference_conditions": details.get(
+                        "reference_conditions",
+                        {},
+                    ),
                     "metric_definitions": metric_definitions,
                     "normalized_metrics": normalized_source_metrics,
                     "normalized_metric_definitions": (
@@ -1715,6 +1906,8 @@ Do not calculate, estimate, infer, or fabricate missing values.
             "status": "reference_results_available",
             "metrics": combined_metrics,
             "metric_definitions": combined_definitions,
+            "reference_metrics": combined_metrics,
+            "reference_conditions": combined_reference_conditions,
             "models": models,
             "datasets": datasets,
             "sources": extracted_sources,
@@ -2457,6 +2650,54 @@ Do not calculate, estimate, infer, or fabricate missing values.
             {},
         )
 
+        reference_metrics = paper_result.get(
+            "reference_metrics",
+            {},
+        )
+
+        if not isinstance(
+            reference_metrics,
+            dict,
+        ):
+            reference_metrics = {}
+
+        valid_paper_metrics = set()
+
+        for metric_name in paper_metrics:
+            reference_value = (
+                reference_metrics.get(
+                    metric_name
+                )
+            )
+
+            if isinstance(
+                reference_value,
+                dict,
+            ):
+                value_type = str(
+                    reference_value.get(
+                        "value_type",
+                        "",
+                    )
+                    or ""
+                ).strip().lower()
+
+                if value_type in {
+                    "configuration",
+                    "qualitative_result",
+                    "unknown",
+                }:
+                    continue
+
+            valid_paper_metrics.add(
+                metric_name
+            )
+
+        common_metrics = sorted(
+            valid_paper_metrics
+            & set(experiment_metrics)
+        )
+
         experiment_definitions = (
             experiment_result.get(
                 "metric_definitions",
@@ -2711,6 +2952,208 @@ Do not calculate, estimate, infer, or fabricate missing values.
     # Numerical Comparison
     # ============================================================
 
+    @staticmethod
+    def _evaluate_reference_constraint(
+        experiment_value: float,
+        reference_value: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Evaluate an automated measurement against a semantic
+        reference value.
+
+        The reference may represent:
+
+            exact measured value
+            upper bound
+            lower bound
+            range
+
+        Returns a structured comparison without treating bounds
+        as exact measurements.
+        """
+
+        reference_numeric = (
+            ExperimentComparator._safe_float(
+                reference_value.get("value")
+            )
+        )
+
+        value_type = str(
+            reference_value.get(
+                "value_type",
+                "unknown",
+            )
+            or "unknown"
+        ).strip().lower()
+
+        relation = str(
+            reference_value.get(
+                "relation",
+                "exact",
+            )
+            or "exact"
+        ).strip().lower()
+
+        result = {
+            "reference_value": reference_numeric,
+            "reference_value_type": value_type,
+            "reference_relation": relation,
+            "constraint_satisfied": None,
+            "difference_from_reference": None,
+            "comparison_interpretation": "",
+        }
+
+        if reference_numeric is None:
+            result[
+                "comparison_interpretation"
+            ] = (
+                "The reference value is not numerical and "
+                "cannot be numerically evaluated."
+            )
+
+            return result
+
+        if value_type == "upper_bound":
+            if relation == "less_than":
+                satisfied = (
+                    experiment_value
+                    < reference_numeric
+                )
+
+            else:
+                satisfied = (
+                    experiment_value
+                    <= reference_numeric
+                )
+
+            result[
+                "constraint_satisfied"
+            ] = satisfied
+
+            result[
+                "difference_from_reference"
+            ] = (
+                experiment_value
+                - reference_numeric
+            )
+
+            result[
+                "comparison_interpretation"
+            ] = (
+                "The automated measurement was evaluated "
+                "against the reported upper bound; the bound "
+                "was not treated as the paper's exact measurement."
+            )
+
+            return result
+
+        if value_type == "lower_bound":
+            if relation == "greater_than":
+                satisfied = (
+                    experiment_value
+                    > reference_numeric
+                )
+
+            else:
+                satisfied = (
+                    experiment_value
+                    >= reference_numeric
+                )
+
+            result[
+                "constraint_satisfied"
+            ] = satisfied
+
+            result[
+                "difference_from_reference"
+            ] = (
+                experiment_value
+                - reference_numeric
+            )
+
+            result[
+                "comparison_interpretation"
+            ] = (
+                "The automated measurement was evaluated "
+                "against the reported lower bound; the bound "
+                "was not treated as the paper's exact measurement."
+            )
+
+            return result
+
+        if value_type == "range":
+            lower = (
+                ExperimentComparator._safe_float(
+                    reference_value.get(
+                        "lower_value"
+                    )
+                )
+            )
+
+            upper = (
+                ExperimentComparator._safe_float(
+                    reference_value.get(
+                        "upper_value"
+                    )
+                ))
+
+            if (
+                lower is not None
+                and upper is not None
+            ):
+                satisfied = (
+                    lower
+                    <= experiment_value
+                    <= upper
+                )
+
+                result[
+                    "constraint_satisfied"
+                ] = satisfied
+
+                result[
+                    "comparison_interpretation"
+                ] = (
+                    "The automated measurement was evaluated "
+                    "for inclusion within the reported reference range."
+                )
+
+                return result
+
+        if value_type == "measured_value":
+            difference = (
+                experiment_value
+                - reference_numeric
+            )
+
+            result[
+                "difference_from_reference"
+            ] = difference
+
+            result[
+                "constraint_satisfied"
+            ] = None
+
+            result[
+                "comparison_interpretation"
+            ] = (
+                "The automated measurement was compared "
+                "numerically with the explicitly reported "
+                "reference measurement. The reference value "
+                "was not treated as a pass/fail constraint."
+            )
+
+            return result
+
+        result[
+            "comparison_interpretation"
+        ] = (
+            "The semantic type of the reference value does not "
+            "support a direct numerical comparison."
+        )
+
+        return result
+
     def compare_metrics(
         self,
         paper_result: Dict[str, Any],
@@ -2779,11 +3222,94 @@ Do not calculate, estimate, infer, or fabricate missing values.
             Dict[str, Any],
         ] = {}
 
+        paper_definitions = paper_result.get(
+            "metric_definitions",
+            {},
+        )
+
+        if not isinstance(
+            paper_definitions,
+            dict,
+        ):
+            paper_definitions = {}
+
+        reference_metrics = paper_result.get(
+                "reference_metrics",
+                {},
+            )
+
+        if not isinstance(
+            reference_metrics,
+            dict,
+        ):
+            reference_metrics = {}
+
+        comparisons = {}
+
         for metric_name in common_metrics:
-            paper_value = (
-                self._safe_float(
-                    paper_metrics.get(
+            paper_definition = (
+                paper_definitions.get(
+                    metric_name,
+                    {},
+                )
+            )
+
+            if not isinstance(
+                paper_definition,
+                dict,
+            ):
+                paper_definition = {}
+
+            # Prefer structured semantic reference information.
+            reference_value = (
+                reference_metrics.get(
+                    metric_name
+                )
+            )
+
+            if isinstance(
+                reference_value,
+                dict,
+            ):
+                reference_value = (
+                    self._normalise_reference_value(
+                        reference_value,
+                        metric_name=metric_name,
+                        definition=paper_definition,
+                    )
+                )
+            else:
+                reference_value = {
+                    "value": paper_metrics.get(
                         metric_name
+                    ),
+                    "unit": paper_definition.get(
+                        "unit"
+                    ),
+                    "value_type": (
+                        paper_definition.get(
+                            "value_type"
+                        )
+                        or "measured_value"
+                    ),
+                    "relation": (
+                        paper_definition.get(
+                            "relation"
+                        )
+                        or "exact"
+                    ),
+                    "source_text": (
+                        paper_definition.get(
+                            "source_text",
+                            "",
+                        )
+                    ),
+                }
+
+            reference_numeric = (
+                self._safe_float(
+                    reference_value.get(
+                        "value"
                     )
                 )
             )
@@ -2797,47 +3323,64 @@ Do not calculate, estimate, infer, or fabricate missing values.
             )
 
             if (
-                paper_value is None
+                reference_numeric is None
                 or experiment_value is None
             ):
                 continue
 
+            semantic_comparison = (
+                self._evaluate_reference_constraint(
+                    experiment_value,
+                    reference_value,
+                )
+            )
+
+            value_type = (
+                reference_value.get(
+                    "value_type",
+                    "measured_value",
+                )
+            )
+
+            relation = (
+                reference_value.get(
+                    "relation",
+                    "exact",
+                )
+            )
+
             difference = (
-                experiment_value
-                - paper_value
+                semantic_comparison.get(
+                    "difference_from_reference"
+                )
             )
 
             relative_difference = None
 
-            if abs(paper_value) > 1e-12:
+            if (
+                difference is not None
+                and abs(reference_numeric) > 1e-12
+            ):
                 relative_difference = (
                     difference
-                    / paper_value
+                    / reference_numeric
                 )
 
             difference_percentage_points = None
 
-            definition = (
-                paper_result.get(
-                    "metric_definitions",
-                    {},
-                ).get(
-                    metric_name,
-                    {},
-                )
-            )
-
-            if not isinstance(definition, dict):
-                definition = {}
-
             unit = str(
-                definition.get("unit", "")
+                paper_definition.get(
+                    "unit",
+                    reference_value.get(
+                        "unit",
+                        "",
+                    ),
+                )
                 or ""
             ).strip().lower()
 
-            value_type = str(
-                definition.get("value_type", "")
-                or ""
+            value_type_normalized = str(
+                value_type or ""
             ).strip().lower()
 
             is_percentage = (
@@ -2848,7 +3391,7 @@ Do not calculate, estimate, infer, or fabricate missing values.
                     "percentage_point",
                     "percentage_points",
                 }
-                or value_type in {
+                or value_type_normalized in {
                     "percentage",
                     "percent",
                     "proportion",
@@ -2865,7 +3408,10 @@ Do not calculate, estimate, infer, or fabricate missing values.
                 }
             )
 
-            if is_percentage:
+            if (
+                is_percentage
+                and difference is not None
+            ):
                 difference_percentage_points = (
                     difference * 100.0
                 )
@@ -2873,11 +3419,13 @@ Do not calculate, estimate, infer, or fabricate missing values.
             comparisons[
                 metric_name
             ] = {
-                "paper": paper_value,
+                "paper": reference_numeric,
                 "experiment": experiment_value,
                 "difference": difference,
-                "absolute_difference": abs(
-                    difference
+                "absolute_difference": (
+                    abs(difference)
+                    if difference is not None
+                    else None
                 ),
                 "relative_difference": (
                     relative_difference
@@ -2888,12 +3436,48 @@ Do not calculate, estimate, infer, or fabricate missing values.
                     else None
                 ),
                 "higher_than_paper": (
-                    difference > 0
+                    experiment_value
+                    > reference_numeric
                 ),
                 "same_as_paper": (
                     abs(difference) < 1e-9
+                    if difference is not None
+                    else False
                 ),
-                "difference_percentage_points": difference_percentage_points,
+                "difference_percentage_points": (
+                    difference_percentage_points
+                ),
+
+                # NEW semantic information
+                "reference_value": reference_numeric,
+                "reference_value_type": value_type,
+                "reference_relation": relation,
+                "reference_unit": (
+                    reference_value.get(
+                        "unit"
+                    )
+                ),
+                "reference_lower_value": (
+                    reference_value.get(
+                        "lower_value"
+                    )
+                ),
+                "reference_upper_value": (
+                    reference_value.get(
+                        "upper_value"
+                    )
+                ),
+                "constraint_satisfied": (
+                    semantic_comparison.get(
+                        "constraint_satisfied"
+                    )
+                ),
+                "comparison_interpretation": (
+                    semantic_comparison.get(
+                        "comparison_interpretation",
+                        "",
+                    )
+                ),
             }
 
         if not comparisons:
@@ -2906,28 +3490,28 @@ Do not calculate, estimate, infer, or fabricate missing values.
                 ],
             }
 
-        improved = [
+        satisfied = [
             name
             for name, values in comparisons.items()
-            if values[
-                "difference"
-            ] > 0
+            if values.get(
+                "constraint_satisfied"
+            ) is True
         ]
 
-        worse = [
+        not_satisfied = [
             name
             for name, values in comparisons.items()
-            if values[
-                "difference"
-            ] < 0
+            if values.get(
+                "constraint_satisfied"
+            ) is False
         ]
 
-        unchanged = [
+        inconclusive = [
             name
             for name, values in comparisons.items()
-            if values[
-                "same_as_paper"
-            ]
+            if values.get(
+                "constraint_satisfied"
+            ) is None
         ]
 
         average_difference = (
@@ -2944,9 +3528,9 @@ Do not calculate, estimate, infer, or fabricate missing values.
             "success": True,
             "status": "compared",
             "metrics": comparisons,
-            "improved_metrics": improved,
-            "worse_metrics": worse,
-            "unchanged_metrics": unchanged,
+            "satisfied_metrics": satisfied,
+            "not_satisfied_metrics": not_satisfied,
+            "inconclusive_metrics": inconclusive,
             "average_difference": average_difference,
         }
 
@@ -3007,7 +3591,35 @@ IMPORTANT:
    - higher_is_better
    - lower_is_better
 
-6. Consider differences in:
+5A. Reference metrics may represent different semantic types:
+
+    - measured_value
+    - upper_bound
+    - lower_bound
+    - range
+    - qualitative_result
+
+    Do NOT interpret an upper/lower bound as an exact published
+    measurement.
+
+    For example:
+
+        paper latency < 80 ms
+
+    means the paper reported an upper bound of 80 ms, not that
+    the paper measured exactly 80 ms.
+
+6. Reference conditions such as number of users, UE count, batch
+   size, hardware, or testbed configuration are experimental
+   conditions, not performance measurements.
+
+7. If a comparison is against a bound, explain whether the automated
+   measurement satisfies or violates the reported constraint.
+
+8. Do not describe a bound comparison as a numerical difference
+   between two exact measurements.
+
+9. Consider differences in:
    - dataset version
    - dataset source
    - preprocessing
@@ -3023,18 +3635,18 @@ IMPORTANT:
    - implementation details
    - measurement methodology
 
-7. If the paper metric and automated metric are not measuring
+10. If the paper metric and automated metric are not measuring
    exactly the same construct, identify that limitation.
 
-8. If the evidence is insufficient to identify the exact cause,
+11. If the evidence is insufficient to identify the exact cause,
    explicitly say so.
 
-9. Distinguish confirmed facts from plausible explanations.
+12. Distinguish confirmed facts from plausible explanations.
 
-10. Do not describe an experiment as a faithful reproduction
+13. Do not describe an experiment as a faithful reproduction
     when it uses a substantially different evaluation protocol.
 
-11. Return ONLY valid JSON.
+14. Return ONLY valid JSON.
 
 Use this schema:
 
@@ -3603,6 +4215,114 @@ Do not invent missing experimental details.
                 if unit
                 else ""
             )
+
+            reference_value_type = str(
+                values.get(
+                    "reference_value_type",
+                    "",
+                )
+                or ""
+            ).strip().lower()
+
+            reference_relation = str(
+                values.get(
+                    "reference_relation",
+                    "",
+                )
+                or ""
+            ).strip().lower()
+
+            constraint_satisfied = values.get(
+                "constraint_satisfied"
+            )
+
+            reference_unit = (
+                values.get(
+                    "reference_unit"
+                )
+                or ""
+            )
+
+            if reference_value_type in {
+                "upper_bound",
+                "lower_bound",
+                "range",
+            }:
+                reference_value = values.get(
+                    "reference_value"
+                )
+
+                if reference_value_type == "upper_bound":
+                    relation_text = (
+                        "<"
+                        if reference_relation == "less_than"
+                        else "<="
+                    )
+
+                    reference_text = (
+                        f"{relation_text} "
+                        f"{reference_value:g}"
+                    )
+
+                elif reference_value_type == "lower_bound":
+                    relation_text = (
+                        ">"
+                        if reference_relation == "greater_than"
+                        else ">="
+                    )
+
+                    reference_text = (
+                        f"{relation_text} "
+                        f"{reference_value:g}"
+                    )
+
+                else:
+                    lower_value = (
+                        values.get(
+                            "reference_lower_value"
+                        )
+                    )
+
+                    upper_value = (
+                        values.get(
+                            "reference_upper_value"
+                        )
+                    )
+
+                    if (
+                        lower_value is not None
+                        and upper_value is not None
+                    ):
+                        reference_text = (
+                            f"{lower_value:g}–"
+                            f"{upper_value:g}"
+                        )
+                    else:
+                        reference_text = (
+                            f"range around "
+                            f"{reference_value:g}"
+                        )
+
+                if reference_unit:
+                    reference_text += (
+                        f" {reference_unit}"
+                    )
+
+                if constraint_satisfied is True:
+                    constraint_text = "Satisfied"
+                elif constraint_satisfied is False:
+                    constraint_text = "Not satisfied"
+                else:
+                    constraint_text = "Inconclusive"
+
+                lines.append(
+                    f"{metric_name}: "
+                    f"Reference={reference_text}, "
+                    f"Experiment={experiment_value}, "
+                    f"Constraint={constraint_text}"
+                )
+
+                continue
 
             is_percentage = (
                 metric_name in {
