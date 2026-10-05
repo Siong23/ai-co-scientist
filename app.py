@@ -13,11 +13,11 @@ from numpy.ma import count  # noqa: F401
 from app.agents import SupervisorAgent
 from app.config import config
 from app.data.dataset_manager import DatasetManager
-from app.experiments.experiment_orchestrator import (
-    ExperimentOrchestrator,
-)
 from app.experiments.experiment_comparator import (
     ExperimentComparator,
+)
+from app.experiments.experiment_orchestrator import (
+    ExperimentOrchestrator,
 )
 from app.models import ContextMemory, ResearchGoal
 from app.research_state import LocalJSONResearchStateStore, ResearchStateError

@@ -36,9 +36,9 @@ import io
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
 from html import unescape
-from urllib.parse import urljoin, urlparse
+from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
 
 import requests
 from pypdf import PdfReader
@@ -2778,7 +2778,7 @@ PAPER EXPERIMENTAL TEXT
                             )
                         )
 
-                        results_status = self._determine_results_status(
+                        self._determine_results_status(
                             experiment_details
                         )
 

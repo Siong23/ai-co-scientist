@@ -7,11 +7,11 @@ real LLM calls.
 """
 
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from app.experiments.experiment_comparator import ExperimentComparator
-from unittest.mock import MagicMock
-
 
 # ============================================================
 # Test Data

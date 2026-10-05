@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+
 class TemporalSelfAttention(nn.Module):
     """
     Single-head temporal self-attention.

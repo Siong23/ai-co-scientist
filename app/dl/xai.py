@@ -10,6 +10,7 @@ Install optional dependencies when needed:
 """
 import torch
 
+
 def get_temporal_attention(model, x, device="cpu"):
     """Return attention weights for models that expose them."""
     model.eval()

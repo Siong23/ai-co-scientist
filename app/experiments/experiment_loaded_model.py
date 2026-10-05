@@ -2,15 +2,14 @@ import argparse
 from pathlib import Path
 
 import torch
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
-from sklearn.model_selection import train_test_split
-
 from app.dl.data_loader import load_csv
-from app.dl.preprocessing import Preprocessor, make_binary_target
 from app.dl.datasets import make_sequences
-from app.dl.model_builder import build_model
 from app.dl.evaluator import evaluate, save_json
+from app.dl.model_builder import build_model
+from app.dl.preprocessing import Preprocessor, make_binary_target
 from app.experiments.experiment_config import ExperimentConfig
 
 
