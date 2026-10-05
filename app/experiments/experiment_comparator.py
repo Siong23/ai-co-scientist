@@ -117,6 +117,8 @@ class ExperimentComparator:
             "f1-score",
             "f1 score",
         ],
+        "recall": ["recall", "tpr", "true_positive_rate", "true positive rate", "sensitivity"],
+        "false_alarm_rate": ["false_alarm_rate", "false_positive_rate", "false positive rate", "fpr", "far"],
     }
 
     NON_SCIENTIFIC_TIMING_METRICS = {

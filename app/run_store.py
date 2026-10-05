@@ -22,7 +22,7 @@ RUNS_DIR_ENV = "CO_SCIENTIST_RUNS_DIR"
 # by the current template from one left over by an older version. Bump the
 # version whenever render_report()'s output changes in a way that should
 # invalidate reports already on disk.
-REPORT_TEMPLATE_MARKER = "<!-- co-scientist-report-template: v4 -->"
+REPORT_TEMPLATE_MARKER = "<!-- co-scientist-report-template: v9 -->"
 
 SECRET_PATTERNS = [
     re.compile(r"sk-or-v1-[A-Za-z0-9_-]+"),
@@ -36,6 +36,221 @@ SECRET_PATTERNS = [
 # app/experiments/results/runs/
 EXPERIMENT_RESULTS_DIR_ENV = "CO_SCIENTIST_EXPERIMENT_RESULTS_DIR"
 DEFAULT_EXPERIMENT_RESULTS_DIR = Path("app/experiments/results")
+
+_PERCENT_METRIC_NAMES = {
+    "accuracy", "acc", "precision", "precision_weighted", "weighted_precision",
+    "recall", "recall_weighted", "weighted_recall", "f1", "f1_score",
+    "f1_weighted", "weighted_f1", "macro_f1", "micro_f1", "macro_precision",
+    "macro_recall", "balanced_accuracy",
+}
+_PERCENT_UNITS = {"%", "percent", "percentage", "percentage_point", "percentage_points", "pp"}
+_RUN_STATUS_LABELS = {
+    "success": "Completed",
+    "timeout": "Timed out",
+    "cancelled": "Cancelled",
+    "invalid_outputs": "Finished, but outputs failed validation",
+    "failed": "Failed",
+    "runner_error": "Runner error",
+}
+_MAX_INLINE_CHARS = 20000
+ 
+ 
+def _selected_hypothesis_id(selected: Any) -> Any:
+    """The orchestrator stores 'hypothesis_id'; cycle steps store 'id'."""
+    if not isinstance(selected, dict):
+        return None
+    return _first_non_empty(selected.get("hypothesis_id"), selected.get("id"))
+ 
+ 
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+ 
+ 
+def _count(value: Any) -> int:
+    """The runner stores attempts/repairs/installations as LISTS of records."""
+    if isinstance(value, (list, tuple, set)):
+        return len(value)
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    return 0
+ 
+ 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+ 
+ 
+def _format_value(name: str, value: Any, unit: Any = None) -> str:
+    """Format a scalar metric. Proportion-type metrics are shown as percentages."""
+    if value is None:
+        return "N/A"
+    if isinstance(value, bool):
+        return str(value)
+    if not _is_number(value):
+        return str(value)
+    number = float(value)
+    unit_text = str(unit).strip() if unit else ""
+    key = str(name).strip().lower()
+    if unit_text.lower() in _PERCENT_UNITS or (not unit_text and key in _PERCENT_METRIC_NAMES):
+        if 0.0 <= number <= 1.0:
+            # Show the proportion as a percentage and keep the raw value, e.g. "95.00% (0.95)".
+            return f"{number * 100.0:.2f}% ({value})"
+        return f"{number:.2f}%"
+    text = f"{number:.4g}"
+    return f"{text} {unit_text}" if unit_text else text
+ 
+ 
+def _truncate(text: Any, limit: int = _MAX_INLINE_CHARS) -> str:
+    text = str(text if text is not None else "")
+    if len(text) <= limit:
+        return text
+    return f"[... {len(text) - limit} earlier characters omitted ...]\n" + text[-limit:]
+ 
+ 
+def _json_block(value: Any, summary: str) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    try:
+        rendered = json.dumps(value, indent=2, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        rendered = str(value)
+    return (
+        f"<details><summary>{_escape(summary)}</summary>"
+        f"<pre>{_escape(_truncate(rendered))}</pre></details>"
+    )
+ 
+ 
+def _find_in_run_dir(run_directory: Any, filename: str) -> Optional[Path]:
+    if not run_directory:
+        return None
+    try:
+        root = Path(str(run_directory)).expanduser()
+        if not root.is_dir():
+            return None
+        direct = root / filename
+        if direct.is_file():
+            return direct.resolve()
+        for match in root.rglob(filename):
+            if match.is_file():
+                return match.resolve()
+    except OSError:
+        return None
+    return None
+
+
+_TWO_MODEL_HEADLINE = ("accuracy", "precision_weighted", "recall_weighted", "f1_weighted", "f1_macro", "false_alarm_rate")
+ 
+ 
+def _recommended_model_label(experiment_result: Optional[Dict[str, Any]]) -> str:
+    generation = _as_dict(_as_dict(experiment_result).get("code_generation"))
+    recommendation = generation.get("model_recommendation")
+    if isinstance(recommendation, str):
+        return recommendation.strip()
+    recommendation = _as_dict(recommendation)
+    name = str(recommendation.get("model_name") or "").strip()
+    architecture = recommendation.get("architecture")
+    architecture = " ".join(str(architecture).split()) if architecture and not isinstance(architecture, (dict, list)) else ""
+    if architecture and architecture.lower() not in name.lower():
+        return f"{name} - {architecture[:200]}" if name else architecture[:200]
+    return name
+ 
+ 
+def _two_model_report(metrics: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> str:
+    """Model 1 (existing; never saw the unseen attack) vs Model 2 (proposed; trained on all attacks).
+ 
+    Uses the metric names the "TWO-MODEL PROTOCOL" prompt section requires: headline metrics are the
+    proposed model's; baseline_<metric> are Model 1's; per_class_recall_baseline / per_class_recall_proposed;
+    unseen_attack. Returns "" when they are absent.
+    """
+    summary = _as_dict(summary)
+    unseen = str(_first_non_empty(metrics.get("unseen_attack"), summary.get("unseen_attack")) or "").strip()
+    headline = []
+    for name in _TWO_MODEL_HEADLINE:
+        base, new = metrics.get(f"baseline_{name}"), metrics.get(name)
+        if _is_number(base) and _is_number(new):
+            headline.append(
+                f"<tr><td>{_escape(name.replace('_', ' ').title())}</td>"
+                f"<td>{_escape(_format_value(name, base))}</td><td>{_escape(_format_value(name, new))}</td></tr>"
+            )
+    per_old, per_new = metrics.get("per_class_recall_baseline"), metrics.get("per_class_recall_proposed")
+    per_rows = []
+    if isinstance(per_old, dict) and isinstance(per_new, dict):
+        for cls in sorted(set(per_old) | set(per_new), key=lambda c: (str(c) != unseen, str(c))):
+            a, b = per_old.get(cls), per_new.get(cls)
+            tag = ' <span class="muted">(unseen for Model 1)</span>' if str(cls) == unseen else ""
+            per_rows.append(
+                f"<tr><td>{_escape(cls)}{tag}</td>"
+                f"<td>{_escape(_format_value('recall', a) if _is_number(a) else 'N/A')}</td>"
+                f"<td>{_escape(_format_value('recall', b) if _is_number(b) else 'N/A')}</td></tr>"
+            )
+    if not headline and not per_rows:
+        return ""
+    head = (
+        "<thead><tr><th>{}</th><th>Model 1: existing (not trained on the unseen attack)</th>"
+        "<th>Model 2: proposed (all attacks)</th></tr></thead>"
+    )
+    out = "<h3>Model 1 vs Model 2</h3>"
+    if unseen:
+        out += f"<p><strong>Unseen attack for Model 1:</strong> {_escape(unseen)}</p>"
+    if headline:
+        out += "<table>" + head.format("Overall metric (same test split)") + f"<tbody>{''.join(headline)}</tbody></table>"
+    if per_rows:
+        out += "<table>" + head.format("Recall per attack type") + f"<tbody>{''.join(per_rows)}</tbody></table>"
+    return out
+ 
+ 
+def _model_rationale_report(experiment_result: Dict[str, Any]) -> str:
+    """Proposed model + why it was chosen (CodeGenerationAgent's model_recommendation)."""
+    generation = _as_dict(experiment_result.get("code_generation"))
+    recommendation = generation.get("model_recommendation")
+    if isinstance(recommendation, str) and recommendation.strip():
+        recommendation = {"model_name": recommendation}
+    recommendation = _as_dict(recommendation)
+    if not recommendation:
+        return ""
+ 
+    def show(value: Any) -> str:
+        if isinstance(value, (list, tuple)):
+            return "; ".join(str(item) for item in value if str(item).strip())
+        if isinstance(value, dict):
+            return "; ".join(f"{k}: {v}" for k, v in value.items())
+        return str(value)
+ 
+    known = [
+        ("model_name", "Proposed model"),
+        ("algorithm", "Algorithm"),
+        ("architecture", "Architecture"),
+        ("approach_type", "Approach type"),
+        ("reason_for_selection", "Why this model"),
+        ("relationship_to_rank1_hypothesis", "Link to the Rank #1 hypothesis"),
+    ]
+    rows, used = [], set()
+    for key, label in known:
+        used.add(key)
+        value = recommendation.get(key)
+        if value not in (None, "", [], {}):
+            rows.append((label, show(value)))
+    for key, value in recommendation.items():
+        if key not in used and value not in (None, "", [], {}):
+            rows.append((str(key).replace("_", " ").capitalize(), show(value)))
+    if not rows:
+        return ""
+    out = [
+        "<h3>Proposed Model and Rationale</h3>",
+        '<p class="muted">The model/algorithm the automated experiment implemented, as chosen from the '
+        "Rank #1 hypothesis, and the reason it was selected.</p>",
+        "<table><tbody>"
+        + "".join(f"<tr><th>{_escape(label)}</th><td>{_escape(value)}</td></tr>" for label, value in rows)
+        + "</tbody></table>",
+    ]
+    assumptions = [a for a in _as_list(generation.get("assumptions")) if str(a).strip()]
+    if assumptions:
+        out.append("<h3>Assumptions</h3><ul>" + "".join(f"<li>{_escape(show(a))}</li>" for a in assumptions) + "</ul>")
+    plan = generation.get("experiment_plan")
+    if plan:
+        out.append(_json_block(plan, "Experiment plan (from the code generator)"))
+    return "".join(out)
 
 
 def get_results_dir() -> Path:
@@ -112,14 +327,22 @@ def redact_text(text: str) -> str:
 
 
 def sanitize(value: Any) -> Any:
+    """Recursively convert run data into JSON-safe, redacted values."""
+    if isinstance(value, Path):
+        return redact_text(str(value))
     if isinstance(value, str):
         return redact_text(value)
     if isinstance(value, list):
         return [sanitize(item) for item in value]
     if isinstance(value, tuple):
         return [sanitize(item) for item in value]
+    if isinstance(value, set):
+        return [sanitize(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): sanitize(item) for key, item in value.items()}
+        return {
+            str(key): sanitize(item)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -260,7 +483,8 @@ def render_report(run: Dict[str, Any]) -> str:
     comparison_result = run.get("comparison_result")
     if not isinstance(comparison_result, dict) or not comparison_result:
         comparison_result = cycle.get("comparison_result")
-
+    if not isinstance(comparison_result, dict) or not comparison_result:
+        comparison_result = (experiment_result or {}).get("comparison")
     if not isinstance(comparison_result, dict):
         comparison_result = {}
 
@@ -466,7 +690,7 @@ def render_report(run: Dict[str, Any]) -> str:
             f"<p><strong>Title:</strong> "
             f"{_escape(selected_hypothesis.get('title'), 'Untitled')}</p>"
             f"<p><strong>ID:</strong> "
-            f"{_escape(selected_hypothesis.get('id'))}</p>"
+            f"{_escape(_selected_hypothesis_id(selected_hypothesis))}</p>"
             f"<p>{_escape(selected_hypothesis.get('text'))}</p>"
             "</div>"
             "</section>"
@@ -481,6 +705,10 @@ def render_report(run: Dict[str, Any]) -> str:
 
         if evidence_section:
             html_parts.append(evidence_section)
+
+        specification_section = _experiment_specification_section(experiment_result)
+        if specification_section:
+            html_parts.append(specification_section)
 
     # ------------------------------------------------------------
     # Automated experiment
@@ -937,708 +1165,853 @@ def _evidence_reference_section(
     # Evaluation guidance
     # ------------------------------------------------------------
 
-    preferred_metrics = evaluation_guidance.get(
-        "preferred_comparison_metrics"
+    evidence_metrics = _first_non_empty(
+        evaluation_guidance.get("evidence_derived_metrics"),
+        evaluation_guidance.get("evidence_metrics"),
+        evaluation_guidance.get("preferred_comparison_metrics"),
+        evaluation_guidance.get("reference_metrics"),
     )
 
-    if preferred_metrics:
+    if evidence_metrics:
         parts.append(
-            "<h3>Evaluation Guidance</h3>"
-            f"<p><strong>Preferred comparison metrics:</strong> "
-            f"{_escape(_format_report_value(preferred_metrics))}</p>"
+            "<h3>Evidence-Derived Evaluation Metrics</h3>"
+            "<p class=\"muted\">"
+            "These metrics are reported from the evidence/reference material "
+            "and are shown as the metric requirements produced by the experiment "
+            "preparation stage. run_store.py does not select or replace them."
+            "</p>"
         )
+        parts.append(_metric_name_list_table(evidence_metrics))
+
+    reference_only_metrics = _first_non_empty(
+        evaluation_guidance.get("reference_only_metrics"),
+        evaluation_guidance.get("unreproducible_metrics"),
+        evaluation_guidance.get("not_reproducible_metrics"),
+    )
+
+    if reference_only_metrics:
+        parts.append(
+            "<h4>Reference-Only / Not Currently Reproducible Metrics</h4>"
+            "<p class=\"muted\">"
+            "These metrics remain part of the evidence context but are not "
+            "represented as automated experiment measurements unless the "
+            "experiment explicitly produced them."
+            "</p>"
+            + _metric_name_list_table(reference_only_metrics)
+        )
+
+    parts.append(
+        "<p class=\"muted\"><strong>Reference-value policy:</strong> "
+        "values reported by the evidence are reference context only and are "
+        "never copied into the automated experiment results.</p>"
+    )
 
     parts.append("</section>")
 
     return "\n".join(parts)
 
 
-def _experiment_report_section(
-    experiment_result: Dict[str, Any]
-) -> str:
-    """
-    Render the automated experiment section of the run report.
-
-    Displays:
-        - experiment status
-        - execution / repair attempt counts
-        - generated experiment source code
-        - stdout log
-        - stderr log
-        - evaluation metrics
-        - errors
-        - visualizations
-
-    The experiment files remain in the experiment run directory.
-
-    This section provides clickable Gradio file-serving links so that
-    the files can be inspected directly from the run report.
-    """
-    if isinstance(experiment_result, dict) and experiment_result.get("status") == "skipped_for_research_type":
-        return (
-            "<section><h2>Automated Experiment</h2>"
-            "<p><strong>Status:</strong> Skipped for research type "
-            f"{_escape(experiment_result.get('research_type') or 'unknown')}</p>"
-            f"<p>{_escape(experiment_result.get('reason') or 'No hypothesis candidate was available to test.')}</p>"
-            "</section>"
-        )
-
-    # ------------------------------------------------------------
-    # Extract experiment execution data
-    # ------------------------------------------------------------
-
-    if not isinstance(experiment_result, dict):
-        experiment_result = {}
-
-    # Top-level experiment result
-    experiment_execution = experiment_result.get("execution", {})
-    if not isinstance(experiment_execution, dict):
-        experiment_execution = {}
-
-    # The actual runner result may be nested inside "execution"
-    runner_execution = experiment_execution.get("execution", {})
-    if not isinstance(runner_execution, dict):
-        runner_execution = {}
-
-    # If the nested execution does not exist, fall back to the
-    # top-level execution object.
-    if not runner_execution:
-        runner_execution = experiment_execution
-
-
-    # ------------------------------------------------------------
-    # Extract outputs
-    # ------------------------------------------------------------
-
-    outputs = experiment_execution.get("outputs", {})
-    if not isinstance(outputs, dict):
-        outputs = {}
-
-    if not outputs:
-        outputs = experiment_result.get("outputs", {})
-
-    if not isinstance(outputs, dict):
-        outputs = {}
-
-
-    # ------------------------------------------------------------
-    # Metrics / errors
-    # ------------------------------------------------------------
-
-    metrics = outputs.get("metrics", {})
-
-    if not isinstance(metrics, dict):
-        metrics = {}
-
-    errors = (
-        runner_execution.get("errors")
-        or experiment_execution.get("errors")
-        or experiment_result.get("errors", [])
-    )
-
-    if not isinstance(errors, list):
-        errors = [errors]
-
-
-    visualizations = outputs.get("visualizations", [])
-
-    if not isinstance(visualizations, list):
-        visualizations = [visualizations]
-
-
-    # ------------------------------------------------------------
-    # Attempt counts
-    # ------------------------------------------------------------
-
-    experiment_attempts = (
-        runner_execution.get("experiment_attempts")
-        or runner_execution.get("execution_attempts")
-        or runner_execution.get("attempts")
-        or experiment_execution.get("experiment_attempts")
-        or experiment_execution.get("execution_attempts")
-        or experiment_execution.get("attempts")
-        or experiment_result.get("experiment_attempts")
-        or 0
-    )
-
-    repair_attempts = (
-        runner_execution.get("repair_attempts")
-        or runner_execution.get("llm_repair_attempts")
-        or experiment_execution.get("repair_attempts")
-        or experiment_execution.get("llm_repair_attempts")
-        or experiment_result.get("repair_attempts")
-        or 0
-    )
-
-    dependency_install_attempts = (
-        runner_execution.get("dependency_install_attempts")
-        or runner_execution.get("dependency_attempts")
-        or experiment_execution.get("dependency_install_attempts")
-        or experiment_execution.get("dependency_attempts")
-        or experiment_result.get("dependency_install_attempts")
-        or 0
-    )
-
-    # ------------------------------------------------------------
-    # File paths
-    # ------------------------------------------------------------
-
-    run_directory = (
-        experiment_result.get("run_directory")
-        or experiment_execution.get("run_directory")
-        or runner_execution.get("run_directory")
-    )
-
-    generated_code_path = (
-        experiment_result.get("generated_code_path")
-        or experiment_execution.get("generated_code_path")
-        or runner_execution.get("generated_code_path")
-    )
-
-    stdout_path = (
-        runner_execution.get("stdout_path")
-        or experiment_execution.get("stdout_path")
-        or experiment_result.get("stdout_path")
-    )
-
-    stderr_path = (
-        runner_execution.get("stderr_path")
-        or experiment_execution.get("stderr_path")
-        or experiment_result.get("stderr_path")
-    )
-
-    logger.debug(
-        "Final stdout_path: %r",
-        stdout_path,
-    )
-
-    logger.debug(
-        "Final stderr_path: %r",
-        stderr_path,
-    )
-
-    # ------------------------------------------------------------
-    # File path resolver
-    # ------------------------------------------------------------
-
-    def resolve_file_path(
-        file_path: Any
-    ) -> Optional[Path]:
-
-        if not file_path:
-            return None
-
-        path = Path(str(file_path)).expanduser()
-
-        if not path.is_absolute() and run_directory:
-            path = Path(str(run_directory)) / path
-
-        path = path.resolve()
-
-        if not path.exists() or not path.is_file():
-            return None
-
-        return path
-
-    # ------------------------------------------------------------
-    # Helper for creating file links
-    # ------------------------------------------------------------
-
-    def file_link(
-        file_path: Any,
-        label: str,
-    ) -> str:
-
-        if not file_path:
-            return f'<span class="file-missing">{_escape(label)} not available</span>'
-
-        path = resolve_file_path(file_path)
-
-        if path is None:
-            return (
-                f'<span class="file-missing">'
-                f'{_escape(label)} not found'
-                f'</span>'
-            )
-
-        file_url = report_file_url(path)
-
-        return f'<a class="file-link" href="{_escape(file_url)}" target="_blank">{_escape(label)}</a>'
-
-    # ------------------------------------------------------------
-    # Debug logging
-    # ------------------------------------------------------------
-
-    logger.debug(
-        "Experiment report execution keys: %s",
-        list(experiment_execution.keys()),
-    )
-
-    logger.debug(
-        "Experiment report runner execution keys: %s",
-        list(runner_execution.keys()),
-    )
-
-    logger.debug(
-        "stdout_path from experiment_result: %r",
-        stdout_path,
-    )
-
-    logger.debug(
-        "stderr_path from experiment_result: %r",
-        stderr_path,
-    )
-
-    logger.debug(
-        "resolved stdout path: %r",
-        resolve_file_path(stdout_path),
-    )
-
-    logger.debug(
-        "resolved stderr path: %r",
-        resolve_file_path(stderr_path),
-    )
-
-    # ------------------------------------------------------------
-    # Report
-    # ------------------------------------------------------------
-
-    parts = [
-        "<section><h2>Automated Experiment</h2>",
-        (f"<p><strong>Status:</strong> {_escape('Completed' if experiment_result.get('success') else 'Failed')}</p>"),
-    ]
-
-    # ------------------------------------------------------------
-    # Attempt information
-    # ------------------------------------------------------------
-
-    parts.append(
-        "<h3>Execution Summary</h3>"
-        "<table><tbody>"
-        f"<tr><th>Experiment Attempts</th>"
-        f"<td>{_escape(experiment_attempts)}</td></tr>"
-        f"<tr><th>LLM Repair Attempts</th>"
-        f"<td>{_escape(repair_attempts)}</td></tr>"
-        f"<tr><th>Dependency Installation Attempts</th>"
-        f"<td>{_escape(dependency_install_attempts)}</td></tr>"
-        "</tbody></table>"
-    )
-
-    # ------------------------------------------------------------
-    # Experiment files
-    # ------------------------------------------------------------
-
-    parts.append(
-        "<h3>Experiment Files</h3>"
-        "<table><tbody>"
-        "<tr>"
-        "<th>Generated Experiment</th>"
-        f"<td>{file_link(generated_code_path, 'View generated_experiment.py')}</td>"
-        "</tr>"
-        "<tr>"
-        "<th>Standard Output</th>"
-        f"<td>{file_link(stdout_path, 'View stdout.log')}</td>"
-        "</tr>"
-        "<tr>"
-        "<th>Error Output</th>"
-        f"<td>{file_link(stderr_path, 'View stderr.log')}</td>"
-        "</tr>"
-    )
-
-    if run_directory:
-        run_path = Path(str(run_directory))
-
-        if run_path.exists():
-            parts.append(f"<tr><th>Run Directory</th><td><code>{_escape(run_path)}</code></td></tr>")
-
-    parts.append("</tbody></table>")
-
-    # ------------------------------------------------------------
-    # Evaluation metrics
-    # ------------------------------------------------------------
-
-    if metrics:
-        parts.append(
-            "<h3>Evaluation Metrics</h3>"
-            "<table>"
-            "<thead>"
-            "<tr>"
-            "<th>Metric</th>"
-            "<th>Value</th>"
-            "</tr>"
-            "</thead>"
-            "<tbody>"
-        )
-
-        for name, value in metrics.items():
-            formatted_value = _format_report_metric(value, name)
-
-            if (
-                isinstance(value, (int, float))
-                and name.lower() in {
-                    "accuracy",
-                    "acc",
-                    "precision",
-                    "precision_weighted",
-                    "weighted_precision",
-                    "recall",
-                    "recall_weighted",
-                    "weighted_recall",
-                    "f1",
-                    "f1_score",
-                    "f1_weighted",
-                    "weighted_f1",
-                }
-                and 0.0 <= float(value) <= 1.0
-            ):
-                formatted_value = (
-                    f"{formatted_value} "
-                    f"({_escape(value)})"
+def _first_non_empty(*values: Any) -> Any:
+    """Return the first value that is meaningfully populated."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, tuple, set, dict)) and not value:
+            continue
+        return value
+    return None
+
+
+def _normalise_metric_names(value: Any) -> List[str]:
+    """Convert an orchestrator-provided metric collection to display names."""
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        return [value]
+
+    if isinstance(value, dict):
+        # Structured metric definitions may be keyed by metric name.
+        return [str(key) for key in value.keys()]
+
+    if isinstance(value, (list, tuple, set)):
+        names: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                names.append(item)
+            elif isinstance(item, dict):
+                name = _first_non_empty(
+                    item.get("name"),
+                    item.get("metric"),
+                    item.get("metric_name"),
+                    item.get("id"),
                 )
+                if name:
+                    names.append(str(name))
+        return names
 
-            parts.append(
-                "<tr>"
-                f"<td>{_escape(name)}</td>"
-                f"<td>{formatted_value}</td>"
-                "</tr>"
-            )
-
-    # ------------------------------------------------------------
-    # Errors
-    # ------------------------------------------------------------
-
-    if errors:
-        parts.append("<h3>Errors</h3><ul>")
-
-        for error in errors:
-            parts.append(f"<li><pre>{_escape(error)}</pre></li>")
-
-        parts.append("</ul>")
-
-    # ------------------------------------------------------------
-    # Visualizations
-    # ------------------------------------------------------------
-
-    if visualizations:
-        parts.append("<h3>Visualizations</h3><div>")
-
-        for visualization in visualizations:
-            visualization_path = resolve_file_path(
-                visualization
-            )
-
-            if visualization_path is None:
-                continue
-
-            visualization_url = report_file_url(visualization_path)
-
-            label = _escape(visualization_path.name or visualization)
-
-            if visualization_path.suffix.lower() in {
-                ".png",
-                ".jpg",
-                ".jpeg",
-                ".svg",
-            }:
-                parts.append(
-                    f"<figure>"
-                    f'<a href="{_escape(visualization_url)}" '
-                    f'target="_blank">'
-                    f'<img src="{_escape(visualization_url)}" '
-                    f'alt="{label}" '
-                    f'style="max-width:100%;height:auto">'
-                    f"</a>"
-                    f"<figcaption>{label}</figcaption>"
-                    f"</figure>"
-                )
-
-            else:
-                parts.append(f'<p><a href="{_escape(visualization_url)}" target="_blank">{label}</a></p>')
-
-        parts.append("</div>")
-
-    else:
-        parts.append("<p>No visualizations were produced.</p>")
-
-    parts.append("</section>")
-
-    return "\n".join(parts)
+    return [str(value)]
 
 
-def _comparison_report_section(
-    comparison_result: Dict[str, Any],
-) -> str:
-    """Render the paper-vs-automated-experiment comparison."""
-    if not isinstance(comparison_result, dict):
+def _metric_name_list_table(metrics: Any) -> str:
+    """Render metric names without inventing metric values."""
+    names = _normalise_metric_names(metrics)
+    if not names:
         return ""
 
-    success = comparison_result.get("success", False)
-    status = comparison_result.get("status", "unknown")
-    conclusion = comparison_result.get("conclusion", "")
-    error = comparison_result.get("error", "")
+    rows = "".join(
+        f"<tr><td>{_escape(name)}</td></tr>"
+        for name in names
+    )
+    return (
+        "<table><thead><tr><th>Metric</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
 
-    html_parts = [
-        "<section>",
-        "<h2>Paper vs Automated Experiment</h2>",
-        f"<p><strong>Status:</strong> {_escape(status)}</p>",
+
+def _get_experiment_preparation(experiment_result: Dict[str, Any]) -> Dict[str, Any]:
+    preparation = experiment_result.get("experiment_preparation", {})
+    return preparation if isinstance(preparation, dict) else {}
+
+
+def _get_experiment_specification(experiment_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the orchestrator-produced specification, if present."""
+    preparation = _get_experiment_preparation(experiment_result)
+    specification = _first_non_empty(
+        preparation.get("experiment_specification"),
+        experiment_result.get("experiment_specification"),
+        preparation.get("specification"),
+        experiment_result.get("specification"),
+    )
+    return specification if isinstance(specification, dict) else {}
+
+
+def _get_evaluation_guidance(experiment_result: Dict[str, Any]) -> Dict[str, Any]:
+    preparation = _get_experiment_preparation(experiment_result)
+    specification = _get_experiment_specification(experiment_result)
+    guidance = _first_non_empty(
+        preparation.get("evaluation_guidance"),
+        specification.get("evaluation_guidance"),
+        experiment_result.get("evaluation_guidance"),
+    )
+    return guidance if isinstance(guidance, dict) else {}
+ 
+ 
+def _get_evidence_metric_names(experiment_result: Dict[str, Any]) -> List[str]:
+    """Names of metrics that came from the paper evidence (for the 'Source' column)."""
+    guidance = _get_evaluation_guidance(experiment_result)
+    candidates = [
+        guidance.get("directly_reproducible_metrics"),
+        guidance.get("conditionally_comparable_metrics"),
+        guidance.get("evidence_metrics"),
+        guidance.get("evidence_derived_metrics"),  # legacy key
     ]
+    names: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        for name in _normalise_metric_names(candidate):
+            key = name.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(name)
+    return names
+ 
+ 
+def _find_gpu_name(*sources: Any) -> Optional[str]:
+    """Find the GPU model name wherever the generated experiment (or the runner) put it.
+ 
+    The code-generation prompt only says "GPU name"; the LLM-written experiment may save it as
+    gpu_name, "GPU name", gpu_device, cuda_device_name, device_name, gpu_model, or nest it under
+    e.g. {"environment": {...}} / {"hardware": {...}}. Keys are matched case-insensitively.
+    """
+    exact = ("gpu_name", "gpu name", "gpu", "gpu_device", "gpu_device_name", "gpu_model",
+             "cuda_device_name", "cuda_device", "device_name")
+    skip_words = ("count", "memory", "mem", "util", "available", "used", "free", "total", "id", "index")
+ 
+    def clean(value: Any) -> Optional[str]:
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(item).strip() for item in value if str(item).strip())
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text.lower() not in {"n/a", "na", "none", "null", "cpu", "cuda", "unknown", "false", "true"}:
+                return text
+        return None
+ 
+    def search(node: Any, depth: int = 0) -> Optional[str]:
+        if not isinstance(node, dict) or depth > 3:
+            return None
+        lowered = {str(k).strip().lower().replace("-", "_"): v for k, v in node.items()}
+        for key in exact:
+            found = clean(lowered.get(key))
+            if found:
+                return found
+        for key, value in lowered.items():  # e.g. "gpu_product_name", "primary_gpu"
+            if ("gpu" in key or "cuda_device" in key) and not any(w in key for w in skip_words):
+                found = clean(value)
+                if found:
+                    return found
+        for value in node.values():
+            found = search(value, depth + 1)
+            if found:
+                return found
+        return None
+ 
+    for source in sources:
+        found = search(source)
+        if found:
+            return found
+    return None
 
-    if conclusion:
-        html_parts.append(
-            f"<p><strong>Conclusion:</strong> "
-            f"{_escape(conclusion)}</p>"
+ 
+def _experiment_specification_section(experiment_result: Dict[str, Any]) -> str:
+    if not isinstance(experiment_result, dict):
+        return ""
+    preparation = _get_experiment_preparation(experiment_result)
+    specification = _get_experiment_specification(experiment_result)
+    guidance = _get_evaluation_guidance(experiment_result)
+ 
+    selected = _as_dict(
+        _first_non_empty(
+            preparation.get("selected_hypothesis"),
+            specification.get("selected_hypothesis"),
+            experiment_result.get("selected_hypothesis"),
         )
-
-    comparability = comparison_result.get("comparability")
-
-    if isinstance(comparability, dict):
-        comparable = comparability.get("comparable")
-
-        if comparable is not None:
-            html_parts.append(
-                f"<p><strong>Comparable:</strong> "
-                f"{_escape(comparable)}</p>"
-            )
-
-        reason = comparability.get("reason")
-
-        if reason:
-            html_parts.append(
-                f"<p><strong>Reason:</strong> "
-                f"{_escape(reason)}</p>"
-            )
-
-    # Prefer the structured metric comparison because it contains the
-    # calculated difference and percentage-point difference.
-    metric_comparison = comparison_result.get(
-        "metric_comparison"
     )
-
-    paper_metrics = comparison_result.get("paper_metrics")
-    experiment_metrics = comparison_result.get(
-        "experiment_metrics"
+    experiment_block = _as_dict(specification.get("experiment"))
+    dataset_block = specification.get("dataset")
+    if isinstance(dataset_block, dict):
+        dataset_name = dataset_block.get("name")
+        dataset_path = dataset_block.get("path")
+        dataset_role = dataset_block.get("role")
+    else:
+        dataset_name, dataset_path, dataset_role = dataset_block, None, None
+ 
+    experiment_type = _first_non_empty(
+        experiment_block.get("experiment_type"), specification.get("experiment_type")
     )
-
-    if isinstance(metric_comparison, dict) and metric_comparison:
-        html_parts.append(
-            "<h3>Metric Comparison</h3>"
-            "<table>"
-            "<thead>"
-            "<tr>"
-            "<th>Metric</th>"
-            "<th>Paper</th>"
-            "<th>Automated Experiment</th>"
-            "<th>Difference</th>"
-            "</tr>"
-            "</thead>"
-            "<tbody>"
-        )
-
-        for metric in sorted(metric_comparison):
-            values = metric_comparison.get(metric, {})
-
-            if not isinstance(values, dict):
-                values = {}
-
-            paper_value = values.get("paper")
-            experiment_value = values.get("experiment")
-            difference = values.get("difference")
-
-            difference_pp = values.get(
-                "difference_percentage_points"
-            )
-
-            unit = values.get("unit")
-
-            is_percentage = (
-                difference_pp is not None
-                or unit in {
-                    "%",
-                    "percent",
-                    "percentage",
-                    "percentage_points",
-                    "percentage_point",
-                    "pp",
-                }
-                or metric.lower() in {
-                    "accuracy",
-                    "acc",
-                    "precision",
-                    "precision_weighted",
-                    "weighted_precision",
-                    "recall",
-                    "recall_weighted",
-                    "weighted_recall",
-                    "f1",
-                    "f1_score",
-                    "f1_weighted",
-                    "weighted_f1",
-                }
-            )
-
-            if is_percentage:
-                paper_text = (
-                    f"{paper_value * 100:.2f}%"
-                    if isinstance(paper_value, (int, float))
-                    else _escape(paper_value)
-                )
-
-                experiment_text = (
-                    f"{experiment_value * 100:.2f}%"
-                    if isinstance(experiment_value, (int, float))
-                    else _escape(experiment_value)
-                )
-
-                if difference_pp is not None:
-                    difference_text = (
-                        f"{float(difference_pp):+.2f} pp"
-                    )
-                elif difference is not None:
-                    difference_text = (
-                        f"{float(difference) * 100:+.2f} pp"
-                    )
-                else:
-                    difference_text = "N/A"
-
-            else:
-                paper_text = _escape(
-                    _format_report_value(paper_value)
-                )
-
-                experiment_text = _escape(
-                    _format_report_value(experiment_value)
-                )
-
-                if difference is not None:
-                    difference_text = _escape(
-                        f"{float(difference):+.4f}"
-                    )
-                else:
-                    difference_text = "N/A"
-
-                if unit:
-                    difference_text = (
-                        f"{difference_text} "
-                        f"{_escape(unit)}"
-                    )
-
-            html_parts.append(
-                "<tr>"
-                f"<td>{_escape(metric)}</td>"
-                f"<td>{paper_text}</td>"
-                f"<td>{experiment_text}</td>"
-                f'<td class="metric-difference">'
-                f"{difference_text}</td>"
-                "</tr>"
-            )
-
-        html_parts.append(
-            "</tbody></table>"
-        )
-
-    elif isinstance(paper_metrics, dict) or isinstance(
-        experiment_metrics,
-        dict,
+    device = experiment_block.get("device")
+    framework = experiment_block.get("framework")
+    training_required = experiment_block.get("training_required")
+ 
+    evaluation_metrics = _first_non_empty(
+        guidance.get("experiment_evaluation_metrics"),
+        guidance.get("preferred_comparison_metrics"),
+        specification.get("evaluation_metrics"),
+    )
+    conditional = guidance.get("conditionally_comparable_metrics")
+    reference_only = _first_non_empty(
+        guidance.get("reference_only_metrics"), specification.get("reference_only_metrics")
+    )
+ 
+    if not any(
+        value not in (None, "", [], {}, ())
+        for value in (selected, dataset_name, experiment_type, evaluation_metrics, reference_only)
     ):
-        # Backward-compatible fallback for older comparison results
-        # that do not contain metric_comparison.
-        html_parts.append(
-            "<h3>Metric Comparison</h3>"
-            "<table>"
-            "<thead>"
-            "<tr>"
-            "<th>Metric</th>"
-            "<th>Paper</th>"
-            "<th>Automated Experiment</th>"
-            "</tr>"
-            "</thead>"
-            "<tbody>"
+        return ""
+ 
+    rows = []
+    if experiment_type is not None:
+        rows.append(("Experiment Type", _escape(experiment_type)))
+    if dataset_name is not None:
+        text = _escape(dataset_name)
+        if dataset_role:
+            text += f' <span class="muted">({_escape(dataset_role)})</span>'
+        if dataset_path:
+            text += f"<br><code>{_escape(dataset_path)}</code>"
+        rows.append(("Dataset", text))
+    if framework or device:
+        rows.append(("Framework / Requested Device", _escape(f"{framework or 'N/A'} / {device or 'N/A'}")))
+    if training_required is not None:
+        rows.append(("Training Required", _escape(training_required)))
+    if selected:
+        hypothesis_id = _selected_hypothesis_id(selected)
+        text = f"<strong>{_escape(selected.get('title') or 'Rank #1 hypothesis')}</strong>"
+        if hypothesis_id:
+            text += f' <span class="muted">(ID: {_escape(hypothesis_id)})</span>'
+        if selected.get("text"):
+            text += f"<br>{_escape(selected.get('text'))}"
+        rows.append(("Selected Rank #1 Approach", text))
+ 
+    parts = [
+        "<section>",
+        "<h2>Automated Experiment Specification</h2>",
+        '<p class="muted">Specification produced by ExperimentOrchestrator. The Rank #1 '
+        "hypothesis supplies the approach; evidence-derived metrics supply the evaluation "
+        "requirements. Metrics that cannot be measured with the available dataset are not "
+        "fabricated.</p>",
+        "<table><tbody>"
+        + "".join(f"<tr><th>{_escape(label)}</th><td>{value}</td></tr>" for label, value in rows)
+        + "</tbody></table>",
+    ]
+    if evaluation_metrics:
+        parts.append(
+            "<h3>Metrics the Experiment Must Evaluate</h3>"
+            '<p class="muted">Hypothesis metrics plus evidence metrics the dataset can '
+            "reproduce directly.</p>" + _metric_name_list_table(evaluation_metrics)
         )
+    if conditional:
+        parts.append(
+            "<h3>Conditionally Comparable Metrics</h3>"
+            '<p class="muted">Comparable with the paper only if the experimental protocol '
+            "is compatible.</p>" + _metric_name_list_table(conditional)
+        )
+    if reference_only:
+        parts.append(
+            "<h3>Reference-Only / Not Reproducible Here</h3>"
+            '<p class="muted">Kept as evidence context; not required from the generated '
+            "experiment.</p>" + _metric_name_list_table(reference_only)
+        )
+    parts.append("</section>")
+    return "\n".join(parts)
 
-        metric_names = set()
 
-        if isinstance(paper_metrics, dict):
-            metric_names.update(paper_metrics.keys())
-
-        if isinstance(experiment_metrics, dict):
-            metric_names.update(experiment_metrics.keys())
-
-        for metric in sorted(metric_names):
-            paper_value = (
-                paper_metrics.get(metric)
-                if isinstance(paper_metrics, dict)
-                else None
-            )
-
-            experiment_value = (
-                experiment_metrics.get(metric)
-                if isinstance(experiment_metrics, dict)
-                else None
-            )
-
-            paper_text = _format_report_metric(paper_value, metric)
-            experiment_text = _format_report_metric(experiment_value, metric)
-
-            if (
-                isinstance(paper_value, (int, float))
-                and metric.lower() in {
-                    "accuracy",
-                    "acc",
-                    "precision",
-                    "precision_weighted",
-                    "weighted_precision",
-                    "recall",
-                    "recall_weighted",
-                    "weighted_recall",
-                    "f1",
-                    "f1_score",
-                    "f1_weighted",
-                    "weighted_f1",
-                }
-                and 0.0 <= float(paper_value) <= 1.0
-            ):
-                paper_text = f"{paper_text} ({paper_value})"
-
-            if (
-                isinstance(experiment_value, (int, float))
-                and metric.lower() in {
-                    "accuracy",
-                    "acc",
-                    "precision",
-                    "precision_weighted",
-                    "weighted_precision",
-                    "recall",
-                    "recall_weighted",
-                    "weighted_recall",
-                    "f1",
-                    "f1_score",
-                    "f1_weighted",
-                    "weighted_f1",
-                }
-                and 0.0 <= float(experiment_value) <= 1.0
-            ):
-                experiment_text = f"{experiment_text} ({experiment_value})"
-
-            html_parts.append(
-                "<tr>"
-                f"<td>{_escape(metric)}</td>"
-                f"<td>{_escape(paper_text)}</td>"
-                f"<td>{_escape(experiment_text)}</td>"
-                "</tr>"
-            )
-
-        html_parts.append(
+def _experiment_report_section(experiment_result: Dict[str, Any]) -> str:
+    if not isinstance(experiment_result, dict):
+        experiment_result = {}
+ 
+    status_code = str(experiment_result.get("status") or "")
+    if status_code.startswith("skipped"):
+        return (
+            "<section><h2>Automated Experiment</h2>"
+            f"<p><strong>Status:</strong> Skipped ({_escape(status_code.replace('_', ' '))})</p>"
+            f"<p>{_escape(experiment_result.get('reason') or 'The automated experiment did not run.')}</p>"
+            "</section>"
+        )
+ 
+    runner = _as_dict(experiment_result.get("execution"))
+    raw = _as_dict(runner.get("execution"))
+    outputs = _as_dict(runner.get("outputs"))
+    summary = _as_dict(_first_non_empty(outputs.get("summary"), outputs.get("experiment_summary")))
+    validation = _as_dict(_first_non_empty(runner.get("output_validation"), runner.get("validation")))
+    code_generation = _as_dict(experiment_result.get("code_generation"))
+    specification = _get_experiment_specification(experiment_result)
+ 
+    metrics = _as_dict(outputs.get("metrics"))
+    metric_definitions = _as_dict(
+        _first_non_empty(outputs.get("metric_definitions"), runner.get("metric_definitions"))
+    )
+ 
+    # ---- status -------------------------------------------------
+    runner_status = str(_first_non_empty(runner.get("status"), raw.get("status"), "") or "")
+    if experiment_result.get("success"):
+        status_text = "Completed"
+    elif not runner and code_generation and not code_generation.get("success", True):
+        status_text = "Failed during code generation"
+    elif not runner:
+        status_text = "Failed before execution"
+    else:
+        status_text = _RUN_STATUS_LABELS.get(runner_status, runner_status.replace("_", " ").title() or "Failed")
+ 
+    attempts = _count(raw.get("attempts"))
+    repairs = _count(raw.get("repairs"))
+    installs = _count(raw.get("installations"))
+    execution_seconds = _first_non_empty(
+        runner.get("total_execution_seconds"),
+        raw.get("total_execution_seconds"),
+        raw.get("execution_seconds"),
+        metrics.get("total_execution_seconds"),
+    )
+ 
+    run_directory = _first_non_empty(runner.get("run_directory"), runner.get("run_dir"))
+    generated_code_path = _first_non_empty(
+        runner.get("generated_code_path"),
+        runner.get("code_path"),
+        raw.get("code_path"),
+        _as_dict(experiment_result.get("code_generation")).get("code_path"),
+    )
+    stdout_path = _first_non_empty(raw.get("stdout_path"), runner.get("stdout_path"))
+    stderr_path = _first_non_empty(raw.get("stderr_path"), runner.get("stderr_path"))
+    if not stdout_path:
+        found = _find_in_run_dir(run_directory, "stdout.txt")
+        stdout_path = str(found) if found else None
+    if not stderr_path:
+        found = _find_in_run_dir(run_directory, "stderr.txt")
+        stderr_path = str(found) if found else None
+ 
+    def resolve_file_path(file_path: Any) -> Optional[Path]:
+        if not file_path:
+            return None
+        path = Path(str(file_path)).expanduser()
+        if not path.is_absolute() and run_directory:
+            path = Path(str(run_directory)) / path
+        try:
+            path = path.resolve()
+        except OSError:
+            return None
+        return path if path.is_file() else None
+ 
+    def file_link(file_path: Any, label: str) -> str:
+        path = resolve_file_path(file_path)
+        if path is None:
+            return f'<span class="file-missing">{_escape(label)} not found</span>'
+        return (
+            f'<a class="file-link" href="{_escape(report_file_url(path))}" '
+            f'target="_blank">{_escape(label)}</a>'
+        )
+ 
+    parts = [
+        "<section><h2>Automated Experiment</h2>",
+        f"<p><strong>Status:</strong> {_escape(status_text)}</p>",
+    ]
+    rationale = _model_rationale_report(experiment_result)
+    if rationale:
+        parts.append(rationale)
+ 
+    # ---- execution summary -------------------------------------------
+    rows = [
+        ("Experiment ID", _first_non_empty(
+            _get_experiment_preparation(experiment_result).get("experiment_id"),
+            runner.get("experiment_id"),
+        )),
+        ("Execution Attempts", attempts or None),
+        ("LLM Repair Attempts", repairs),
+        ("Dependency Installation Attempts", installs),
+    ]
+    if _is_number(execution_seconds):
+        rows.append(("Total Execution Time", f"{float(execution_seconds):.1f} s"))
+    if raw.get("return_code") is not None:
+        rows.append(("Process Return Code", raw.get("return_code")))
+    parts.append(
+        "<h3>Execution Summary</h3><table><tbody>"
+        + "".join(
+            f"<tr><th>{_escape(label)}</th><td>{_escape(value)}</td></tr>"
+            for label, value in rows
+            if value is not None
+        )
+        + "</tbody></table>"
+    )
+ 
+    # ---- environment ---------------------------------------------------
+    requested_device = _as_dict(specification.get("experiment")).get("device")
+    reported_device = _first_non_empty(summary.get("device"), outputs.get("device"))
+    gpu_name = _find_gpu_name(summary, outputs, raw, runner)
+    if any(value is not None for value in (requested_device, reported_device, gpu_name)):
+        parts.append(
+            "<h3>Execution Environment</h3><table><tbody>"
+            f"<tr><th>Requested Device</th><td>{_escape(requested_device, 'N/A')}</td></tr>"
+            f"<tr><th>Device Used By Experiment</th><td>{_escape(reported_device, 'Not reported')}</td></tr>"
+            f"<tr><th>GPU</th><td>{_escape(gpu_name, 'N/A')}</td></tr>"
             "</tbody></table>"
         )
-
-    if not success and error:
-        html_parts.append(
-            f"<p><strong>Error:</strong> {_escape(error)}</p>"
+ 
+    # ---- files -----------------------------------------------------------
+    file_rows = [("Generated Experiment", file_link(generated_code_path, "View generated_experiment.py"))]
+    for label, filename, link_text in (
+        ("Metrics", "metrics.json", "View metrics.json"),
+        ("Experiment Summary", "experiment_summary.json", "View experiment_summary.json"),
+        ("Training History", "training_history.json", "View training_history.json"),
+        ("Runner Result", "runner_result.json", "View runner_result.json"),
+    ):
+        found = _find_in_run_dir(run_directory, filename)
+        if found:
+            file_rows.append((label, file_link(found, link_text)))
+    if stdout_path:
+        file_rows.append(("Standard Output", file_link(stdout_path, "View stdout")))
+    if stderr_path:
+        file_rows.append(("Error Output", file_link(stderr_path, "View stderr")))
+    checkpoint = _first_non_empty(outputs.get("checkpoint_path"), outputs.get("checkpoint"))
+    if checkpoint:
+        file_rows.append(("Checkpoint", file_link(checkpoint, "Download checkpoint")))
+    if run_directory:
+        file_rows.append(("Run Directory", f"<code>{_escape(run_directory)}</code>"))
+    parts.append(
+        "<h3>Experiment Files</h3><table><tbody>"
+        + "".join(f"<tr><th>{_escape(label)}</th><td>{value}</td></tr>" for label, value in file_rows)
+        + "</tbody></table>"
+    )
+ 
+    # Logs are only written to disk on timeout; show the captured text otherwise.
+    if not stdout_path and raw.get("stdout"):
+        parts.append(
+            f"<details><summary>Standard output</summary><pre>{_escape(_truncate(raw.get('stdout')))}</pre></details>"
         )
+    if not stderr_path and raw.get("stderr"):
+        parts.append(
+            f"<details><summary>Error output</summary><pre>{_escape(_truncate(raw.get('stderr')))}</pre></details>"
+        )
+ 
+    # ---- metrics ------------------------------------------------------------
+    scalar_rows = []
+    structured = {}
+    evidence_names = {name.strip().lower() for name in _get_evidence_metric_names(experiment_result)}
+    for name, value in metrics.items():
+        if name == "total_execution_seconds":
+            continue  # runner timing, shown in the Execution Summary
+        if isinstance(value, (dict, list, tuple)):
+            structured[name] = value
+            continue
+        definition = _as_dict(metric_definitions.get(name))
+        unit = definition.get("unit")
+        source = "Evidence-derived" if str(name).strip().lower() in evidence_names else "Experiment output"
+        description = definition.get("description") or definition.get("definition")
+        scalar_rows.append(
+            "<tr>"
+            f"<td>{_escape(name)}"
+            + (f'<br><span class="muted">{_escape(description)}</span>' if description else "")
+            + "</td>"
+            f"<td>{_escape(source)}</td>"
+            f"<td>{_escape(_format_value(name, value, unit))}</td>"
+            "</tr>"
+        )
+    parts.append("<h3>Evaluation Metrics</h3>")
+    if scalar_rows:
+        parts.append(
+            "<table><thead><tr><th>Metric</th><th>Source</th><th>Automated Experiment Value</th></tr></thead>"
+            "<tbody>" + "".join(scalar_rows) + "</tbody></table>"
+        )
+    elif not structured:
+        parts.append("<p>No evaluation metrics were produced.</p>")
+    for name, value in structured.items():
+        parts.append(_json_block(value, f"{name} (structured metric)"))
+ 
+    two_models = _two_model_report(metrics, summary)
+    if two_models:
+        parts.append(two_models)
+ 
+    # ---- validation / history / summary -------------------------------------
+    if validation and validation.get("valid") is False:
+        warnings = validation.get("warnings") or []
+        parts.append(
+            "<h3>Output Validation</h3><p><strong>Outputs failed validation.</strong></p><ul>"
+            + "".join(f"<li>{_escape(item)}</li>" for item in warnings)
+            + "</ul>"
+        )
+    elif validation.get("warnings"):
+        parts.append(
+            "<h3>Output Validation Warnings</h3><ul>"
+            + "".join(f"<li>{_escape(item)}</li>" for item in validation["warnings"])
+            + "</ul>"
+        )
+    history = outputs.get("training_history")
+    if history:
+        epochs = len(history) if isinstance(history, list) else None
+        label = f"Training history ({epochs} records)" if epochs is not None else "Training history"
+        parts.append(_json_block(history[-5:] if isinstance(history, list) else history, label + " - last records"))
+    parts.append(_json_block(summary, "Experiment summary (experiment_summary.json)"))
+ 
+    # ---- errors ---------------------------------------------------------------
+    errors = runner.get("errors") or experiment_result.get("errors") or []
+    if not isinstance(errors, list):
+        errors = [errors]
+    seen_errors = set()
+    error_blocks = []
+    for error in errors:
+        text = str(error).strip()
+        if not text or text in seen_errors:
+            continue
+        seen_errors.add(text)
+        first_line = text.splitlines()[0][:200]
+        if "\n" in text:
+            error_blocks.append(
+                f"<li><details><summary>{_escape(first_line)}</summary>"
+                f"<pre>{_escape(_truncate(text))}</pre></details></li>"
+            )
+        else:
+            error_blocks.append(f"<li>{_escape(first_line)}</li>")
+    if error_blocks:
+        parts.append("<h3>Errors</h3><ul>" + "".join(error_blocks) + "</ul>")
+ 
+    # ---- visualizations --------------------------------------------------------
+    visualizations = outputs.get("visualizations") or []
+    if not isinstance(visualizations, list):
+        visualizations = [visualizations]
+    rendered_visuals = []
+    for visualization in visualizations:
+        path = resolve_file_path(visualization)
+        if path is None:
+            continue
+        url = _escape(report_file_url(path))
+        label = _escape(path.name)
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".svg"}:
+            rendered_visuals.append(
+                f'<figure><a href="{url}" target="_blank"><img src="{url}" alt="{label}" '
+                f'style="max-width:100%;height:auto"></a><figcaption>{label}</figcaption></figure>'
+            )
+        else:
+            rendered_visuals.append(f'<p><a href="{url}" target="_blank">{label}</a></p>')
+    parts.append(
+        "<h3>Visualizations</h3><div>" + "".join(rendered_visuals) + "</div>"
+        if rendered_visuals
+        else "<p>No visualizations were produced.</p>"
+    )
+    parts.append("</section>")
+    return "\n".join(parts)
 
-    html_parts.append("</section>")
+def _comparison_metric_cell(value: Any, unit: Any, percentage: bool) -> str:
+    if value is None:
+        return "Not available"
+    if not _is_number(value):
+        return _escape(value)
+    number = float(value)
+    if percentage:
+        if abs(number) <= 1:
+            # Percentage plus the raw proportion, e.g. "91.00% (0.91)".
+            return _escape(f"{number * 100.0:.2f}% ({value})")
+        return _escape(f"{number:.2f}%")
+    text = f"{number:.4g}"
+    return _escape(f"{text} {unit}" if unit else text)
+ 
+ 
+def _as_list(value: Any) -> List[Any]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+ 
+ 
+def _text_list(*values: Any) -> List[str]:
+    out: List[str] = []
+    for value in values:
+        if value in (None, "", [], {}):
+            continue
+        for item in (value if isinstance(value, (list, tuple, set)) else [value]):
+            if isinstance(item, dict):
+                item = item.get("name") or item.get("model") or item.get("title") or ""
+            text = str(item).strip()
+            if text and text not in out:
+                out.append(text)
+    return out
+ 
+ 
+def _model_comparison_report(comparison_result: Dict[str, Any], full_experiment_result: Optional[Dict[str, Any]]) -> str:
+    """Published (paper evidence) model vs our Rank #1 hypothesis / implemented model.
+ 
+    PaperReader stores `models_or_systems` / `datasets_or_testbeds` but ExperimentComparator reads
+    `models` / `datasets`, so comparability.paper_model is normally empty; read the paper keys directly.
+    """
+    def short(text: Any, limit: int = 800) -> str:
+        text = " ".join(str(text).split())
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+ 
+    comparability = _as_dict(comparison_result.get("comparability"))
+    paper_result = _as_dict(comparison_result.get("paper_result"))
+    reference = _as_dict(comparison_result.get("reference_experiment"))
+    models, baselines, datasets, objectives, urls = [], [], [], [], []
+    for source in _as_list(reference.get("sources")):
+        source = _as_dict(source)
+        details = _as_dict(source.get("experiment_details"))
+        models += _text_list(details.get("models_or_systems"), details.get("models"), source.get("models"))
+        baselines += _text_list(details.get("baselines"))
+        datasets += _text_list(details.get("datasets_or_testbeds"), details.get("datasets"), source.get("datasets"))
+        objectives += _text_list(details.get("experiment_objective"), details.get("objective"))
+        urls += _text_list(source.get("source_url"))
+    models = _text_list(models, paper_result.get("models"), comparability.get("paper_model"))
+    datasets = _text_list(datasets, paper_result.get("datasets"), comparability.get("paper_dataset"))
+ 
+    ours = _as_dict(full_experiment_result)
+    preparation = _as_dict(ours.get("experiment_preparation"))
+    hypothesis = _as_dict(preparation.get("selected_hypothesis"))
+    summary = _as_dict(_as_dict(_as_dict(ours.get("execution")).get("outputs")).get("summary"))
+    dataset_spec = _as_dict(_get_experiment_specification(ours)).get("dataset")
+    spec_dataset = dataset_spec.get("name") if isinstance(dataset_spec, dict) else dataset_spec
+    recommendation = _as_dict(_as_dict(ours.get("code_generation")).get("model_recommendation"))
+    our_models = _text_list(
+        _recommended_model_label(ours), summary.get("model"), summary.get("model_name"), summary.get("model_algorithm"),
+        summary.get("model/algorithm"), summary.get("algorithm"), comparability.get("experiment_model"),
+    )
+    our_datasets = _text_list(summary.get("dataset"), spec_dataset, comparability.get("experiment_dataset"))
+    title = hypothesis.get("title") or comparison_result.get("hypothesis_title")
+    hyp_id = _selected_hypothesis_id(hypothesis) or comparison_result.get("hypothesis_id")
+    text = hypothesis.get("text")
+ 
+    if not any([models, baselines, objectives, our_models, title, text]):
+        return ""
+ 
+    def cell(items: List[str], empty: str = "Not reported") -> str:
+        return _escape(", ".join(items)) if items else f'<span class="muted">{_escape(empty)}</span>'
+ 
+    approach = ""
+    if title:
+        approach = f"<strong>{_escape(title)}</strong>"
+        if hyp_id:
+            approach += f' <span class="muted">(ID: {_escape(hyp_id)})</span>'
+    if text:
+        approach += ("<br>" if approach else "") + _escape(short(text))
+    links = "<br>".join(f'<a href="{_escape(u)}" target="_blank">{_escape(short(u, 90))}</a>' for u in urls)
+    rows = [
+        ("Proposed model / system", cell(models), cell(our_models, "Not reported by the experiment")),
+        ("Approach / objective", cell([short(o) for o in objectives[:3]]), approach or '<span class="muted">Not available</span>'),
+        ("Baselines", cell(baselines), '<span class="muted">Not applicable</span>'),
+        ("Dataset / testbed", cell(datasets), cell(our_datasets)),
+        ("Source", links or '<span class="muted">Not available</span>', "Rank #1 hypothesis"),
+    ]
+    return (
+        "<h3>Proposed Models: Paper vs Rank #1 Hypothesis</h3><table><thead><tr><th></th>"
+        "<th>Published (paper evidence)</th><th>Automated experiment (Rank #1 hypothesis)</th></tr></thead><tbody>"
+        + "".join(f"<tr><th>{_escape(label)}</th><td>{a}</td><td>{b}</td></tr>" for label, a, b in rows)
+        + "</tbody></table>"
+    )
 
-    return "\n".join(html_parts)
+ 
+def _comparison_report_section(comparison_result: Dict[str, Any], full_experiment_result: Optional[Dict[str, Any]] = None) -> str:
+    if not isinstance(comparison_result, dict) or not comparison_result:
+        return ""
+ 
+    status = str(comparison_result.get("status") or "unknown")
+    paper_result = _as_dict(comparison_result.get("paper_result"))
+    experiment_side = _as_dict(comparison_result.get("experiment_result"))
+    comparability = _as_dict(comparison_result.get("comparability"))
+    explanation = _as_dict(comparison_result.get("explanation"))
+    errors = [str(item) for item in _as_list(comparison_result.get("errors") or comparison_result.get("error"))]
+ 
+    metric_comparison = _as_dict(comparison_result.get("metric_comparison"))
+    if isinstance(metric_comparison.get("metrics"), dict):
+        comparison_metrics = metric_comparison["metrics"]
+    else:  # older saved runs stored {metric: {...}} directly
+        comparison_metrics = {k: v for k, v in metric_comparison.items() if isinstance(v, dict)}
+ 
+    paper_metrics = _as_dict(_first_non_empty(paper_result.get("metrics"), comparison_result.get("paper_metrics")))
+    experiment_metrics = _as_dict(
+        _first_non_empty(experiment_side.get("metrics"), comparison_result.get("experiment_metrics"))
+    )
+ 
+    conclusion = _first_non_empty(
+        comparison_result.get("conclusion"),
+        explanation.get("overall_assessment"),
+        comparability.get("reason"),
+        comparison_result.get("reason"),
+        "; ".join(errors),
+        "No comparison conclusion was generated.",
+    )
+ 
+    primary_metrics = set()
+    reference_experiment = _as_dict(comparison_result.get("reference_experiment"))
+    for source in _as_list(reference_experiment.get("sources")):
+        details = _as_dict(_as_dict(source).get("experiment_details"))
+        for metric in _as_list(details.get("primary_metrics")):
+            if isinstance(metric, str) and metric.strip():
+                primary_metrics.add(re.sub(r"[^a-z0-9]+", "_", metric.lower()).strip("_"))
+ 
+    parts = [
+        "<section><h2>Paper vs Automated Experiment</h2>",
+        f"<p><strong>Status:</strong> {_escape(status.replace('_', ' ').title())}</p>",
+        f"<p><strong>Conclusion:</strong> {_escape(conclusion)}</p>",
+    ]
+    if explanation.get("reproduction_level"):
+        parts.append(f"<p><strong>Reproduction level:</strong> {_escape(explanation['reproduction_level'])}</p>")
+    if primary_metrics:
+        parts.append(f"<p><strong>Paper-declared primary metrics:</strong> {_escape(', '.join(sorted(primary_metrics)))}</p>")
+ 
+    model_table = _model_comparison_report(comparison_result, full_experiment_result)
+    if model_table:
+        parts.append(model_table)
+ 
+    # ---- comparability -----------------------------------------------------
+    if comparability:
+        context_rows = [
+            ("Comparable", comparability.get("comparable")),
+            ("Comparison level", comparability.get("comparison_level")),
+            ("Reason", comparability.get("reason")),
+            ("Published model/system", comparability.get("paper_model")),
+            ("Automated experiment model", comparability.get("experiment_model")),
+            ("Published dataset/testbed", comparability.get("paper_dataset")),
+            ("Experiment dataset", comparability.get("experiment_dataset")),
+            ("Dataset warning", comparability.get("dataset_warning")),
+        ]
+        rows = "".join(
+            f"<tr><th>{_escape(label)}</th><td>{_escape(_format_report_value(value))}</td></tr>"
+            for label, value in context_rows
+            if value not in (None, "", [], {})
+        )
+        if rows:
+            parts.append(f"<h3>Comparability</h3><table><tbody>{rows}</tbody></table>")
+        warnings = _as_list(comparability.get("warnings"))
+        if warnings:
+            parts.append("<ul>" + "".join(f"<li>{_escape(w)}</li>" for w in warnings) + "</ul>")
+ 
+    # ---- metric table ---------------------------------------------------------
+    metric_names = sorted(comparison_metrics or set(paper_metrics) | set(experiment_metrics))
+    if metric_names:
+        body = []
+        for name in metric_names:
+            record = _as_dict(comparison_metrics.get(name))
+            unit = _first_non_empty(record.get("reference_unit"), record.get("unit"))
+            diff_pp = record.get("difference_percentage_points")
+            percentage = (
+                diff_pp is not None
+                or str(unit or "").lower() in _PERCENT_UNITS
+                or (not unit and str(name).lower() in _PERCENT_METRIC_NAMES)
+            )
+            paper_value = record.get("paper", paper_metrics.get(name))
+            experiment_value = record.get("experiment", experiment_metrics.get(name))
+            paper_text = _comparison_metric_cell(paper_value, unit, percentage)
+ 
+            value_type = str(record.get("reference_value_type") or "measured_value").lower()
+            relation = str(record.get("reference_relation") or "exact").lower()
+            if value_type == "upper_bound":
+                paper_text = {"less_than": "&lt; "}.get(relation, "&lt;= ") + paper_text
+            elif value_type == "lower_bound":
+                paper_text = {"greater_than": "&gt; "}.get(relation, "&gt;= ") + paper_text
+ 
+            difference = record.get("difference")
+            if diff_pp is not None:
+                diff_text = f"{float(diff_pp):+.2f} pp"
+            elif value_type != "measured_value":
+                diff_text = _first_non_empty(
+                    record.get("comparison_interpretation"), "Compared with reported constraint"
+                )
+                if record.get("constraint_satisfied") is not None:
+                    diff_text = f"{diff_text} (satisfied: {record['constraint_satisfied']})"
+            elif _is_number(difference):
+                diff_text = f"{float(difference) * 100:+.2f} pp" if percentage else f"{float(difference):+.4g}"
+                if unit and not percentage:
+                    diff_text += f" {unit}"
+            else:
+                diff_text = "Not comparable"
+ 
+            label = str(name).replace("_", " ").title()
+            if re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_") in primary_metrics:
+                label += " (paper primary)"
+            body.append(
+                "<tr>"
+                f"<td>{_escape(label)}</td>"
+                f"<td>{paper_text}</td>"
+                f"<td>{_comparison_metric_cell(experiment_value, unit, percentage)}</td>"
+                f'<td class="metric-difference">{_escape(diff_text)}</td>'
+                "</tr>"
+            )
+        parts.append(
+            "<h3>Metric Comparison</h3><table><thead><tr><th>Metric</th><th>Published evidence</th>"
+            "<th>Automated experiment</th><th>Difference / interpretation</th></tr></thead><tbody>"
+            + "".join(body)
+            + "</tbody></table>"
+        )
+        for key, title in (
+            ("satisfied_metrics", "Constraints satisfied"),
+            ("not_satisfied_metrics", "Constraints not satisfied"),
+            ("inconclusive_metrics", "Inconclusive"),
+        ):
+            names = _as_list(metric_comparison.get(key))
+            if names:
+                parts.append(f"<p><strong>{title}:</strong> {_escape(', '.join(map(str, names)))}</p>")
+    else:
+        parts.append("<p>No shared, comparable numerical metrics were available.</p>")
+ 
+    # ---- explanation --------------------------------------------------------------
+    for key, title in (
+        ("confirmed_observations", "Confirmed observations"),
+        ("possible_explanations", "Possible explanations"),
+        ("limitations", "Limitations"),
+        ("recommendation", "Recommendation"),
+    ):
+        items = _as_list(explanation.get(key))
+        if items:
+            parts.append(
+                f"<h3>{title}</h3><ul>"
+                + "".join(
+                    f"<li>{_escape(_format_report_value(item))}</li>" for item in items
+                )
+                + "</ul>"
+            )
+ 
+    shown_errors = [e for e in errors if e and e != str(conclusion)]
+    if shown_errors:
+        parts.append("<h3>Errors</h3><ul>" + "".join(f"<li>{_escape(e)}</li>" for e in shown_errors) + "</ul>")
+    parts.append("</section>")
+    return "\n".join(parts)
 
 
 def write_report(run: Dict[str, Any]) -> Path:
