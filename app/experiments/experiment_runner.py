@@ -1292,12 +1292,47 @@ class ExperimentRunner:
         else:
             status = "failed"
 
+        # [log-files-patch] always persist the captured process output, not only on timeout.
+        stdout_path = run_dir / "stdout.txt"
+        stderr_path = run_dir / "stderr.txt"
+        for log_path, log_text in (
+            (stdout_path, final_stdout),
+            (stderr_path, final_stderr),
+        ):
+            try:
+                log_path.write_text(log_text or "", encoding="utf-8")
+            except OSError as log_error:
+                logger.warning("Could not write %s: %s", log_path, log_error)
+        # [gpu-name-patch] ask the NVIDIA driver for the GPU model so it is reported even if the
+        # generated experiment does not write it into experiment_summary.json.
+        gpu_name = None
+        try:
+            gpu_probe = subprocess.Popen(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                gpu_stdout, _ = gpu_probe.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                gpu_probe.kill()
+                gpu_probe.communicate()
+                gpu_stdout = ""
+            if gpu_probe.returncode == 0:
+                gpu_names = [line.strip() for line in gpu_stdout.splitlines() if line.strip()]
+                gpu_name = ", ".join(gpu_names) or None
+        except (OSError, subprocess.SubprocessError):
+            gpu_name = None
         result = {
             "success": final_return_code == 0 and not cancelled,
             "status": status,
             "return_code": final_return_code,
             "stdout": final_stdout,
             "stderr": final_stderr,
+            "gpu_name": gpu_name,
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
             "execution_seconds": total_execution_seconds,
             "total_execution_seconds": total_execution_seconds,
             "attempts": attempts,

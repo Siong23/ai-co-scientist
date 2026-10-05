@@ -48,7 +48,7 @@ from app.experiments.experiment_orchestrator import ExperimentOrchestrator
 
 CONFIG_PATH = Path(
     "app/experiments/results/runs/"
-    "E7546_20260929_105937_551410/"
+    "E5886_20261005_134640_680154/"
     "experiment_config.json"
 )
 
