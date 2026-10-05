@@ -62,6 +62,15 @@ def disable_keyless_openalex(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def disable_keyless_semantic_scholar(monkeypatch, request):
+    """Semantic Scholar needs no credential, so retrievers built in offline tests must not include it."""
+
+    if request.node.get_closest_marker("network") or request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setitem(config.setdefault("semantic_scholar", {}), "enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def disable_live_embeddings(monkeypatch, request):
     """Keep offline tests from waiting on the configured LM Studio server."""
 
