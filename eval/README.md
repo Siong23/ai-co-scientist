@@ -454,8 +454,9 @@ one metric is below threshold or no metric could run, and 2 for invalid input,
 configuration, or judge errors.
 
 The default fixed goal is `goals/Goal1.txt`. Supply
-another goal with `--goal-file PATH`. A goal mismatch is reported as a
-validation error and returns a non-zero exit status.
+another goal with `--goal-file PATH`. Goal comparison normalizes whitespace
+and treats one final period as optional; other text differences are reported
+as a validation error and return a non-zero exit status.
 
 The selection behavior intentionally mirrors `app.run_store._final_hypotheses`:
 `ranking_final` wins, otherwise the highest-numbered ranking step wins, and
