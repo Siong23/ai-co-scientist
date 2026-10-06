@@ -1,11 +1,10 @@
-from pathlib import Path
 import json
+from pathlib import Path
+
 import numpy as np
 import torch
-from sklearn.metrics import (
-    accuracy_score, precision_recall_fscore_support,
-    classification_report, confusion_matrix
-)
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
+
 
 @torch.no_grad()
 def predict(model, loader, device="cpu"):

@@ -56,9 +56,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..config import config
-from ..utils import logger
 from ..data.dataset_manager import DatasetManager
-
+from ..utils import logger
 
 # ============================================================
 # LLM Boundary
@@ -1652,6 +1651,49 @@ Do not display plots interactively.
 Use a non-interactive matplotlib backend.
 
 Save visualization files inside EXPERIMENT_OUTPUT_DIR.
+For classification and model-training experiments, ALWAYS save these four PNG files
+inside EXPERIMENT_OUTPUT_DIR using exactly these file names (the runner validates them):
+loss_visualization.png - training/validation loss per epoch; if the model has no epochs,
+a bar chart of the final loss or error value.
+accuracy_visualization.png - accuracy per epoch if tracked; otherwise a bar of final accuracy.
+confusion_matrix_visualization.png - confusion matrix of the test predictions.
+performance_metrics_visualization.png - bar chart of the main evaluation metrics.
+Plot only values the experiment really measured. Close every figure after saving it.
+============================================================
+15b. TWO-MODEL PROTOCOL FOR UNSEEN ATTACKS
+============================================================
+Apply this section ONLY when the research goal or the selected hypothesis is about detecting
+attack types that an existing model fails to recognise (unseen, novel, zero-day or unknown
+attack types) or about detecting ALL attack types of the dataset.
+The experiment must build and compare TWO models on the SAME data split:
+1. UNSEEN ATTACK. Use the environment variable UNSEEN_ATTACK when it is set (match
+case-insensitively). Otherwise use the attack type named ICMPFlood when the dataset has it;
+if not, use the non-benign attack type with the fewest rows that still has at least 1000 rows.
+Record it as unseen_attack in experiment_summary.json and in metrics.json.
+2. SHARED SPLIT. Make ONE stratified train/test split of ALL rows (fixed seed, stratified by the
+attack type column, test size about 30 percent). Very large classes may be down-sampled for
+speed, but keep every row of the small classes, including the unseen attack. Fit scalers and
+encoders on training rows only. Never tune anything on the test split.
+3. MODEL 1 - EXISTING MODEL (baseline). Train on the training rows WITHOUT the unseen attack,
+so it can detect every other attack but cannot know the unseen one. Use a standard, fast
+classifier (for example a Random Forest or a small MLP). Evaluate it on the FULL test split,
+including the unseen attack rows.
+4. MODEL 2 - PROPOSED MODEL (from the Rank #1 hypothesis). Train on the training rows INCLUDING
+the unseen attack so that it learns to detect all attack types. Handle the extreme class
+imbalance explicitly (class weights, oversampling or a suitable loss) because the unseen attack
+has very few rows. Evaluate it on the same full test split.
+5. METRICS in metrics.json. The headline names accuracy, precision_weighted, recall_weighted,
+f1_weighted, f1_macro and false_alarm_rate (false positives over false positives plus true
+negatives, benign as the negative class) must be the PROPOSED model's values on the full test
+split. Add the same metrics for Model 1 with the prefix baseline_ (for example
+baseline_f1_weighted). Also add: unseen_attack_recall and baseline_unseen_attack_recall (recall
+on the unseen attack rows), unseen_attack_missed_as_benign_rate and
+baseline_unseen_attack_missed_as_benign_rate, and the dictionaries per_class_recall_proposed and
+per_class_recall_baseline (attack type name to recall).
+6. EXPLANATION. In model_recommendation fill reason_for_selection with a concrete explanation of
+why this proposed model suits the class imbalance and the unseen attack, and fill
+relationship_to_rank1_hypothesis. In experiment_summary.json also write baseline_model (name and
+the classes it was trained on) and proposed_model (name and the classes it was trained on).
 
 ============================================================
 16. CODE QUALITY
@@ -2221,6 +2263,12 @@ It MUST identify, when applicable:
 - approach_type
 - reason_for_selection
 - relationship_to_rank1_hypothesis
+reason_for_selection MUST be a substantive explanation of 3 to 6 sentences, written for a
+supervisor, covering: (a) which limitation of the existing or baseline approach this model
+addresses; (b) the mechanism by which the model is expected to achieve the goal of the
+Rank #1 hypothesis (for unseen or novel attack detection: how it treats a class it has not
+seen during training); (c) why it was chosen over simpler alternatives; (d) what this
+experiment cannot prove. Do not claim results that have not been measured.
 
 The recommendation MUST describe the model/algorithm selected from
 the Rank #1 hypothesis.

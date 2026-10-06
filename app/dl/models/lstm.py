@@ -1,5 +1,5 @@
-import torch
 from torch import nn
+
 
 class LSTMClassifier(nn.Module):
     def __init__(self, input_size, hidden_size=64, num_layers=1, dropout=0.3,

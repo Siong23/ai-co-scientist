@@ -18,19 +18,18 @@ Integration tests (live LM Studio):
 
 import ast
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.agents_modules.code_generation_agent import CodeGenerationAgent, _output_token_limit
 from app.config import load_config
+from app.data.dataset_manager import DatasetManager
 from app.experiments.experiment_orchestrator import ExperimentOrchestrator
 from app.experiments.experiment_runner import ExperimentRunner
-from app.data.dataset_manager import DatasetManager
 from app.utils import call_llm
-
 
 VALID_SPECIFICATION = {
     "dataset": {
@@ -1337,7 +1336,7 @@ def test_experiment_orchestrator_uses_repository_dataset_by_default(
         lambda self: "data/5g_nidd/5g_nidd.csv",
     )
 
-    orchestrator = ExperimentOrchestrator()
+    ExperimentOrchestrator()
 
 
 def test_config_loads_from_repository_when_cwd_is_elsewhere(

@@ -13,9 +13,9 @@ Run with:
     All-model comparison
         python app/experiments/experiment_visualization.py --compare --checkpoints app/experiments/results/checkpoints/lstm.pt app/experiments/results/checkpoints/lstm_attention.pt app/experiments/results/checkpoints/bilstm.pt app/experiments/results/checkpoints/bitad.pt --metrics-files app/experiments/results/metrics/lstm.json app/experiments/results/metrics/lstm_attention.json app/experiments/results/metrics/bilstm.json app/experiments/results/metrics/bitad.json
 '''
-from pathlib import Path
 import argparse
 import json
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -1503,7 +1503,7 @@ def visualize_model(
         )
 
     print(
-        f"\nAll visualizations saved in:"
+        "\nAll visualizations saved in:"
     )
 
     print(

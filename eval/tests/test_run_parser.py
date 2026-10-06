@@ -63,6 +63,8 @@ def test_goal_validation_normalizes_whitespace_and_rejects_mismatch():
     run = run_fixture({}, goal="Improve   perovskite\n humidity stability.")
 
     assert validate_research_goal(run, FIXED_GOAL) == run["research_goal"]["description"]
+    goal_without_period = FIXED_GOAL.removesuffix(".")
+    assert validate_research_goal(run_fixture({}, goal=goal_without_period), FIXED_GOAL) == goal_without_period
     with pytest.raises(RunValidationError, match="research goal mismatch"):
         validate_research_goal(run, "A different goal")
 

@@ -1,9 +1,10 @@
 from .models import (
-    LSTMClassifier,
-    LSTMAttentionClassifier,
     BiLSTMClassifier,
     BiTAD,
+    LSTMAttentionClassifier,
+    LSTMClassifier,
 )
+
 
 def build_model(name, input_size, num_classes, config):
     name = name.lower().replace("-", "_").replace(" ", "_")

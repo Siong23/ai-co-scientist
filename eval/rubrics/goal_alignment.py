@@ -2,12 +2,12 @@
 
 
 def normalize_goal(goal: str) -> str:
-    """Normalize inconsequential whitespace before exact goal comparison."""
+    """Normalize whitespace and one optional final period before comparison."""
     if not isinstance(goal, str):
         raise TypeError("goal must be a string")
-    return " ".join(goal.split())
+    return " ".join(goal.split()).removesuffix(".")
 
 
 def goals_match(actual: str, expected: str) -> bool:
-    """Return whether two research goals match after whitespace normalization."""
+    """Return whether goals match after whitespace and terminal-period normalization."""
     return normalize_goal(actual) == normalize_goal(expected)

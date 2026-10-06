@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+import html as html_lib
 from copy import deepcopy
 from pathlib import Path
 from queue import Empty, Queue
@@ -15,11 +16,11 @@ from numpy.ma import count  # noqa: F401
 from app.agents import SupervisorAgent
 from app.config import config
 from app.data.dataset_manager import DatasetManager
-from app.experiments.experiment_orchestrator import (
-    ExperimentOrchestrator,
-)
 from app.experiments.experiment_comparator import (
     ExperimentComparator,
+)
+from app.experiments.experiment_orchestrator import (
+    ExperimentOrchestrator,
 )
 from app.models import ContextMemory, ResearchGoal
 from app.research_state import LocalJSONResearchStateStore, ResearchStateError
@@ -62,9 +63,17 @@ available_models: List[str] = []
 CONFIGURED_LLM_MODEL = get_lmstudio_model()
 SAFE_FALLBACK_LLM_MODEL = CONFIGURED_LLM_MODEL or "-- Select Model --"
 CYCLE_TIMEOUT_SECONDS = int(os.getenv("CO_SCIENTIST_CYCLE_TIMEOUT_SECONDS", "1800"))
+EXPERIMENT_DATASET_NAME = os.getenv(
+    "EXPERIMENT_DATASET_NAME",
+    "5G-NIDD",
+)
+EXPERIMENT_DATASET_PATH = (
+    os.getenv("EXPERIMENT_DATASET_PATH", "data/5g_nidd/5g_nidd.csv").strip()
+    or None
+)
 EXPERIMENT_DEVICE = os.getenv(
     "EXPERIMENT_DEVICE",
-    "cpu",
+    "cuda",
 )
 EXPERIMENT_TIMEOUT_SECONDS = int(
     os.getenv(
@@ -83,6 +92,156 @@ EXPERIMENT_MIN_BUDGET_SECONDS = int(
 )
 CYCLE_PROGRESS_INTERVAL_SECONDS = 5
 _cycle_run_lock = threading.Lock()
+
+_PCT_METRICS = {
+    "accuracy", "acc", "precision", "precision_weighted", "weighted_precision",
+    "recall", "recall_weighted", "weighted_recall", "f1", "f1_score",
+    "f1_weighted", "weighted_f1", "macro_f1", "micro_f1", "balanced_accuracy",
+}
+_PCT_UNITS = {"%", "percent", "percentage", "percentage_point", "percentage_points", "pp"}
+ 
+ 
+def _fmt_experiment_metric(name: str, value: Any, unit: Any = None) -> str:
+    """Two decimals for numbers (the Gradio panel convention); units appended."""
+    if value is None:
+        return "N/A"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    text = f"{value:.2f}"
+    unit_text = str(unit).strip() if unit else ""
+    return f"{text} {unit_text}" if unit_text else text
+ 
+ 
+def _first_error_line(error: Any, limit: int = 300) -> str:
+    text = str(error).strip()
+    first = text.splitlines()[0] if text else ""
+    return first[:limit]
+ 
+ 
+def _model_rationale_html(experiment_result: Dict[str, Any]) -> str:
+    """"Proposed Model and Rationale" from the code generator's `model_recommendation`.
+ 
+    CodeGenerationAgent returns experiment_result["code_generation"]["model_recommendation"] with
+    model_name, algorithm, architecture, approach_type, reason_for_selection and
+    relationship_to_rank1_hypothesis, plus `assumptions` and `experiment_plan`.
+    """
+    generation = experiment_result.get("code_generation")
+    generation = generation if isinstance(generation, dict) else {}
+    recommendation = generation.get("model_recommendation")
+    if isinstance(recommendation, str) and recommendation.strip():
+        recommendation = {"model_name": recommendation}
+    if not isinstance(recommendation, dict) or not recommendation:
+        return ""
+ 
+    def show(value: Any) -> str:
+        if isinstance(value, (list, tuple)):
+            return "; ".join(str(item) for item in value if str(item).strip())
+        if isinstance(value, dict):
+            return "; ".join(f"{k}: {v}" for k, v in value.items())
+        return str(value)
+ 
+    known = [
+        ("model_name", "Proposed model"),
+        ("algorithm", "Algorithm"),
+        ("architecture", "Architecture"),
+        ("approach_type", "Approach type"),
+        ("reason_for_selection", "Why this model"),
+        ("relationship_to_rank1_hypothesis", "Link to the Rank #1 hypothesis"),
+    ]
+    rows, used = [], set()
+    for key, label in known:
+        value = recommendation.get(key)
+        used.add(key)
+        if value not in (None, "", [], {}):
+            rows.append((label, show(value)))
+    for key, value in recommendation.items():  # any extra fields the model returned
+        if key not in used and value not in (None, "", [], {}):
+            rows.append((str(key).replace("_", " ").capitalize(), show(value)))
+    if not rows:
+        return ""
+ 
+    body = "".join(
+        f"<tr><th style='text-align:left;vertical-align:top'>{html_lib.escape(label)}</th>"
+        f"<td>{html_lib.escape(value)}</td></tr>"
+        for label, value in rows
+    )
+    assumptions = generation.get("assumptions")
+    assumption_html = ""
+    if isinstance(assumptions, list) and assumptions:
+        assumption_html = (
+            "<p><strong>Assumptions:</strong></p><ul>"
+            + "".join(f"<li>{html_lib.escape(show(item))}</li>" for item in assumptions)
+            + "</ul>"
+        )
+    return (
+        "<h3>🧠 Proposed Model and Rationale</h3>"
+        f"<table><tbody>{body}</tbody></table>{assumption_html}"
+    )
+ 
+ 
+_TWO_MODEL_HEADLINE = ("accuracy", "precision_weighted", "recall_weighted", "f1_weighted", "f1_macro", "false_alarm_rate")
+ 
+ 
+def _recommended_model_label(experiment_result: Optional[Dict[str, Any]]) -> str:
+    generation = (experiment_result or {}).get("code_generation") if isinstance(experiment_result, dict) else None
+    recommendation = generation.get("model_recommendation") if isinstance(generation, dict) else None
+    if isinstance(recommendation, str):
+        return recommendation.strip()
+    if not isinstance(recommendation, dict):
+        return ""
+    name = str(recommendation.get("model_name") or "").strip()
+    architecture = recommendation.get("architecture")
+    architecture = " ".join(str(architecture).split()) if architecture and not isinstance(architecture, (dict, list)) else ""
+    if architecture and architecture.lower() not in name.lower():
+        return f"{name} - {architecture[:200]}" if name else architecture[:200]
+    return name
+ 
+ 
+def _two_model_html(metrics: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> str:
+    """Model 1 (existing; never saw the unseen attack) vs Model 2 (proposed; trained on all attacks).
+ 
+    Reads the metric names required by the "TWO-MODEL PROTOCOL" prompt section: headline metrics
+    (= proposed model), baseline_<metric> (= Model 1), per_class_recall_baseline /
+    per_class_recall_proposed, and unseen_attack. Shows nothing when they are absent.
+    """
+    summary = summary if isinstance(summary, dict) else {}
+ 
+    def num(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+ 
+    unseen = str(metrics.get("unseen_attack") or summary.get("unseen_attack") or "").strip()
+    headline = []
+    for name in _TWO_MODEL_HEADLINE:
+        base, new = metrics.get(f"baseline_{name}"), metrics.get(name)
+        if num(base) and num(new):
+            headline.append(
+                f"<tr><td>{html_lib.escape(name.replace('_', ' ').title())}</td>"
+                f"<td>{base:.2f}</td><td>{new:.2f}</td></tr>"
+            )
+    per_old, per_new = metrics.get("per_class_recall_baseline"), metrics.get("per_class_recall_proposed")
+    per_rows = []
+    if isinstance(per_old, dict) and isinstance(per_new, dict):
+        for cls in sorted(set(per_old) | set(per_new), key=lambda c: (str(c) != unseen, str(c))):
+            a, b = per_old.get(cls), per_new.get(cls)
+            tag = " <em>(unseen for Model 1)</em>" if str(cls) == unseen else ""
+            per_rows.append(
+                f"<tr><td>{html_lib.escape(str(cls))}{tag}</td>"
+                f"<td>{f'{a:.2f}' if num(a) else 'N/A'}</td><td>{f'{b:.2f}' if num(b) else 'N/A'}</td></tr>"
+            )
+    if not headline and not per_rows:
+        return ""
+    head = (
+        "<thead><tr><th>{}</th><th>Model 1: existing (not trained on the unseen attack)</th>"
+        "<th>Model 2: proposed (all attacks)</th></tr></thead>"
+    )
+    out = "<h3>Model 1 vs Model 2</h3>"
+    if unseen:
+        out += f"<p><strong>Unseen attack for Model 1:</strong> {html_lib.escape(unseen)}</p>"
+    if headline:
+        out += "<table>" + head.format("Overall metric (same test split)") + f"<tbody>{''.join(headline)}</tbody></table>"
+    if per_rows:
+        out += "<table>" + head.format("Recall per attack type") + f"<tbody>{''.join(per_rows)}</tbody></table>"
+    return out
 
 def fetch_available_models():
     """Fetch selectable models from the local LM Studio server."""
@@ -353,222 +512,266 @@ def format_experiment_results_html(
     experiment_result: Dict[str, Any],
     comparison_result: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """Format the automated experiment for the Gradio UI.
+ 
+    Expected structure (ExperimentOrchestrator.run_experiment):
+      experiment_result["experiment_preparation"]["selected_hypothesis"]["hypothesis_id"|"title"]
+      experiment_result["experiment_preparation"]["experiment_id"]
+      experiment_result["execution"]                      -> ExperimentRunner result
+      experiment_result["execution"]["status"|"total_execution_seconds"|"output_validation"]
+      experiment_result["execution"]["outputs"]["metrics"|"metric_definitions"|"summary"]
+      experiment_result["comparison"]                     -> ExperimentComparator result
     """
-    Format automated experiment results for the Gradio UI.
-    """
-
     if not experiment_result:
         return ""
-
-    import html as html_lib
-
-    if str(experiment_result.get("status", "")).startswith("skipped"):
+ 
+    status_code = str(experiment_result.get("status") or "")
+    if status_code.startswith("skipped"):
         research_type = html_lib.escape(str(experiment_result.get("research_type") or "this research mode"))
         reason = html_lib.escape(
             str(experiment_result.get("reason") or "No hypothesis candidate was available to test.")
         )
-        return f"""
-        <div style="margin-top: 20px; padding: 15px; border: 2px solid #17a2b8; border-radius: 8px;">
-            <h2>🧪 Automated Experiment Skipped</h2>
-            <p><strong>Research type:</strong> {research_type}</p>
-            <p>{reason}</p>
-        </div>
-        """
-
-    if not experiment_result.get(
-        "success",
-        False,
-    ):
-        errors = experiment_result.get(
-            "errors",
-            [],
+        return (
+            '<div style="margin-top: 20px; padding: 15px; border: 2px solid #17a2b8; border-radius: 8px;">'
+            "<h2>🧪 Automated Experiment Skipped</h2>"
+            f"<p><strong>Research type:</strong> {research_type}</p><p>{reason}</p></div>"
         )
-
-        error_items = "".join(f"<li>{html_lib.escape(str(error))}</li>" for error in errors)
-
-        return f"""
-        <div style="
-            margin-top: 20px;
-            padding: 15px;
-            border: 2px solid #e74c3c;
-            border-radius: 8px;
-        ">
-            <h2>❌ Automated Experiment Failed</h2>
-            <ul>
-                {error_items or "<li>No detailed error was returned.</li>"}
-            </ul>
-        </div>
-        """
-
-    preparation = experiment_result.get(
-        "experiment_preparation",
-        {},
+ 
+    preparation = experiment_result.get("experiment_preparation")
+    preparation = preparation if isinstance(preparation, dict) else {}
+    selected = preparation.get("selected_hypothesis")
+    selected = selected if isinstance(selected, dict) else {}
+    runner = experiment_result.get("execution")
+    runner = runner if isinstance(runner, dict) else {}
+    outputs = runner.get("outputs")
+    outputs = outputs if isinstance(outputs, dict) else {}
+    validation = runner.get("output_validation")
+    validation = validation if isinstance(validation, dict) else {}
+ 
+    experiment_id = html_lib.escape(str(preparation.get("experiment_id") or "Unknown"))
+    hypothesis_title = html_lib.escape(str(selected.get("title") or "Untitled Hypothesis"))
+    hypothesis_id = html_lib.escape(str(selected.get("hypothesis_id") or selected.get("id") or "Unknown"))
+    header = (
+        f"<p><strong>Experiment ID:</strong> {experiment_id}</p>"
+        f"<p><strong>Selected Hypothesis:</strong> {hypothesis_title}</p>"
+        f"<p><strong>Hypothesis ID:</strong> {hypothesis_id}</p>"
     )
-
-    selected = preparation.get(
-        "selected_hypothesis",
-        {},
-    )
-
-    execution = experiment_result.get(
-        "execution",
-        {},
-    )
-
-    metrics = {}
-
-    if isinstance(execution, dict):
-        outputs = execution.get(
-            "outputs",
-            {},
+ 
+    rationale_html = _model_rationale_html(experiment_result)
+ 
+    # ---------------- failed experiment ----------------
+    if not experiment_result.get("success", False):
+        runner_status = str(runner.get("status") or "").replace("_", " ")
+        errors = runner.get("errors") or experiment_result.get("errors") or []
+        if not isinstance(errors, list):
+            errors = [errors]
+        seen, items = set(), []
+        for error in errors:
+            line = _first_error_line(error)
+            if line and line not in seen:  # full stderr is kept in the run report
+                seen.add(line)
+                items.append(f"<li>{html_lib.escape(line)}</li>")
+        status_line = (
+            f"<p><strong>Status:</strong> {html_lib.escape(runner_status.title())}</p>" if runner_status else ""
         )
-
-        if isinstance(outputs, dict):
-            metrics = outputs.get(
-                "metrics",
-                {},
-            )
-
-    if not isinstance(metrics, dict):
-        metrics = {}
-
-    metric_definitions = (
-        outputs.get("metric_definitions", {})
-        if isinstance(outputs, dict)
-        else {}
-    )
-    if not isinstance(metric_definitions, dict):
-        metric_definitions = {}
-
-    def format_metric(value: Any) -> str:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return f"{value:.2f}"
-        return str(value)
-
-    experiment_id = preparation.get(
-        "experiment_id",
-        "Unknown",
-    )
-
-    hypothesis_title = selected.get("title") or "Untitled Hypothesis"
-
-    hypothesis_id = selected.get("hypothesis_id") or "Unknown"
-
-    metric_rows = []
+        return (
+            '<div style="margin-top: 20px; padding: 15px; border: 2px solid #e74c3c; border-radius: 8px;">'
+            "<h2>❌ Automated Experiment Failed</h2>"
+            f"{header}{status_line}{rationale_html}"
+            f"<ul>{''.join(items) or '<li>No detailed error was returned.</li>'}</ul>"
+            "<p>The full generated code, logs and error output are in the saved run report.</p></div>"
+        )
+ 
+    # ---------------- successful experiment ----------------
+    metrics = outputs.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    definitions = outputs.get("metric_definitions") or runner.get("metric_definitions") or {}
+    definitions = definitions if isinstance(definitions, dict) else {}
+ 
+    rows, structured = [], []
     for name, value in metrics.items():
-        definition = metric_definitions.get(name, {})
+        if name == "total_execution_seconds":
+            continue  # runner timing, shown separately below
+        if isinstance(value, (dict, list, tuple)):
+            structured.append(str(name))
+            continue
+        definition = definitions.get(name)
         unit = definition.get("unit") if isinstance(definition, dict) else None
-        displayed_value = format_metric(value)
-        if unit:
-            displayed_value = f"{displayed_value} {unit}"
-        display_name = str(name).replace("_", " ").title()
-        metric_rows.append(
+        rows.append(
             "<tr>"
-            f"<td>{html_lib.escape(display_name)}</td>"
-            f"<td>{html_lib.escape(displayed_value)}</td>"
+            f"<td>{html_lib.escape(str(name).replace('_', ' ').title())}</td>"
+            f"<td>{html_lib.escape(_fmt_experiment_metric(name, value, unit))}</td>"
             "</tr>"
         )
+    if not rows:
+        rows.append('<tr><td colspan="2">No scalar experiment metrics were produced.</td></tr>')
+    structured_note = (
+        f"<p><em>Structured outputs (see run report): {html_lib.escape(', '.join(structured))}</em></p>"
+        if structured
+        else ""
+    )
+ 
+    two_model_html = _two_model_html(metrics, outputs.get("summary"))
+ 
+    seconds = runner.get("total_execution_seconds")
+    time_line = (
+        f"<p><strong>Execution time:</strong> {float(seconds):.1f} s</p>"
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+        else ""
+    )
+    warnings = validation.get("warnings") or []
+    warning_html = (
+        "<p><strong>Output validation warnings:</strong></p><ul>"
+        + "".join(f"<li>{html_lib.escape(_first_error_line(w))}</li>" for w in warnings)
+        + "</ul>"
+        if warnings
+        else ""
+    )
+ 
+    comparison_html = (
+        format_comparison_html(comparison_result, experiment_result) if comparison_result else ""
+    )
+ 
+    return (
+        '<div style="margin-top: 20px; padding: 20px; border: 2px solid #28a745; border-radius: 8px;">'
+        "<h2>🧪 Automated Experiment Results</h2>"
+        f"{header}{time_line}<hr>{rationale_html}<h3>📊 Evaluation Metrics</h3>"
+        "<table><thead><tr><th>Metric</th><th>Experiment result</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>{two_model_html}{structured_note}{warning_html}"
+        "<p>Generated code, logs, checkpoints, metrics, training history and visualizations "
+        "are saved in the run history report.</p></div>"
+        f"{comparison_html}"
+    )
 
-    if not metric_rows:
-        metric_rows.append(
-            '<tr><td colspan="2">No experiment metrics were produced.</td></tr>'
-        )
 
-    comparison_html = ""
+def _cmp_is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+ 
+ 
+def _text_list(*values: Any) -> List[str]:
+    """Flatten strings / lists / dicts of names into a de-duplicated list of strings."""
+    out: List[str] = []
+    for value in values:
+        if value in (None, "", [], {}):
+            continue
+        items = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in items:
+            if isinstance(item, dict):
+                item = item.get("name") or item.get("model") or item.get("title") or ""
+            text = str(item).strip()
+            if text and text not in out:
+                out.append(text)
+    return out
 
-    if comparison_result:
-        comparison_html = format_comparison_html(comparison_result)
 
-    return f"""
-    <div style="
-        margin-top: 20px;
-        padding: 20px;
-        border: 2px solid #28a745;
-        border-radius: 8px;
-    ">
-        <h2>🧪 Automated Experiment Results</h2>
-
-        <p>
-            <strong>Experiment ID:</strong>
-            {html_lib.escape(str(experiment_id))}
-        </p>
-
-        <p>
-            <strong>Selected Hypothesis:</strong>
-            {html_lib.escape(str(hypothesis_title))}
-        </p>
-
-        <p>
-            <strong>Hypothesis ID:</strong>
-            {html_lib.escape(str(hypothesis_id))}
-        </p>
-
-        <hr>
-
-        <h3>📊 Evaluation Metrics</h3>
-
-        <table>
-            <thead><tr><th>Metric</th><th>Experiment result</th></tr></thead>
-            <tbody>{''.join(metric_rows)}</tbody>
-        </table>
-
-        <p>
-            Generated code, checkpoints, metrics,
-            training history, and visualizations are saved
-            in the run history.
-        </p>
-    </div>
-
-    {comparison_html}
+def _model_comparison_html(comparison_result: Dict[str, Any], experiment_result: Optional[Dict[str, Any]]) -> str:
+    """Side-by-side: model proposed in the paper evidence vs. our Rank #1 hypothesis.
+ 
+    NOTE: PaperReader stores `models_or_systems` / `datasets_or_testbeds` while
+    ExperimentComparator reads `models` / `datasets`, so comparability.paper_model is
+    usually empty. This reads the paper's own keys directly (with fallbacks).
     """
+    def d(value: Any) -> Dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+ 
+    def short(text: str, limit: int = 500) -> str:
+        text = " ".join(str(text).split())
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+ 
+    comparability = d(comparison_result.get("comparability"))
+    paper_result = d(comparison_result.get("paper_result"))
+    reference = d(comparison_result.get("reference_experiment"))
+ 
+    paper_models, paper_baselines, paper_datasets, paper_objectives, paper_urls = [], [], [], [], []
+    for source in reference.get("sources") or []:
+        source = d(source)
+        details = d(source.get("experiment_details"))
+        paper_models += _text_list(details.get("models_or_systems"), details.get("models"), source.get("models"))
+        paper_baselines += _text_list(details.get("baselines"))
+        paper_datasets += _text_list(details.get("datasets_or_testbeds"), details.get("datasets"), source.get("datasets"))
+        paper_objectives += _text_list(details.get("experiment_objective"), details.get("objective"))
+        paper_urls += _text_list(source.get("source_url"))
+    paper_models = _text_list(paper_models, paper_result.get("models"), comparability.get("paper_model"))
+    paper_datasets = _text_list(paper_datasets, paper_result.get("datasets"), comparability.get("paper_dataset"))
+ 
+    ours = d(experiment_result)
+    preparation = d(ours.get("experiment_preparation"))
+    hypothesis = d(preparation.get("selected_hypothesis"))
+    runner = d(ours.get("execution"))
+    outputs = d(runner.get("outputs"))
+    summary = d(outputs.get("summary"))
+    specification = d(preparation.get("experiment_specification"))
+    dataset_spec = specification.get("dataset")
+    spec_dataset = dataset_spec.get("name") if isinstance(dataset_spec, dict) else dataset_spec
+    recommendation = d(d(ours.get("code_generation")).get("model_recommendation"))
+    our_model = _text_list(
+        _recommended_model_label(ours), summary.get("model"), summary.get("model_name"), summary.get("model_algorithm"),
+        summary.get("model/algorithm"), summary.get("algorithm"), comparability.get("experiment_model"),
+    )
+    our_dataset = _text_list(summary.get("dataset"), spec_dataset, comparability.get("experiment_dataset"))
+    our_title = hypothesis.get("title") or comparison_result.get("hypothesis_title")
+    our_id = hypothesis.get("hypothesis_id") or hypothesis.get("id") or comparison_result.get("hypothesis_id")
+    our_text = hypothesis.get("text")
+ 
+    if not any([paper_models, paper_baselines, paper_objectives, our_model, our_title, our_text]):
+        return ""
+ 
+    def cell(items: List[str], empty: str = "Not reported") -> str:
+        return html_lib.escape(", ".join(items)) if items else f"<em>{html_lib.escape(empty)}</em>"
+ 
+    our_approach = ""
+    if our_title:
+        our_approach = f"<strong>{html_lib.escape(str(our_title))}</strong>"
+        if our_id:
+            our_approach += f" <span style='opacity:.7'>(ID: {html_lib.escape(str(our_id))})</span>"
+    if our_text:
+        our_approach += ("<br>" if our_approach else "") + html_lib.escape(short(our_text))
+    paper_links = "<br>".join(
+        f'<a href="{html_lib.escape(u)}" target="_blank">{html_lib.escape(short(u, 80))}</a>' for u in paper_urls[:3]
+    )
+    rows = [
+        ("Proposed model / system", cell(paper_models), cell(our_model, "Not reported by the experiment")),
+        ("Approach / objective", cell([short(o) for o in paper_objectives[:2]]), our_approach or "<em>Not available</em>"),
+        ("Baselines", cell(paper_baselines[:8]), "<em>Not applicable</em>"),
+        ("Dataset / testbed", cell(paper_datasets), cell(our_dataset)),
+        ("Source", paper_links or "<em>Not available</em>", "Rank #1 hypothesis"),
+    ]
+    body = "".join(f"<tr><th>{html_lib.escape(label)}</th><td>{a}</td><td>{b}</td></tr>" for label, a, b in rows)
+    return (
+        "<h3>Proposed Models</h3><table><thead><tr><th></th><th>Published (paper evidence)</th>"
+        "<th>Automated experiment (Rank #1 hypothesis)</th></tr></thead>"
+        f"<tbody>{body}</tbody></table>"
+    )
 
 
 def format_comparison_html(
     comparison_result: Dict[str, Any],
+    full_experiment_result: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """Paper vs automated experiment panel for the Gradio UI.
+ 
+    `full_experiment_result` (optional; the orchestrator's whole experiment result) supplies our Rank #1 hypothesis and the model the
+    experiment actually ran, for the "Proposed Models" table.
+ 
+    Only metrics that were actually compared are shown in the main table.
+    Metrics that exist on one side only are collapsed into <details> blocks
+    (the complete list is always in the saved run report).
     """
-    Format paper vs automated experiment comparison for the Gradio UI.
-    """
-
-    if not comparison_result:
+    if not comparison_result or not isinstance(comparison_result, dict):
         return ""
-
-    import html as html_lib
-
-    paper_result = comparison_result.get(
-        "paper_result",
-        {},
-    )
-
-    experiment_result = comparison_result.get(
-        "experiment_result",
-        {},
-    )
-
-    comparability = comparison_result.get(
-        "comparability",
-        {},
-    )
-
-    if not isinstance(comparability, dict):
-        comparability = {}
-
-    explanation = comparison_result.get(
-        "explanation",
-        {},
-    ) or {}
-
-    if not isinstance(explanation, dict):
-        explanation = {}
-
-    errors = comparison_result.get(
-        "errors",
-        [],
-    )
-
+ 
+    def as_dict(value: Any) -> Dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+ 
+    # compare() initialises these to None and returns early, so never .get() on them blindly.
+    paper_result = as_dict(comparison_result.get("paper_result"))
+    experiment_result = as_dict(comparison_result.get("experiment_result"))
+    comparability = as_dict(comparison_result.get("comparability"))
+    explanation = as_dict(comparison_result.get("explanation"))
+    errors = comparison_result.get("errors") or []
     if not isinstance(errors, list):
         errors = [str(errors)]
-
+ 
     conclusion = (
         comparison_result.get("conclusion")
         or explanation.get("overall_assessment")
@@ -576,124 +779,59 @@ def format_comparison_html(
         or "; ".join(str(error) for error in errors)
         or "No comparison conclusion was generated."
     )
-
-    status = comparison_result.get(
-        "status",
-        "unknown",
-    )
-
-    status_label = str(status).replace(
-        "_",
-        " ",
-    ).title()
-
-    paper_metrics = paper_result.get(
-        "metrics",
-        {},
-    )
-
-    experiment_metrics = experiment_result.get(
-        "metrics",
-        {},
-    )
-
-    if not isinstance(paper_metrics, dict):
-        paper_metrics = {}
-
-    if not isinstance(experiment_metrics, dict):
-        experiment_metrics = {}
-
-    primary_metrics = set()
-    reference_experiment = comparison_result.get("reference_experiment", {})
-    if isinstance(reference_experiment, dict):
-        sources = reference_experiment.get("sources", [])
-        if isinstance(sources, list):
-            for source in sources:
-                if not isinstance(source, dict):
-                    continue
-                details = source.get("experiment_details", {})
-                if not isinstance(details, dict):
-                    continue
-                source_primary_metrics = details.get("primary_metrics", [])
-                if isinstance(source_primary_metrics, str):
-                    source_primary_metrics = [source_primary_metrics]
-                if isinstance(source_primary_metrics, list):
-                    primary_metrics.update(
-                        re.sub(r"[^a-z0-9]+", "_", str(metric).lower()).strip("_")
-                        for metric in source_primary_metrics
-                        if isinstance(metric, str) and metric.strip()
-                    )
-
-    primary_metric_display = ", ".join(sorted(primary_metrics))
-
-    metric_comparison = comparison_result.get("metric_comparison", {})
-    comparison_metrics = (
-        metric_comparison.get("metrics", {})
-        if isinstance(metric_comparison, dict)
-        else {}
-    )
-    if not isinstance(comparison_metrics, dict):
-        comparison_metrics = {}
-
-    metric_names = sorted(
-        comparison_metrics
-        or set(paper_metrics).union(experiment_metrics)
-    )
-
+    status_label = str(comparison_result.get("status") or "unknown").replace("_", " ").title()
+ 
+    paper_metrics = as_dict(paper_result.get("metrics"))
+    experiment_metrics = as_dict(experiment_result.get("metrics"))
+    metric_comparison = as_dict(comparison_result.get("metric_comparison"))
+    comparison_metrics = as_dict(metric_comparison.get("metrics"))
+ 
+    pct_units = {"%", "percent", "percentage", "percentage_point", "percentage_points"}
+ 
     def format_metric_value(value: Any, unit: Any = None, percentage: bool = False) -> str:
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        if not _cmp_is_number(value):
             return "Not available" if value is None else html_lib.escape(str(value))
-
         number = float(value)
         if percentage:
             if abs(number) <= 1:
                 number *= 100
             return f"{number:.2f}%"
-
         formatted = f"{number:.4g}"
         return f"{formatted} {unit}" if unit else formatted
-
+ 
     def format_reference(value: Any, record: Dict[str, Any], unit: Any) -> str:
         value_type = str(record.get("reference_value_type", "measured_value")).lower()
         relation = str(record.get("reference_relation", "exact")).lower()
-        percentage = unit in {"%", "percent", "percentage", "percentage_point", "percentage_points"}
-        formatted = format_metric_value(value, unit, percentage)
+        formatted = format_metric_value(value, unit, unit in pct_units)
         if value_type == "upper_bound":
             prefix = {"less_than": "< ", "less_than_or_equal": "<= "}.get(relation, "<= ")
-            return f"{prefix}{formatted}"
+            return html_lib.escape(prefix) + formatted
         if value_type == "lower_bound":
             prefix = {"greater_than": "> ", "greater_than_or_equal": ">= "}.get(relation, ">= ")
-            return f"{prefix}{formatted}"
+            return html_lib.escape(prefix) + formatted
         return formatted
-
-    model_rows = []
-    for label, value in (
-        ("Published model/system", comparability.get("paper_model")),
-        ("Automated experiment model", comparability.get("experiment_model")),
-        ("Published dataset/testbed", comparability.get("paper_dataset")),
-        ("Experiment dataset", comparability.get("experiment_dataset")),
-    ):
-        if value:
-            model_rows.append(
-                f"<p><strong>{html_lib.escape(label)}:</strong> "
-                f"{html_lib.escape(str(value))}</p>"
-            )
-
+ 
+    model_section = _model_comparison_html(comparison_result, full_experiment_result)
+ 
+    # Which metrics go in the main table?
+    if comparison_metrics:
+        compared_names = sorted(comparison_metrics)  # the comparator already paired these
+    else:
+        compared_names = sorted(
+            name
+            for name in set(paper_metrics) & set(experiment_metrics)
+            if paper_metrics.get(name) is not None and experiment_metrics.get(name) is not None
+        )
+ 
     comparison_rows = []
-    for name in metric_names:
-        record = comparison_metrics.get(name, {})
-        if not isinstance(record, dict):
-            record = {}
-
+    for name in compared_names:
+        record = as_dict(comparison_metrics.get(name))
         unit = record.get("reference_unit") or record.get("unit")
-        percentage = record.get("difference_percentage_points") is not None or unit in {
-            "%", "percent", "percentage", "percentage_point", "percentage_points"
-        }
+        percentage = record.get("difference_percentage_points") is not None or unit in pct_units
         paper_value = record.get("paper", paper_metrics.get(name))
         experiment_value = record.get("experiment", experiment_metrics.get(name))
         paper_text = format_reference(paper_value, record, unit)
         experiment_text = format_metric_value(experiment_value, unit, percentage)
-
         difference_pp = record.get("difference_percentage_points")
         difference = record.get("difference")
         value_type = str(record.get("reference_value_type", "measured_value")).lower()
@@ -701,7 +839,7 @@ def format_comparison_html(
             difference_text = f"{float(difference_pp):+.2f} pp"
         elif value_type != "measured_value":
             difference_text = record.get("comparison_interpretation") or "Compared with reported constraint"
-        elif difference is not None:
+        elif _cmp_is_number(difference):
             difference_text = format_metric_value(difference, unit, percentage)
             if percentage:
                 difference_text = f"{float(difference) * 100:+.2f} pp"
@@ -709,52 +847,68 @@ def format_comparison_html(
                 difference_text = f"+{difference_text}"
         else:
             difference_text = "Not comparable"
-
-        normalized_name = re.sub(
-            r"[^a-z0-9]+",
-            "_",
-            str(name).lower(),
-        ).strip("_")
-        display_name = str(name).replace("_", " ").title()
-        if normalized_name in primary_metrics:
-            display_name += " (paper primary)"
-
         comparison_rows.append(
             "<tr>"
-            f"<td>{html_lib.escape(display_name)}</td>"
+            f"<td>{html_lib.escape(str(name).replace('_', ' ').title())}</td>"
             f"<td>{paper_text}</td>"
             f"<td>{experiment_text}</td>"
             f"<td>{html_lib.escape(str(difference_text))}</td>"
             "</tr>"
         )
-
-    if not comparison_rows:
-        comparison_rows.append(
-            '<tr><td colspan="4">No shared, comparable numerical metrics were available.</td></tr>'
+ 
+    if comparison_rows:
+        metric_section = (
+            "<h3>Metric Comparison</h3><table><thead><tr><th>Metric</th><th>Published evidence</th>"
+            "<th>Automated experiment</th><th>Difference / interpretation</th></tr></thead>"
+            f"<tbody>{''.join(comparison_rows)}</tbody></table>"
         )
-
+    else:
+        metric_section = (
+            "<h3>Metric Comparison</h3><p>No shared, comparable numerical metrics were available.</p>"
+        )
+ 
+    # Metrics present on only one side: collapsed, never in the main table.
+    shown = set(compared_names)
+ 
+    def collapsed_metrics(title: str, metrics: Dict[str, Any]) -> str:
+        items = [(name, value) for name, value in sorted(metrics.items()) if name not in shown]
+        if not items:
+            return ""
+        body = "".join(
+            f"<tr><td>{html_lib.escape(str(name).replace('_', ' ').title())}</td>"
+            f"<td>{html_lib.escape(str(value) if not _cmp_is_number(value) else format(value, '.4g'))}</td></tr>"
+            for name, value in items
+        )
+        return (
+            f"<details><summary>{html_lib.escape(title)} ({len(items)})</summary>"
+            f"<table><tbody>{body}</tbody></table></details>"
+        )
+ 
+    scalar_paper = {k: v for k, v in paper_metrics.items() if not isinstance(v, (dict, list, tuple))}
+    scalar_experiment = {k: v for k, v in experiment_metrics.items() if not isinstance(v, (dict, list, tuple))}
+    collapsed = collapsed_metrics("Published metrics with no matching experiment metric", scalar_paper)
+    collapsed += collapsed_metrics("Experiment metrics with no matching published metric", scalar_experiment)
+ 
+    warnings = comparability.get("warnings") or []
+    if not isinstance(warnings, list):
+        warnings = [warnings]
+    warning_html = (
+        "<ul>" + "".join(f"<li>{html_lib.escape(str(w))}</li>" for w in warnings) + "</ul>" if warnings else ""
+    )
+ 
     return f"""
-    <div style="margin-top: 20px; padding: 20px; border: 2px solid #6f42c1; border-radius: 8px;">
-        <h2>Paper vs Automated Experiment</h2>
-        <p><strong>Status:</strong> {html_lib.escape(status_label)}</p>
-        {f'<p><strong>Paper-declared primary metrics:</strong> {html_lib.escape(primary_metric_display)}</p>' if primary_metric_display else ''}
-        {''.join(model_rows)}
-        <h3>Metric Comparison</h3>
-        <table>
-            <thead>
-                <tr>
-                    <th>Metric</th>
-                    <th>Published evidence</th>
-                    <th>Automated experiment</th>
-                    <th>Difference / interpretation</th>
-                </tr>
-            </thead>
-            <tbody>{''.join(comparison_rows)}</tbody>
-        </table>
-        <h3>Comparison Conclusion</h3>
-        <p>{html_lib.escape(str(conclusion))}</p>
-    </div>
-    """
+<div style="margin-top: 20px; padding: 20px; border: 2px solid #6f42c1; border-radius: 8px;">
+<h2>Paper vs Automated Experiment</h2>
+<p><strong>Status:</strong> {html_lib.escape(status_label)}</p>
+{model_section}
+{metric_section}
+{collapsed}
+<h3>Comparison Conclusion</h3>
+<p>{html_lib.escape(str(conclusion))}</p>
+{warning_html}
+<p>The complete metric lists are saved in the run history report.</p>
+</div>
+"""
 
 
 def execute_cycle(
@@ -897,40 +1051,91 @@ def execute_cycle(
         }
 
         if experiment_enabled:
-            dataset_manager = DatasetManager(
-                dataset_name="5G-NIDD",
-                dataset_path="data/5g_nidd/5g_nidd.csv",
+            print(
+                f"Dataset configuration: "
+                f"{EXPERIMENT_DATASET_NAME}"
             )
 
-            dataset_path = dataset_manager.get_latest_dataset()
+            print(
+                f"Dataset path override: "
+                f"{EXPERIMENT_DATASET_PATH or '<DatasetManager default>'}"
+            )
 
-            print(f"Dataset selected: {dataset_path}")
+            print(
+                f"Experiment device: "
+                f"{EXPERIMENT_DEVICE}"
+            )
+
+            print(
+                f"Experiment timeout: "
+                f"{format_timeout_duration(experiment_timeout_seconds)}"
+            )
+
+            logger.info(
+                "Starting automated experiment pipeline: "
+                "dataset=%s, path=%s, device=%s, timeout=%s",
+                EXPERIMENT_DATASET_NAME,
+                EXPERIMENT_DATASET_PATH or "<DatasetManager default>",
+                EXPERIMENT_DEVICE,
+                format_timeout_duration(
+                    experiment_timeout_seconds
+                ),
+            )
 
             experiment_orchestrator = ExperimentOrchestrator(
-                dataset_name="5G-NIDD",
-                dataset_path=dataset_path,
+                dataset_name=EXPERIMENT_DATASET_NAME,
+                dataset_path=EXPERIMENT_DATASET_PATH,
                 device=EXPERIMENT_DEVICE,
             )
-            experiment_result = experiment_orchestrator.run_experiment(
-                context=context,
-                research_goal=research_goal,
-                execute_generated_code=True,
-                timeout_seconds=experiment_timeout_seconds,
-            )
-            selected_hypothesis = (
-                experiment_result
-                .get("experiment_preparation", {})
-                .get("selected_hypothesis", {})
+
+            experiment_result = (
+                experiment_orchestrator.run_experiment(
+                    context=context,
+                    research_goal=research_goal,
+                    execute_generated_code=True,
+                    timeout_seconds=experiment_timeout_seconds,
+                )
             )
 
-            # print("\n===== DEBUG EXPERIMENT RESULT =====")
-            # print(experiment_result)
-            # print("===================================\n")
+            if not isinstance(
+                experiment_result,
+                dict,
+            ):
+                raise TypeError(
+                    "ExperimentOrchestrator.run_experiment() "
+                    "must return a dictionary."
+                )
 
-            if experiment_result.get("success", False):
-                comparison_result = experiment_comparator.compare(
-                    selected_hypothesis,
-                    experiment_result.get("execution", {}),
+            # The ExperimentOrchestrator now owns the complete
+            # paper-vs-experiment comparison.
+            # Expected structure:
+            # experiment_result["comparison"]
+            # Do not call ExperimentComparator directly from app.py.
+
+            comparison_result = (
+                experiment_result.get(
+                    "comparison"
+                )
+            )
+
+            if not isinstance(
+                comparison_result,
+                dict,
+            ):
+                comparison_result = {
+                    "success": False,
+                    "status": "comparison_not_available",
+                    "conclusion": (
+                        "The experiment completed, "
+                        "but no comparison result was returned "
+                        "by ExperimentOrchestrator."
+                    ),
+                    "errors": [],
+                }
+
+                logger.warning(
+                    "ExperimentOrchestrator returned no "
+                    "comparison result."
                 )
         elif hypothesis_pipeline_enabled and not experiment_auto_run:
             experiment_result = {
@@ -1033,20 +1238,33 @@ def execute_cycle(
         print("PAPER VS AUTOMATED EXPERIMENT COMPARISON")
         print("=" * 60)
 
-        explanation = comparison_result.get("explanation") or {}
-
-        print(
-            explanation.get(
-                "overall_assessment",
-                "No comparison conclusion was generated.",
-            )
+        explanation = (
+            comparison_result.get("explanation")
+            or {}
         )
 
-        print("=" * 60)
+        if isinstance(
+            explanation,
+            dict,
+        ):
+            print(
+                explanation.get(
+                    "overall_assessment",
+                    comparison_result.get(
+                        "conclusion",
+                        "No comparison conclusion was generated.",
+                    ),
+                )
+            )
+        else:
+            print(
+                comparison_result.get(
+                    "conclusion",
+                    "No comparison conclusion was generated.",
+                )
+            )
 
-        print("\n===== COMPARISON RESULT DEBUG =====")
-        print(comparison_result)
-        print("===================================")
+        print("=" * 60)
 
         print("\n" + "=" * 60)
         print("COMPLETE AUTOMATED PIPELINE FINISHED")
@@ -1226,7 +1444,8 @@ def persist_cycle_result(
         references_html=cycle_result["references_html"],
         results_html=cycle_result["results_html"],
         log_file=cycle_result["log_file"],
-        experiment_result=cycle_result["cycle_details"].get("experiment_result"),
+        experiment_result=(cycle_result["cycle_details"].get("experiment_result")),
+        comparison_result=(cycle_result["cycle_details"].get("comparison_result")),
     )
     report_path = write_report(saved_run)
     status_msg = (
@@ -2629,19 +2848,12 @@ def create_gradio_interface():
         # Example inputs
         gr.Examples(
             examples=[
-                [
-                    "Develop a closed-loop multi-agent AI framework to dynamically allocate 5G slice bandwidth during traffic spikes"
-                ],
-                [
-                    "Create a machine learning orchestrator that injects post-quantum cryptographic keys into active 5G network slices without increasing latency"
-                ],
-                [
-                    "Develop a real-time anomaly detector for Open-RAN architectures that spots and blocks malicious, rogue network apps"
-                ],
+                ["Develop a closed-loop multi-agent AI framework to dynamically allocate 5G slice bandwidth during traffic spikes"],
+                ["Create a machine learning orchestrator that injects post-quantum cryptographic keys into active 5G network slices without increasing latency"],
+                ["Improve the existing 5G intrusion detection model to recognise previously unseen attack types and reduce the misclassification of unseen attacks as normal/benign traffic"],
                 ["Improve 5G battery life by optimizing device wake-up sensors"],
-                [
-                    "Automate the root-cause diagnosis of 5G tower failures by deploying AI agents to read logs and execute patches"
-                ],
+                ["Automate the root-cause diagnosis of 5G tower failures by deploying AI agents to read logs and execute patches"],
+                ["Develop a new 5G intrusion detection model that can detect all known attack types in the 5G-NIDD dataset, including attack types that the existing model fails to recognise"],
             ],
             inputs=[research_goal_input],
             label="Example Research Goals",
