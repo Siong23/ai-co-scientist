@@ -2355,7 +2355,7 @@ def create_gradio_interface():
 
         # Header
         gr.HTML(header_html())
-        gr.Markdown("Generate, review, rank, and evolve research hypotheses using AI agents.")
+        gr.Markdown("Scientific Hypothesis-driven Investigation, Evidence-based Learning and Defence.")
 
         # Deployment status
         gr.HTML(f'<div class="status-box {status_color}">🔧 Deployment Status: {status_text}</div>')
