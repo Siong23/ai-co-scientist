@@ -1,7 +1,7 @@
-from typing import Tuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
 
 class SequenceDataset(Dataset):
     """Turns a feature matrix into fixed-length overlapping sequences."""

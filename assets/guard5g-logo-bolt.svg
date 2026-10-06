@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="GUARD-5G logo">
+<defs>
+  <linearGradient id="g5-shield" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#115e59"/><stop offset="1" stop-color="#0b1f2a"/>
+  </linearGradient>
+  <linearGradient id="g5-bolt" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#7c3aed"/>
+  </linearGradient>
+  <linearGradient id="g5-text" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#ccfbf1"/><stop offset=".45" stop-color="#5eead4"/><stop offset="1" stop-color="#14b8a6"/>
+  </linearGradient>
+  <linearGradient id="g5-head" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#99f6e4"/><stop offset="1" stop-color="#14b8a6"/>
+  </linearGradient>
+  <filter id="g5-glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>
+  <filter id="g5-soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2"/></filter>
+  <path id="g5-five" d="M238 186H172L167 238C182 228 200 226 212 228C238 232 248 252 246 268C244 290 226 304 202 304C184 304 168 296 158 284"/>
+  <path id="g5-gee" d="M354.8 208.2A52 52 0 1 0 369.8 249.5H324"/>
+  <g id="g5-cube">
+    <ellipse cx="0" cy="40" rx="38" ry="8" fill="#5eead4" opacity=".35" filter="url(#g5-soft)"/>
+    <path d="M0 -38L34 -20L0 -2L-34 -20Z" fill="#a7f3d0" fill-opacity=".7"/>
+    <path d="M-34 -20L0 -2V36L-34 18Z" fill="#5eead4" fill-opacity=".45"/>
+    <path d="M0 -2L34 -20V18L0 36Z" fill="#2dd4bf" fill-opacity=".55"/>
+    <g stroke="#f0fdfa" stroke-width="1.6" stroke-opacity=".9" fill="none">
+      <path d="M-11.3 -32L22.7 -14M11.3 -32L-22.7 -14M11.3 -8L-22.7 -26M-11.3 -8L22.7 -26"/>
+      <path d="M-22.7 -14V24M-11.3 -8V30M-34 -7.3L0 10.7M-34 5.3L0 23.3"/>
+      <path d="M11.3 -8V30M22.7 -14V24M0 10.7L34 -7.3M0 23.3L34 5.3"/>
+    </g>
+    <path d="M0 -38L34 -20V18L0 36L-34 18V-20ZM-34 -20L0 -2L34 -20M0 -2V36" fill="none" stroke="#0f766e" stroke-width="3" stroke-linejoin="round"/>
+  </g>
+  <g id="g5-bot">
+    <ellipse cx="0" cy="33" rx="15" ry="11" fill="url(#g5-head)" stroke="#1c1b2e" stroke-width="4"/>
+    <rect x="-30" y="-26" width="60" height="50" rx="22" fill="url(#g5-head)" stroke="#1c1b2e" stroke-width="4"/>
+    <path d="M-17 -19Q-24 -16 -25 -8" stroke="#f0fdfa" stroke-width="4" stroke-linecap="round" fill="none" opacity=".8"/>
+    <rect x="-21" y="-14" width="42" height="28" rx="12" fill="#0b1f2a"/>
+    <g fill="#ccfbf1"><rect x="-13" y="-7" width="7" height="13" rx="3.5"/><rect x="6" y="-7" width="7" height="13" rx="3.5"/></g>
+    <g fill="#5eead4" opacity=".6" filter="url(#g5-soft)"><rect x="-13" y="-7" width="7" height="13" rx="3.5"/><rect x="6" y="-7" width="7" height="13" rx="3.5"/></g>
+    <path d="M-31 -4A33 33 0 0 1 31 -4" fill="none" stroke="#1c1b2e" stroke-width="10" stroke-linecap="round"/>
+    <path d="M-31 -4A33 33 0 0 1 31 -4" fill="none" stroke="#2563eb" stroke-width="5" stroke-linecap="round"/>
+    <rect x="-39" y="-12" width="12" height="22" rx="5" fill="#1d4ed8" stroke="#1c1b2e" stroke-width="4"/>
+    <rect x="27" y="-12" width="12" height="22" rx="5" fill="#1d4ed8" stroke="#1c1b2e" stroke-width="4"/>
+  </g>
+</defs>
+<path d="M180 26V32.666666666666664M180 39.333333333333336V46M170 36H176.66666666666666M183.33333333333334 36H190" stroke="#a3e635" stroke-width="3.5" stroke-linecap="round"/>
+<path d="M332 13V17.666666666666668M332 22.333333333333332V27M325 20H329.6666666666667M334.3333333333333 20H339" stroke="#f59e0b" stroke-width="3.5" stroke-linecap="round"/>
+<path d="M150 493V497.6666666666667M150 502.3333333333333V507M143 500H147.66666666666666M152.33333333333334 500H157" stroke="#a3e635" stroke-width="3.5" stroke-linecap="round"/>
+<path d="M362 493V497.6666666666667M362 502.3333333333333V507M355 500H359.6666666666667M364.3333333333333 500H369" stroke="#f59e0b" stroke-width="3.5" stroke-linecap="round"/>
+<path d="M110.1 139.6A176 176 0 0 0 110.1 336.4" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M110.1 139.6A176 176 0 0 0 110.1 336.4" fill="none" stroke="#5eead4" stroke-width="11" stroke-linecap="round"/>
+<path d="M401.9 139.6A176 176 0 0 1 401.9 336.4" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M401.9 139.6A176 176 0 0 1 401.9 336.4" fill="none" stroke="#5eead4" stroke-width="11" stroke-linecap="round"/>
+<path d="M85.2 122.8A206 206 0 0 0 85.2 353.2" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M85.2 122.8A206 206 0 0 0 85.2 353.2" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round"/>
+<path d="M426.8 122.8A206 206 0 0 1 426.8 353.2" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M426.8 122.8A206 206 0 0 1 426.8 353.2" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round"/>
+<path d="M60.3 106.0A236 236 0 0 0 60.3 370.0" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M60.3 106.0A236 236 0 0 0 60.3 370.0" fill="none" stroke="#22d3ee" stroke-width="11" stroke-linecap="round"/>
+<path d="M451.7 106.0A236 236 0 0 1 451.7 370.0" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M451.7 106.0A236 236 0 0 1 451.7 370.0" fill="none" stroke="#22d3ee" stroke-width="11" stroke-linecap="round"/>
+<g stroke="#1c1b2e" stroke-width="6" stroke-linecap="round">
+  <path d="M196 474H316"/>
+  <path d="M180 488H290"/>
+  <path d="M214 502H266"/>
+  <path d="M280 502H300"/>
+</g>
+<path d="M256 66C300 90 345 102 388 106V236C388 330 332 396 256 434C180 396 124 330 124 236V106C167 102 212 90 256 66Z" fill="url(#g5-shield)" stroke="#1c1b2e" stroke-width="10" stroke-linejoin="round"/>
+<path d="M256 82C296 103 336 114 374 118V236C374 320 324 380 256 416C188 380 138 320 138 236V118C176 114 216 103 256 82Z" fill="none" stroke="#5eead4" stroke-opacity=".55" stroke-width="3"/>
+<path d="M224 40H350L298 176H352L230 470L260 284H190Z" fill="url(#g5-bolt)" stroke="#1c1b2e" stroke-width="9" stroke-linejoin="round"/>
+<path d="M240 56L222 120" stroke="#e9d5ff" stroke-width="7" stroke-linecap="round" opacity=".85"/>
+<g transform="translate(256 258) scale(.98) translate(-271 -245)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <g stroke="#5eead4" stroke-width="52" opacity=".55" filter="url(#g5-glow)"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="#5b21b6" stroke-width="48" transform="translate(7 8)"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="#1c1b2e" stroke-width="48"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="url(#g5-text)" stroke-width="30"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="#ffffff" stroke-width="5" opacity=".7" transform="translate(-4 -5)" stroke-dasharray="40 400"><use href="#g5-five"/><use href="#g5-gee"/></g>
+</g>
+<use href="#g5-cube" transform="translate(68 466) scale(.85)"/>
+<use href="#g5-bot" transform="translate(68 418) scale(.8)"/>
+<use href="#g5-cube" transform="translate(444 466) scale(.85)"/>
+<use href="#g5-bot" transform="translate(444 418) scale(.8)"/>
+<use href="#g5-bot" transform="translate(74 60) scale(.8)"/>
+<use href="#g5-bot" transform="translate(438 60) scale(.8)"/>
+<use href="#g5-cube" transform="translate(140 470) scale(.36)"/>
+<use href="#g5-cube" transform="translate(372 470) scale(.36)"/>
+</svg>

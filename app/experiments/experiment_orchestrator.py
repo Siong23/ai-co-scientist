@@ -97,13 +97,11 @@ from ..agents_modules.code_generation_agent import (
     CodeGenerationAgent,
     _call_llm,
 )
-
-from .experiment_runner import ExperimentRunner
-from .experiment_comparator import ExperimentComparator
-from .paper_reader import PaperReader
-
 from ..data.dataset_manager import DatasetManager
 from ..utils import logger
+from .experiment_comparator import ExperimentComparator
+from .experiment_runner import ExperimentRunner
+from .paper_reader import PaperReader
 
 # import inspect
 

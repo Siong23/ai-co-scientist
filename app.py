@@ -1,9 +1,11 @@
+import base64
 import os
 import re
 import threading
 import time
 import html as html_lib
 from copy import deepcopy
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -14,11 +16,11 @@ from numpy.ma import count  # noqa: F401
 from app.agents import SupervisorAgent
 from app.config import config
 from app.data.dataset_manager import DatasetManager
-from app.experiments.experiment_orchestrator import (
-    ExperimentOrchestrator,
-)
 from app.experiments.experiment_comparator import (
     ExperimentComparator,
+)
+from app.experiments.experiment_orchestrator import (
+    ExperimentOrchestrator,
 )
 from app.models import ContextMemory, ResearchGoal
 from app.research_state import LocalJSONResearchStateStore, ResearchStateError
@@ -2404,6 +2406,23 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
     return html
 
 
+HEADER_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "guard5g-logo.png"
+
+
+def header_html(logo_path: Path = HEADER_LOGO_PATH) -> str:
+    """Return the page title, with the logo inlined as a data URI when available."""
+    title = "5G Guard AI Co-Scientist"
+    try:
+        encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    except OSError:
+        return f"<h1>🔬 {title}</h1>"
+    logo = (
+        f'<img src="data:image/png;base64,{encoded}" alt="" '
+        'style="height:1.6em;width:auto;vertical-align:middle;margin-right:0.35em;">'
+    )
+    return f'<h1 style="display:flex;align-items:center;">{logo}{title}</h1>'
+
+
 def create_gradio_interface():
     """Create the Gradio interface."""
 
@@ -2534,7 +2553,7 @@ def create_gradio_interface():
         }
         """
 
-    with gr.Blocks(title="AI Co-Scientist - Hypothesis Evolution System") as demo:
+    with gr.Blocks(title="5G Guard AI Co-Scientist") as demo:
         with gr.Sidebar(open=False, width=320, elem_id="research-history-sidebar"):
             gr.Markdown("## Research history")
             gr.Markdown(
@@ -2554,8 +2573,8 @@ def create_gradio_interface():
             sidebar_delete_status = gr.Markdown()
 
         # Header
-        gr.Markdown("# 🔬 AI Co-Scientist - Hypothesis Evolution System")
-        gr.Markdown("Generate, review, rank, and evolve research hypotheses using AI agents.")
+        gr.HTML(header_html())
+        gr.Markdown("Scientific Hypothesis-driven Investigation, Evidence-based Learning and Defence.")
 
         # Deployment status
         gr.HTML(f'<div class="status-box {status_color}">🔧 Deployment Status: {status_text}</div>')
