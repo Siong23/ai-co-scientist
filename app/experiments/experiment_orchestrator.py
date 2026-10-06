@@ -1901,6 +1901,20 @@ class ExperimentOrchestrator:
                         ),
                     }
 
+                # [other-model-metric] metrics of ANOTHER model family in the paper (LLM prompting setups,
+                # API deployments) cannot be reproduced by this experiment: keep them as reference only.
+                elif any(
+                    token in str(name).lower()
+                    for token in ("llm", "zero_shot", "few_shot", "zeroshot", "fewshot", "api_based", "prompting")
+                ):
+                    reference_only.append(name)
+                    metric_roles[name] = {
+                        "role": "reference_only",
+                        "reason": (
+                            "The metric belongs to a different model family reported by the paper "
+                            "(for example an LLM prompting setup) and cannot be reproduced by this experiment."
+                        ),
+                    }
                 # Standard ML metrics can be measured directly.
                 elif has_ml_semantics and not has_system_semantics:
                     directly_reproducible.append(name)

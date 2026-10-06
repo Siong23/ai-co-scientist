@@ -2371,9 +2371,30 @@ PAPER EXPERIMENTAL TEXT
             print("=" * 70)
 
             if not details:
-                logger.warning(
-                    "[PaperReader] LLM returned invalid experiment JSON."
-                )
+                # [paper-reader-retry] the first reply was empty / invalid / truncated JSON. A silent {}
+                # loses every reference metric of the paper, so retry with a larger token budget first.
+                for retry_number, token_factor in enumerate((1.5, 2.0), start=2):
+                    logger.warning(
+                        "[PaperReader] LLM returned invalid experiment JSON; retry %d.", retry_number
+                    )
+                    try:
+                        retry_response = self.llm_callable(
+                            prompt
+                            + "\n\nIMPORTANT: your previous reply was not valid, complete JSON. "
+                            "Reply with ONE complete JSON object only, keep every string short, "
+                            "and put the reported numerical results into reference_metrics.",
+                            temperature=0.0,
+                            reasoning="off",
+                            max_tokens=int((self.extraction_max_tokens or 4096) * token_factor),
+                        )
+                    except Exception as retry_error:
+                        logger.warning("[PaperReader] Retry failed: %s", retry_error)
+                        continue
+                    details = self._extract_json(retry_response)
+                    if details:
+                        break
+            if not details:
+                logger.warning("[PaperReader] LLM returned invalid experiment JSON.")
                 return {}
 
             details = self._validate_and_normalise_details(

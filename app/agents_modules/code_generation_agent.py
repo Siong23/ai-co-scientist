@@ -1654,11 +1654,10 @@ Use a non-interactive matplotlib backend.
 Save visualization files inside EXPERIMENT_OUTPUT_DIR.
 For classification and model-training experiments, ALWAYS save these four PNG files
 inside EXPERIMENT_OUTPUT_DIR using exactly these file names (the runner validates them):
-loss_visualization.png - training/validation loss per epoch; if the model has no epochs,
-a bar chart of the final loss or error value.
-accuracy_visualization.png - accuracy per epoch if tracked; otherwise a bar of final accuracy.
-confusion_matrix_visualization.png - confusion matrix of the test predictions.
-performance_metrics_visualization.png - bar chart of the main evaluation metrics.
+loss_visualization.png - Plot a line graph of training and validation loss per epoch. If the model has no epochs, show a single bar of the final loss.
+accuracy_visualization.png - Plot a line graph of training and validation accuracy per epoch. If not tracked by epoch, show a single bar of the final accuracy scaled from 0.0 to 1.0.
+confusion_matrix_visualization.png - Render a heatmap matrix showing predicted labels on the x-axis and true labels on the y-axis. Include absolute counts and text class labels.
+performance_metrics_visualization.png - Create a bar chart of the final test metrics. Include separate bars for Precision, Recall, and F1-Score, scaled from 0.0 to 1.0.
 Plot only values the experiment really measured. Close every figure after saving it.
 ============================================================
 15b. TWO-MODEL PROTOCOL FOR UNSEEN ATTACKS
@@ -1696,6 +1695,15 @@ why this proposed model suits the class imbalance and the unseen attack, and fil
 relationship_to_rank1_hypothesis. In experiment_summary.json also write baseline_model (name and
 the classes it was trained on) and proposed_model (name and the classes it was trained on).
 
+============================================================
+15c. STANDARD CLASSIFICATION METRICS
+============================================================
+For every classification experiment ALWAYS write these scalar metrics to metrics.json,
+computed on the held-out test split with library evaluation functions: accuracy,
+precision_macro, recall_macro, f1_macro, precision_weighted, recall_weighted, f1_weighted and
+false_alarm_rate. Published papers report these names, so they make the results comparable.
+Also write the per-class results as dictionaries keyed by the exact class label used in the
+dataset (for example SlowrateDoS): per_class_precision, per_class_recall and per_class_f1.
 ============================================================
 16. CODE QUALITY
 ============================================================
