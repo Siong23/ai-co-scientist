@@ -1,8 +1,10 @@
+import base64
 import os
 import re
 import threading
 import time
 from copy import deepcopy
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -2185,6 +2187,23 @@ def get_references_html(cycle_details: Dict, research_goal: Optional[ResearchGoa
     return html
 
 
+HEADER_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "guard5g-logo.png"
+
+
+def header_html(logo_path: Path = HEADER_LOGO_PATH) -> str:
+    """Return the page title, with the logo inlined as a data URI when available."""
+    title = "AI Co-Scientist - Hypothesis Evolution System"
+    try:
+        encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+    except OSError:
+        return f"<h1>🔬 {title}</h1>"
+    logo = (
+        f'<img src="data:image/png;base64,{encoded}" alt="" '
+        'style="height:1.6em;width:auto;vertical-align:middle;margin-right:0.35em;">'
+    )
+    return f'<h1 style="display:flex;align-items:center;">{logo}{title}</h1>'
+
+
 def create_gradio_interface():
     """Create the Gradio interface."""
 
@@ -2335,7 +2354,7 @@ def create_gradio_interface():
             sidebar_delete_status = gr.Markdown()
 
         # Header
-        gr.Markdown("# 🔬 AI Co-Scientist - Hypothesis Evolution System")
+        gr.HTML(header_html())
         gr.Markdown("Generate, review, rank, and evolve research hypotheses using AI agents.")
 
         # Deployment status
