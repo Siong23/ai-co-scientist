@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="GUARD-5G logo">
+<defs>
+  <linearGradient id="g5-shield" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1e3a8a"/><stop offset="1" stop-color="#0f172a"/>
+  </linearGradient>
+  <linearGradient id="g5-bolt" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#7c3aed"/>
+  </linearGradient>
+  <linearGradient id="g5-text" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#a5f3fc"/><stop offset=".45" stop-color="#22d3ee"/><stop offset="1" stop-color="#0ea5e9"/>
+  </linearGradient>
+  <linearGradient id="g5-ribbon" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#6d28d9"/>
+  </linearGradient>
+  <filter id="g5-glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>
+  <path id="g5-five" d="M238 186H172L167 238C182 228 200 226 212 228C238 232 248 252 246 268C244 290 226 304 202 304C184 304 168 296 158 284"/>
+  <path id="g5-gee" d="M354.8 208.2A52 52 0 1 0 369.8 249.5H324"/>
+</defs>
+<g stroke="#38bdf8" stroke-width="3" stroke-linecap="round" opacity=".8">
+  <path d="M70 86L122 50"/>
+  <path d="M442 86L390 50"/>
+  <path d="M70 410L118 456"/>
+  <path d="M442 410L394 456"/>
+</g>
+<g stroke="#1c1b2e" stroke-width="4">
+  <circle cx="70" cy="86" r="8" fill="#22d3ee"/>
+  <circle cx="122" cy="50" r="8" fill="#a3e635"/>
+  <circle cx="442" cy="86" r="8" fill="#f59e0b"/>
+  <circle cx="390" cy="50" r="8" fill="#22d3ee"/>
+  <circle cx="70" cy="410" r="8" fill="#22d3ee"/>
+  <circle cx="118" cy="456" r="8" fill="#f59e0b"/>
+  <circle cx="442" cy="410" r="8" fill="#a3e635"/>
+  <circle cx="394" cy="456" r="8" fill="#22d3ee"/>
+</g>
+<path d="M180 26V32.666666666666664M180 39.333333333333336V46M170 36H176.66666666666666M183.33333333333334 36H190" stroke="#a3e635" stroke-width="3.5" stroke-linecap="round"/>
+<path d="M350 473V479.0M350 485.0V491M341 482H347.0M353.0 482H359" stroke="#a3e635" stroke-width="3.5" stroke-linecap="round"/>
+<path d="M110.1 139.6A176 176 0 0 0 110.1 336.4" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M110.1 139.6A176 176 0 0 0 110.1 336.4" fill="none" stroke="#22d3ee" stroke-width="11" stroke-linecap="round"/>
+<path d="M401.9 139.6A176 176 0 0 1 401.9 336.4" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M401.9 139.6A176 176 0 0 1 401.9 336.4" fill="none" stroke="#22d3ee" stroke-width="11" stroke-linecap="round"/>
+<path d="M85.2 122.8A206 206 0 0 0 85.2 353.2" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M85.2 122.8A206 206 0 0 0 85.2 353.2" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round"/>
+<path d="M426.8 122.8A206 206 0 0 1 426.8 353.2" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M426.8 122.8A206 206 0 0 1 426.8 353.2" fill="none" stroke="#ffffff" stroke-width="11" stroke-linecap="round"/>
+<path d="M60.3 106.0A236 236 0 0 0 60.3 370.0" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M60.3 106.0A236 236 0 0 0 60.3 370.0" fill="none" stroke="#22d3ee" stroke-width="11" stroke-linecap="round"/>
+<path d="M451.7 106.0A236 236 0 0 1 451.7 370.0" fill="none" stroke="#1c1b2e" stroke-width="22" stroke-linecap="round"/>
+<path d="M451.7 106.0A236 236 0 0 1 451.7 370.0" fill="none" stroke="#22d3ee" stroke-width="11" stroke-linecap="round"/>
+<g stroke="#1c1b2e" stroke-width="6" stroke-linecap="round">
+  <path d="M150 474H330"/>
+  <path d="M178 488H300"/>
+  <path d="M120 488H210"/>
+  <path d="M200 502H280"/>
+  <path d="M300 502H318"/>
+</g>
+<path d="M256 66C300 90 345 102 388 106V236C388 330 332 396 256 434C180 396 124 330 124 236V106C167 102 212 90 256 66Z" fill="url(#g5-shield)" stroke="#1c1b2e" stroke-width="10" stroke-linejoin="round"/>
+<path d="M256 82C296 103 336 114 374 118V236C374 320 324 380 256 416C188 380 138 320 138 236V118C176 114 216 103 256 82Z" fill="none" stroke="#22d3ee" stroke-opacity=".55" stroke-width="3"/>
+<path d="M224 40H350L298 176H352L230 470L260 284H190Z" fill="url(#g5-bolt)" stroke="#1c1b2e" stroke-width="9" stroke-linejoin="round"/>
+<path d="M240 56L222 120" stroke="#e9d5ff" stroke-width="7" stroke-linecap="round" opacity=".85"/>
+<g transform="translate(256 245) scale(.9) translate(-271 -245)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <g stroke="#22d3ee" stroke-width="52" opacity=".55" filter="url(#g5-glow)"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="#5b21b6" stroke-width="48" transform="translate(7 8)"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="#1c1b2e" stroke-width="48"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="url(#g5-text)" stroke-width="30"><use href="#g5-five"/><use href="#g5-gee"/></g>
+  <g stroke="#ffffff" stroke-width="5" opacity=".7" transform="translate(-4 -5)" stroke-dasharray="40 400"><use href="#g5-five"/><use href="#g5-gee"/></g>
+</g>
+<path d="M126 340H156V386H126L138 363.0Z" fill="#4c1d95" stroke="#1c1b2e" stroke-width="6" stroke-linejoin="round"/>
+<path d="M386 340H356V386H386L374 363.0Z" fill="#4c1d95" stroke="#1c1b2e" stroke-width="6" stroke-linejoin="round"/>
+<rect x="146" y="330" width="220" height="46" rx="6" fill="url(#g5-ribbon)" stroke="#1c1b2e" stroke-width="6"/>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <g stroke="#1c1b2e" stroke-width="10"><path transform="translate(179.0 340.0)" d="M19.5 4.5A11 13 0 1 0 22 15H12"/><path transform="translate(212.0 340.0)" d="M0 0V16A11 10 0 0 0 22 16V0"/><path transform="translate(245.0 340.0)" d="M0 26L11 0L22 26M4.5 17H17.5"/><path transform="translate(278.0 340.0)" d="M0 26V0H12A7 6.5 0 0 1 12 13H0M11 13L22 26"/><path transform="translate(311.0 340.0)" d="M0 0V26H8A13 13 0 0 0 8 0Z"/></g>
+  <g stroke="#ffffff" stroke-width="5"><path transform="translate(179.0 340.0)" d="M19.5 4.5A11 13 0 1 0 22 15H12"/><path transform="translate(212.0 340.0)" d="M0 0V16A11 10 0 0 0 22 16V0"/><path transform="translate(245.0 340.0)" d="M0 26L11 0L22 26M4.5 17H17.5"/><path transform="translate(278.0 340.0)" d="M0 26V0H12A7 6.5 0 0 1 12 13H0M11 13L22 26"/><path transform="translate(311.0 340.0)" d="M0 0V26H8A13 13 0 0 0 8 0Z"/></g>
+</g>
+</svg>
