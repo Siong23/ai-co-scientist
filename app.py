@@ -2192,7 +2192,7 @@ HEADER_LOGO_PATH = Path(__file__).resolve().parent / "assets" / "guard5g-logo.pn
 
 def header_html(logo_path: Path = HEADER_LOGO_PATH) -> str:
     """Return the page title, with the logo inlined as a data URI when available."""
-    title = "AI Co-Scientist - Hypothesis Evolution System"
+    title = "5G Guard AI Co-Scientist"
     try:
         encoded = base64.b64encode(logo_path.read_bytes()).decode("ascii")
     except OSError:
@@ -2334,7 +2334,7 @@ def create_gradio_interface():
         }
         """
 
-    with gr.Blocks(title="AI Co-Scientist - Hypothesis Evolution System") as demo:
+    with gr.Blocks(title="5G Guard AI Co-Scientist") as demo:
         with gr.Sidebar(open=False, width=320, elem_id="research-history-sidebar"):
             gr.Markdown("## Research history")
             gr.Markdown(

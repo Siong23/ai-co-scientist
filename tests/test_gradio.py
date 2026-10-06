@@ -49,11 +49,11 @@ def test_gradio_interface_constructs_without_network(gradio_app_module):
 def test_header_inlines_logo_and_falls_back_without_it(gradio_app_module, tmp_path):
     header = gradio_app_module.header_html()
     assert 'src="data:image/png;base64,' in header
-    assert "AI Co-Scientist - Hypothesis Evolution System" in header
+    assert "5G Guard AI Co-Scientist" in header
 
     fallback = gradio_app_module.header_html(tmp_path / "missing.png")
     assert "<img" not in fallback
-    assert "AI Co-Scientist - Hypothesis Evolution System" in fallback
+    assert "5G Guard AI Co-Scientist" in fallback
 
 
 def test_experiment_results_format_metrics_to_two_decimals(gradio_app_module):
