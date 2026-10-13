@@ -723,7 +723,7 @@ def render_report(run: Dict[str, Any]) -> str:
 
     if comparison_result:
         html_parts.append(
-            _comparison_report_section(comparison_result)
+            _comparison_report_section(comparison_result, experiment_result)
         )
 
     # ------------------------------------------------------------

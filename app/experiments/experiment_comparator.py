@@ -3781,6 +3781,90 @@ Do not invent missing experimental details.
     # Complete Comparison
     # ============================================================
 
+    def _align_per_class_metrics(self, paper_result, experiment_result):
+        """[per-class-align] Pair per-class metrics of the paper with the experiment's.
+
+        The experiment reports per_class_f1 / per_class_precision / per_class_recall as
+        dictionaries (or lists aligned with `classes`), which the scalar comparison ignores. They
+        are flattened to f1_<class> / precision_<class> / recall_<class> (class label lower-cased,
+        punctuation removed) and the paper's metrics that name the same class and metric
+        (f1_slow_rate_dos, "UDP Scan F1-score", ...) are renamed to the same keys.
+        Best effort only: any problem returns the inputs unchanged.
+        """
+        import math
+        import re
+
+        def squash(text):
+            return re.sub(r"[^a-z0-9]+", "", str(text).lower())
+
+        try:
+            raw = experiment_result.get("raw_metrics") if isinstance(experiment_result, dict) else None
+            paper_metrics = paper_result.get("metrics") if isinstance(paper_result, dict) else None
+            if not isinstance(raw, dict) or not isinstance(paper_metrics, dict):
+                return paper_result, experiment_result
+
+            pattern_a = re.compile(r"^(?:perclass|classwise)(f1score|f1|precision|recall|accuracy)$")
+            pattern_b = re.compile(r"^(f1score|f1|precision|recall|accuracy)(?:perclass|byclass|classwise)$")
+            class_list = raw.get("classes") if isinstance(raw.get("classes"), list) else None
+            flat, slugs = {}, set()
+            for key, value in raw.items():
+                match = pattern_a.match(squash(key)) or pattern_b.match(squash(key))
+                if not match:
+                    continue
+                if isinstance(value, list) and class_list and len(value) == len(class_list):
+                    value = dict(zip(class_list, value))
+                if not isinstance(value, dict):
+                    continue
+                metric = "f1" if match.group(1).startswith("f1") else match.group(1)
+                for class_name, class_value in value.items():
+                    slug = squash(class_name)
+                    if len(slug) < 3 or isinstance(class_value, bool):
+                        continue
+                    try:
+                        number = float(class_value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(number):
+                        flat[f"{metric}_{slug}"] = number
+                        slugs.add(slug)
+            if not flat:
+                return paper_result, experiment_result
+
+            new_experiment = dict(experiment_result)
+            new_metrics = dict(new_experiment.get("metrics") or {})
+            for name, number in flat.items():
+                new_metrics.setdefault(name, number)
+            new_experiment["metrics"] = new_metrics
+
+            rename = {}
+            for name in paper_metrics:
+                squashed = squash(name)
+                for slug in sorted(slugs, key=len, reverse=True):
+                    if slug not in squashed:
+                        continue
+                    rest = squashed.replace(slug, "", 1)
+                    for junk in ("score", "per", "class", "metric", "for", "of"):
+                        rest = rest.replace(junk, "")
+                    if rest in ("f1", "precision", "recall", "accuracy"):
+                        rename[name] = f"{rest}_{slug}"
+                        break
+            if not rename:
+                return paper_result, new_experiment
+
+            new_paper = dict(paper_result)
+            for section_name in ("metrics", "metric_definitions", "reference_metrics"):
+                section = paper_result.get(section_name)
+                if isinstance(section, dict):
+                    renamed = {}
+                    for name, value in section.items():
+                        renamed.setdefault(rename.get(name, name), value)
+                    new_paper[section_name] = renamed
+            new_paper["per_class_alignment"] = {"classes": sorted(slugs), "renamed_paper_metrics": rename}
+            return new_paper, new_experiment
+        except Exception:  # alignment must never break a comparison
+            return paper_result, experiment_result
+
+
     def compare(
         self,
         hypothesis: Any,
@@ -3916,6 +4000,13 @@ Do not invent missing experimental details.
             # ----------------------------------------------------
             # 3. Check compatibility
             # ----------------------------------------------------
+
+            # [per-class-align] pair per-class metrics (f1_<class> ...) of the paper and the experiment
+            paper_result, extracted_experiment = self._align_per_class_metrics(
+                paper_result, extracted_experiment
+            )
+            result["paper_result"] = paper_result
+            result["experiment_result"] = extracted_experiment
 
             comparability = (
                 self.check_comparability(
